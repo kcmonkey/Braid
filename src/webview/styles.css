@@ -365,16 +365,17 @@ body {
 }
 
 /* LOD content dissolve: when a board flips detail↔far (it entered/left the selected lineage), its
-   `.board__content` remounts (key={lod}) → the new LOD's content fades + lifts into place as the layout
+   `.board__content` remounts (key={lod}) → the new LOD's content fades + zooms into place as the layout
    reflows around it. Deliberately stronger/longer than a bare opacity tick — an earlier 170ms / 3%-scale
-   version was almost imperceptible. transform-origin: top so the card grows from its anchored head,
-   reading as a level-of-detail "zoom in" rather than a pop. Handles live outside .board__content, so
+   version was almost imperceptible. transform-origin: center so the card grows OUTWARD FROM ITS CENTER
+   (a level-of-detail "zoom in" centered on the card) rather than unfurling downward from the head — a
+   pure scale (no translate) keeps the motion directionless. Handles live outside .board__content, so
    their cached geometry / edges are never disturbed. */
-.board__content { animation: board-lod 300ms cubic-bezier(.16, 1, .3, 1); transform-origin: top center; }
+.board__content { animation: board-lod 300ms cubic-bezier(.16, 1, .3, 1); transform-origin: center center; }
 @keyframes board-lod {
-  from { opacity: 0; transform: translateY(10px) scale(.94); }
+  from { opacity: 0; transform: scale(.9); }
   60%  { opacity: 1; }
-  to   { opacity: 1; transform: translateY(0) scale(1); }
+  to   { opacity: 1; transform: scale(1); }
 }
 @media (prefers-reduced-motion: reduce) {
   .board__content { animation: board-lod-fade 200ms ease; }
