@@ -618,11 +618,11 @@ export function needsBranchSummary(signpostId: string, nodes: BoardNodeT[], edge
   return byId[signpostId]?.data.branchSummaryKey !== branchSummaryKey(segment, byId);
 }
 
-// Hard cap on a signpost label's displayed length. The Haiku branch labeler is prompted to be terse, but a
-// model can overrun a soft word-count instruction — so we ALSO clamp at display (principle 17: don't trust
-// the model to self-limit). Tuned to ~one short line at the chip's width; the CSS ellipsis is the final
-// sub-pixel backstop. (policy/mechanism — principle 14)
-export const BRANCH_LABEL_MAX_CHARS = 48;
+// Hard cap on a signpost label's displayed length. The Haiku branch labeler is prompted for a ~6-9-word
+// imperative title (git-commit-subject style, like the official extension's session titles, which top out
+// near 56 chars), but a model can overrun the soft word-count instruction — so we ALSO clamp at display
+// (principle 17: don't trust the model to self-limit). The CSS ellipsis is the final sub-pixel backstop.
+export const BRANCH_LABEL_MAX_CHARS = 60;
 
 /**
  * Normalize a signpost label to a single short line: collapse all whitespace/newlines to single spaces, trim,

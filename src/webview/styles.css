@@ -245,7 +245,7 @@ body {
 /* Plate-less: the signpost label is plain text (no box/border/shadow plate) so it reads as a quiet
    annotation, not a competing card. A strong text-shadow keeps it legible directly over the canvas/cards. */
 .branch-signpost {
-  max-width: 300px;
+  max-width: 380px;
   font-size: 12px; font-weight: 700; line-height: 1.3; letter-spacing: .01em;
   color: var(--accent);
   background: none; border: none; box-shadow: none; border-radius: 0; padding: 0 2px;

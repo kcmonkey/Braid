@@ -379,7 +379,7 @@ describe('clampLabel (signpost label → one short line)', () => {
   });
 
   it('hard-cuts a space-less long token (e.g. CJK) and still caps length', () => {
-    const cjk = '分支签名功能实现与按内容键失效的缓存重生机制全部完成并通过测试以及浮动标签单行化和硬上限裁剪都已落地';
+    const cjk = '分支签名功能实现与按内容键失效的缓存重生机制全部完成并通过测试以及浮动标签单行化和硬上限裁剪命令式标题风格都已经全部落地完成';
     expect(cjk.length).toBeGreaterThan(BRANCH_LABEL_MAX_CHARS); // precondition: must overrun to test truncation
     const out = clampLabel(cjk);
     expect(out.endsWith('…')).toBe(true);
