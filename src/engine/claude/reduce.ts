@@ -6,8 +6,20 @@
 import type { ThinkMark } from '../../webview/merge';
 import { TOOL_RESULT_CAP } from '../../webview/merge';
 import type { ToolUseEvent, ToolResultEvent } from '../types';
-import type { RateLimitSnapshot } from '../../protocol';
+import type { RateLimitSnapshot, SlashCommandSpec } from '../../protocol';
 import { toRateLimitSnapshot } from './account';
+
+/** Map one SDK `SlashCommand` (possibly partial/loose) to a neutral `SlashCommandSpec`. Defensive: only a
+ * string `name` is required; the rest default to safe empties. Shared by reduce + adapter. */
+export function toSlashCommandSpec(c: any): SlashCommandSpec | null {
+  if (!c || typeof c.name !== 'string' || !c.name) return null;
+  return {
+    name: c.name,
+    description: typeof c.description === 'string' ? c.description : '',
+    argumentHint: typeof c.argumentHint === 'string' && c.argumentHint ? c.argumentHint : undefined,
+    aliases: Array.isArray(c.aliases) ? c.aliases.filter((a: any) => typeof a === 'string') : undefined,
+  };
+}
 
 // ---- pure helpers (moved verbatim from extension.ts) ----
 
@@ -92,6 +104,7 @@ export type NeutralEvent =
   | { t: 'toolUse'; turnIndex: number; ev: ToolUseEvent }
   | { t: 'toolResult'; turnIndex: number; ev: ToolResultEvent }
   | { t: 'rateLimit'; snapshot: RateLimitSnapshot }             // passive plan-limit snapshot (canvas-level)
+  | { t: 'commands'; commands: SlashCommandSpec[] }             // mid-session slash-command list refresh
   | { t: 'result'; isError: boolean };                          // turn's result message (adapter settles)
 
 const view = (s: ParseState) => s.answer + s.pending;
@@ -119,6 +132,11 @@ export function reduceClaudeMessage(s: ParseState, m: any, now: number): Neutral
   } else if (m.type === 'system' && (m.subtype === 'status' || m.subtype === 'compact_boundary')) {
     if (m.subtype === 'status' && m.status === 'compacting') s.autoCompacted = true;
     else if (m.subtype === 'compact_boundary' && m.compact_metadata?.trigger === 'auto') s.autoCompacted = true;
+  } else if (m.type === 'system' && m.subtype === 'commands_changed') {
+    // Mid-session slash-command change (e.g. a skill discovered in a subdir) — REPLACE the cached list.
+    // Best-effort/defensive: authoritative cold-start is the adapter's listSlashCommands. (knowledge.md)
+    const commands = (Array.isArray(m.commands) ? m.commands : []).map(toSlashCommandSpec).filter(Boolean) as SlashCommandSpec[];
+    out.push({ t: 'commands', commands });
   } else if (m.type === 'stream_event') {
     const ev = m.event;
     if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {

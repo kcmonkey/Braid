@@ -4,6 +4,7 @@
 import type { ThinkMark } from '../webview/merge';
 import type {
   ImageInput, McpServerInfo, EngineId, ModelOption, ProviderAccount, ProviderUsage, RateLimitSnapshot,
+  SlashCommandSpec,
 } from '../protocol';
 
 // EngineId SSOT moved to protocol.ts (shared by both bundles + the catalog). Re-exported here so existing
@@ -67,6 +68,9 @@ export interface EventSink {
   error(boardId: string, turnIndex: number | undefined, message: string): void;
   // Passive plan-limit snapshot captured from the turn stream's `rate_limit_event` (canvas-level, no boardId).
   rateLimit(snapshot: RateLimitSnapshot): void;
+  // Live slash-command refresh: the engine reported a mid-session `commands_changed` (REPLACE the cached
+  // list). Canvas-level (no boardId), like `model`. The cold-start list comes from `listSlashCommands`.
+  commands(commands: SlashCommandSpec[]): void;
 }
 
 /** Channel 2 — the engine asks the host BEFORE running a tool. The Claude adapter wires this to the
@@ -155,5 +159,8 @@ export interface Engine {
   mcpControl(cwd: string): Promise<McpController | null>;
   // Account/usage/auth control session (lazy; host owns lifecycle). null = SDK unavailable.
   accountControl(cwd: string): Promise<AccountController | null>;
+  // The provider's available slash commands for composer autofill (display-side specs). [] = none /
+  // unsupported / SDK unavailable (never throws). Each provider supplies its own set. (multi-provider seam)
+  listSlashCommands(cwd: string): Promise<SlashCommandSpec[]>;
   checkAuth(cwd: string, abort: AbortController): Promise<AuthResult>;
 }

@@ -5,7 +5,7 @@
 // maps / UI and drives this via the neutral Engine contract. (plans/Engine-Abstraction Phase 1+2)
 import type { ProviderConfig } from '../../sdkOptions';
 import { buildSdkOptions } from '../../sdkOptions';
-import type { ImageInput, McpServerInfo } from '../../protocol';
+import type { ImageInput, McpServerInfo, SlashCommandSpec } from '../../protocol';
 import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle,
@@ -14,7 +14,7 @@ import type {
 import { ClaudeAccountControl } from './account';
 import { pathToFileURL } from 'url';
 import {
-  reduceClaudeMessage, buildTurnDone, initParseState, turnView, extractText,
+  reduceClaudeMessage, buildTurnDone, initParseState, turnView, extractText, toSlashCommandSpec,
 } from './reduce';
 import { resolveSdkEntry } from '../../runtime/sdk-provision';
 
@@ -166,6 +166,7 @@ export class ClaudeAdapter implements Engine {
             case 'toolUse': sink.toolUse(boardId, e.turnIndex, e.ev); break;
             case 'toolResult': sink.toolResult(boardId, e.turnIndex, e.ev); break;
             case 'rateLimit': sink.rateLimit(e.snapshot); break;
+            case 'commands': sink.commands(e.commands); break;
             case 'result':
               // interrupted turn ends as error_during_execution/is_error — the user's send-now cut, NOT a
               // real failure → settle done, keep partial. (knowledge.md)
