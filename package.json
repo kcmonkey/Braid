@@ -69,8 +69,8 @@
         },
         "braid.expandAncestorsOnSelect": {
           "type": "boolean",
-          "default": true,
-          "markdownDescription": "When you select a board, also expand its whole parent lineage (ancestors) to the full detail card — a fisheye that shows the conversation you're on. Turn off to expand only the selected board itself (its ancestors stay compact). Idle compose boards always render in detail regardless."
+          "default": false,
+          "markdownDescription": "When you select a board, also expand its whole parent lineage (ancestors) to the full detail card — a fisheye that shows the conversation you're on. Default off: only the selected board itself expands (its ancestors stay compact). Idle compose boards always render in detail regardless."
         },
         "braid.asyncContinuationEnabled": {
           "type": "boolean",

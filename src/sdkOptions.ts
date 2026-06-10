@@ -69,7 +69,7 @@ export const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
 export const DEFAULT_CANVAS_CONFIG: CanvasConfig = {
   autoCompactEnabled: true,
   autoCompactThreshold: 95,
-  expandAncestorsOnSelect: true,
+  expandAncestorsOnSelect: false,
   asyncContinuationEnabled: true,
   asyncContinuationIdleCapMin: 30,
 };

@@ -148,7 +148,7 @@ All settings live under `braid.*`:
 | `notifyOnComplete` | `true` | Toast + status-bar badge when a board finishes (only when you aren't already viewing it). |
 | `autoCompactEnabled` | `true` | Auto-compress a lineage when context usage crosses the threshold. |
 | `autoCompactThreshold` | `95` | Auto-compact trigger, as a percent of the model's context window. |
-| `expandAncestorsOnSelect` | `true` | When you select a board, also expand its whole parent lineage to detail (a fisheye of the conversation you're on). |
+| `expandAncestorsOnSelect` | `false` | When you select a board, also expand its whole parent lineage to detail (a fisheye of the conversation you're on). Default off: only the selected board expands. |
 
 ---
 

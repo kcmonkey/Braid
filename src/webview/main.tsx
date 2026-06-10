@@ -2505,10 +2505,10 @@ function App() {
   );
 
   // Fisheye LOD set: the selected board(s) render at DETAIL, PLUS — when `expandAncestorsOnSelect` is on
-  // (the default, a toggleable setting) — their FULL ancestor lineage. Every other board stays a compact
+  // (an opt-in toggle, default OFF) — their FULL ancestor lineage. Every other board stays a compact
   // FAR gist and the layout reflows to the mixed heights. Plain (non-boundary) ancestor walk — show the
   // whole visual lineage, not merge's cutoff. (isFresh idle boards also render detail; see BoardNode.)
-  const expandAncestors = config?.expandAncestorsOnSelect !== false; // default on (also before config loads)
+  const expandAncestors = config?.expandAncestorsOnSelect === true; // default OFF (also before config loads)
   const detailIds = useMemo(() => {
     const s = new Set<string>(selectedIds);
     if (expandAncestors) for (const id of selectedIds) for (const a of ancestorsOf(id, edges)) s.add(a);
@@ -2598,9 +2598,10 @@ function App() {
     const mid = `b${idRef.current++}`;
     const merged: BoardNodeT = {
       // Select the merge node (not the old boards). Two payoffs, both fixing the post-merge viewport drift:
-      // (1) with expandAncestorsOnSelect on (default), detailIds = {mid} ∪ ancestors(mid) = the merge node
-      //     PLUS exactly the source boards/lineage the user had selected to merge (already detail) — so they
-      //     STAY detail instead of collapsing to far. No collapse → no measured-height churn → no rearrange.
+      // (1) with expandAncestorsOnSelect on (opt-in; default OFF), detailIds = {mid} ∪ ancestors(mid) = the
+      //     merge node PLUS exactly the source boards/lineage the user had selected to merge (already detail)
+      //     — so they STAY detail instead of collapsing to far. No collapse → no churn. (Default off: only the
+      //     merge node stays detail; the sources collapse to far — anchor pin (2) still keeps the viewport put.)
       // (2) it makes the merge node the relayoutAnchored pin (sizeSig effect reads the selected id), so any
       //     residual repack keeps the merge node fixed under the viewport fitView framed — no fly-out.
       // Only 1 node selected → the merge bar (≥2) stays hidden. (position: layoutGraph assigns the real spot)
