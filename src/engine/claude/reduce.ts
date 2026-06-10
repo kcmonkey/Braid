@@ -138,6 +138,18 @@ export function reduceClaudeMessage(s: ParseState, m: any, now: number): Neutral
     // Best-effort/defensive: authoritative cold-start is the adapter's listSlashCommands. (knowledge.md)
     const commands = (Array.isArray(m.commands) ? m.commands : []).map(toSlashCommandSpec).filter(Boolean) as SlashCommandSpec[];
     out.push({ t: 'commands', commands });
+  } else if (m.type === 'system' && (m.subtype === 'task_started' || m.subtype === 'task_updated' || m.subtype === 'task_notification')) {
+    // Background-task lifecycle (async continuation). started → has description; updated → patch.status;
+    // notification → status ('completed'|'failed'|'stopped') + summary. Fields optional/defensive. 异步续接.
+    const phase = m.subtype === 'task_started' ? 'started' : m.subtype === 'task_updated' ? 'updated' : 'notification';
+    out.push({ t: 'task', turnIndex: s.turnIndex, ev: {
+      id: m.task_id,
+      phase,
+      status: m.subtype === 'task_notification' ? m.status : m.patch?.status,
+      description: m.description,
+      summary: m.summary,
+      toolUseId: m.tool_use_id,
+    } });
   } else if (m.type === 'stream_event') {
     const ev = m.event;
     if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {

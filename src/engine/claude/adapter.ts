@@ -10,6 +10,7 @@ import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle,
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
+  AsyncPending,
 } from '../types';
 import { ClaudeAccountControl } from './account';
 import { pathToFileURL } from 'url';
