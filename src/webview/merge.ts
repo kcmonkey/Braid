@@ -613,6 +613,27 @@ export function needsBranchSummary(signpostId: string, nodes: BoardNodeT[], edge
   return byId[signpostId]?.data.branchSummaryKey !== branchSummaryKey(segment, byId);
 }
 
+// Hard cap on a signpost label's displayed length. The Haiku branch labeler is prompted to be terse, but a
+// model can overrun a soft word-count instruction — so we ALSO clamp at display (principle 17: don't trust
+// the model to self-limit). Tuned to ~one short line at the chip's width; the CSS ellipsis is the final
+// sub-pixel backstop. (policy/mechanism — principle 14)
+export const BRANCH_LABEL_MAX_CHARS = 48;
+
+/**
+ * Normalize a signpost label to a single short line: collapse all whitespace/newlines to single spaces, trim,
+ * and hard-cap to BRANCH_LABEL_MAX_CHARS — cutting at a word boundary (last space within budget) when the text
+ * is space-delimited, else a hard cut — appending an ellipsis when truncated. Pure → unit-tested. SSOT for
+ * "how long can a branch label be"; applied wherever the label is rendered (branchSummary OR miniSummary fallback).
+ */
+export function clampLabel(s: string): string {
+  const one = (s ?? '').replace(/\s+/g, ' ').trim();
+  if (one.length <= BRANCH_LABEL_MAX_CHARS) return one;
+  const slice = one.slice(0, BRANCH_LABEL_MAX_CHARS);
+  const lastSpace = slice.lastIndexOf(' ');
+  const base = lastSpace > BRANCH_LABEL_MAX_CHARS * 0.6 ? slice.slice(0, lastSpace) : slice;
+  return base.replace(/[\s.,;:!?·、，。；：！？]+$/, '') + '…';
+}
+
 /**
  * M12 drag-fusion: can the dragged board fuse into the drop-target board? Only an ADJACENT parent↔child
  * pair joined by a direct `fork` edge, both `done`, and the descendant carrying a sessionId (its session

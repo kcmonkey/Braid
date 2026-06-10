@@ -8,6 +8,7 @@ import {
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, BRANCH_SUMMARY_VERSION,
+  clampLabel, BRANCH_LABEL_MAX_CHARS,
 } from './merge';
 
 const noop = () => {};
@@ -359,6 +360,35 @@ describe('branchSummaryKey / needsBranchSummary', () => {
     const edges = [compactEdge('K', 'c1')];
     expect(branchSegment('K', nodes, edges)).toEqual(['K', 'c1']);
     expect(needsBranchSummary('K', nodes, edges)).toBe(true);              // idle compact + done child → summarize
+  });
+});
+
+describe('clampLabel (signpost label → one short line)', () => {
+  it('returns short text unchanged (trimmed, whitespace collapsed to one line)', () => {
+    expect(clampLabel('  Engine\nabstraction  layer ')).toBe('Engine abstraction layer'); // newline + double space → single
+    expect(clampLabel('Merge dedup')).toBe('Merge dedup');
+  });
+
+  it('hard-caps overrun text at a word boundary with an ellipsis, within the budget', () => {
+    const long = 'Implements the branch signpost labels with Haiku synthesis and per content key staleness';
+    const out = clampLabel(long);
+    expect(out.endsWith('…')).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(BRANCH_LABEL_MAX_CHARS + 1); // +1 for the ellipsis char
+    expect(out).not.toMatch(/\s…$/);          // no trailing space before the ellipsis
+    expect(long.startsWith(out.slice(0, -1).trimEnd())).toBe(true); // a clean prefix of the original
+  });
+
+  it('hard-cuts a space-less long token (e.g. CJK) and still caps length', () => {
+    const cjk = '分支签名功能实现与按内容键失效的缓存重生机制全部完成并通过测试以及浮动标签单行化和硬上限裁剪都已落地';
+    expect(cjk.length).toBeGreaterThan(BRANCH_LABEL_MAX_CHARS); // precondition: must overrun to test truncation
+    const out = clampLabel(cjk);
+    expect(out.endsWith('…')).toBe(true);
+    expect(out.length).toBeLessThanOrEqual(BRANCH_LABEL_MAX_CHARS + 1);
+  });
+
+  it('handles empty / undefined-ish input', () => {
+    expect(clampLabel('')).toBe('');
+    expect(clampLabel('   ')).toBe('');
   });
 });
 

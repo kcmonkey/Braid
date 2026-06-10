@@ -16,7 +16,7 @@ import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
   GRAPH_VERSION, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit,
-  isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, MAX_CONCURRENT_BRANCH_SUMMARIES,
+  isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
@@ -2462,7 +2462,8 @@ function App() {
     for (const n of nodes) {
       if (!isSignpost(n.id, nodes, edges)) continue;
       const multi = branchSegment(n.id, nodes, edges).length > 1;
-      const text = (multi && n.data.branchSummary) ? n.data.branchSummary : (n.data.miniSummary || '');
+      const raw = (multi && n.data.branchSummary) ? n.data.branchSummary : (n.data.miniSummary || '');
+      const text = clampLabel(raw); // one short line, hard-capped (the model can overrun the terse prompt)
       if (text) m.set(n.id, text);
     }
     return m;
