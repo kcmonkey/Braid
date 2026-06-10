@@ -33,8 +33,8 @@ async function* input(first) {
 
 const PROMPT_T1 =
   'Run exactly this shell command as a BACKGROUND task (use the run_in_background option, do NOT wait for it inline): ' +
-  '`sleep 5 && echo PROBE_BG_DONE`. After starting it in the background, immediately end your turn with a one-line note that ' +
-  'you started it and will report when it finishes. Do not poll it. Do not run anything else.';
+  '`node -e "setTimeout(()=>console.log(\'PROBE_BG_DONE\'),5000)"`. After starting it in the background, immediately end ' +
+  'your turn with a one-line note that you started it and will report when it finishes. Do not poll it. Do not run anything else.';
 const PROMPT_T2 =
   'Use the ScheduleWakeup tool to schedule a wakeup 60 seconds from now (delaySeconds: 60), reason "probe", and a short ' +
   'prompt asking yourself to say PROBE_WOKE. Then immediately end your turn. Do not do anything else.';
