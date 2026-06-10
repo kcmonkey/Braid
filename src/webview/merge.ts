@@ -1072,13 +1072,13 @@ export const edgeStyle = (kind: EdgeKind) =>
       ? { stroke: '#57ab5a', strokeWidth: 2, strokeDasharray: '5 4' }
       : { stroke: '#d29922', strokeWidth: 2, strokeDasharray: '5 4' };
 
-/** Single source of truth for an edge's id format, kind tag, and style. `type: 'straight'` → React Flow
- * draws a straight line between handles instead of the default bezier curve. */
+/** Single source of truth for an edge's id format, kind tag, and style. No `type` → React Flow draws the
+ * default bezier curve (the original design); the handle-centering fix keeps it exiting the board's side. */
 export function makeEdge(source: string, target: string, kind: EdgeKind): Edge {
   const prefix = kind === 'merge' ? 'm' : kind === 'compact' ? 'c' : 'e';
   return {
     id: `${prefix}-${source}-${target}`,
-    source, target, type: 'straight', data: { kind }, style: edgeStyle(kind),
+    source, target, data: { kind }, style: edgeStyle(kind),
   };
 }
 
