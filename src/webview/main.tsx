@@ -1120,16 +1120,6 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
     {/* The board slot sizes to its card in BOTH LODs now (no fixed height): far cards are content-tight
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
-    {/* far-far map: the branch summary floats ABOVE the thin board, transparent (plain text, no plate).
-        Rendered in node DOM → scales with the board; in-flow (first slot child) → the layout reserves its
-        space so rows don't collide. The label box has a FIXED height (filled for signposts, empty for
-        others), so every far-far node's box is the same height → all the bars sit at the same level and
-        connected bars line up horizontally. The text is bottom-anchored so it hugs the bar. */}
-    {lod === 'far-far' && (
-      <div className="board__toplabel nodrag nopan" title={signpostLabel || undefined}>
-        <span className="board__toplabel-text">{signpostLabel ?? ''}</span>
-      </div>
-    )}
     <div
       className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''}`}
     >
@@ -1138,8 +1128,13 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           detail↔far switch. Handles stay OUTSIDE it so React Flow's cached handle geometry / edges
           are never disturbed (the classic handle-remount pitfall). */}
       <div className="board__content" key={lod}>
-      {/* Digest tags: a strip at the TOP for detail/far. In 'far-far' they render INLINE in the (thin) head
-          row instead — see below — so the board is one slim bar. */}
+      {/* far-far: the branch summary is the board's TOP content — PART of the card (panel background, inside
+          the border), not a floating overlay. The badge + tags sit in the slim head row below it. */}
+      {lod === 'far-far' && signpostLabel && (
+        <div className="board__farfarsummary nodrag nopan" title={signpostLabel}>{signpostLabel}</div>
+      )}
+      {/* Digest tags: a strip at the TOP for detail/far. In 'far-far' they render INLINE in the head row
+          (below the summary) instead. */}
       {lod !== 'far-far' && <TagChips tags={data.tags} />}
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
