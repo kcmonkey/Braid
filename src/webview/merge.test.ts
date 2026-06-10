@@ -705,13 +705,13 @@ describe('hasPendingPermission (needs-approval state)', () => {
 });
 
 describe('nextPermMode (Shift+Tab permission cycle)', () => {
-  it('cycles default → acceptEdits → plan → default', () => {
+  it('cycles default → acceptEdits → plan → bypassPermissions → default', () => {
     expect(nextPermMode('default')).toBe('acceptEdits');
     expect(nextPermMode('acceptEdits')).toBe('plan');
-    expect(nextPermMode('plan')).toBe('default');
-  });
-  it('jumps to default from a mode outside the cycle (bypass / inherit / unknown)', () => {
+    expect(nextPermMode('plan')).toBe('bypassPermissions');
     expect(nextPermMode('bypassPermissions')).toBe('default');
+  });
+  it('jumps to default from a mode outside the cycle (inherit / unknown)', () => {
     expect(nextPermMode('inherit')).toBe('default');
     expect(nextPermMode('')).toBe('default');
   });

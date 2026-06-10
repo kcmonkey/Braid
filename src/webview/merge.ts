@@ -735,13 +735,13 @@ export function hasPendingPermission(d: BoardData): boolean {
   return boardTurns(d).some((t) => (t.steps ?? []).some((s) => s.permission != null && s.result == null));
 }
 
-// Permission modes the Shift+Tab / canvas-chip cycle steps through, in order — matches the official
-// extension's Normal → Auto-accept edits → Plan. `bypassPermissions` and `inherit` are intentionally
-// excluded from the quick cycle (still selectable in Settings; bypass is dangerous to land on by accident).
-// Policy in data (principle 14). Pure → unit-tested.
-export const PERM_MODE_CYCLE = ['default', 'acceptEdits', 'plan'] as const;
+// Permission modes the Shift+Tab / canvas-chip cycle steps through, in order. Includes
+// `bypassPermissions` (added at the user's explicit request so the quick toggle can reach it; it
+// renders red as a safety signal). Only `inherit` (and unknown modes) stay out of the cycle —
+// `inherit` is still selectable in Settings. Policy in data (principle 14). Pure → unit-tested.
+export const PERM_MODE_CYCLE = ['default', 'acceptEdits', 'plan', 'bypassPermissions'] as const;
 
-// The next mode in the cycle after `current`. A mode outside the cycle (bypass/inherit/unknown) → the
+// The next mode in the cycle after `current`. A mode outside the cycle (inherit/unknown) → the
 // first entry ('default'), so Shift+Tab always lands on a known cycle state. Pure → unit-tested.
 export function nextPermMode(current: string): string {
   const i = PERM_MODE_CYCLE.indexOf(current as typeof PERM_MODE_CYCLE[number]);

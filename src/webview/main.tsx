@@ -1692,30 +1692,28 @@ const PERM_OPTS: { value: string; label: string }[] = [
   { value: 'plan', label: 'plan · no tool execution' },
   { value: 'bypassPermissions', label: 'bypass · skip approval' },
 ];
-// Short icon+label for the always-visible canvas permission-mode chip (PermModeHint). Mirrors the modes
-// above but compact; bypass is flagged danger-styled. Unknown modes fall back to a generic lock.
-const PERM_DISPLAY: Record<string, { icon: string; label: string }> = {
-  default: { icon: '🛡', label: 'default' },
-  acceptEdits: { icon: '✎', label: 'acceptEdits' },
-  plan: { icon: '📋', label: 'plan' },
-  bypassPermissions: { icon: '⚡', label: 'bypass' },
-  inherit: { icon: '⚙', label: 'inherit' },
+// Display label for each permission mode in the always-visible canvas chip (PermModeHint). Just the
+// word — no icons. Unknown modes fall back to the raw mode string.
+const PERM_DISPLAY: Record<string, string> = {
+  default: 'default',
+  acceptEdits: 'acceptEdits',
+  plan: 'plan',
+  bypassPermissions: 'bypass',
+  inherit: 'inherit',
 };
 
 // Always-visible permission-mode chip (top-left, twin of the Ctrl+scroll zoom hint). Read-only
-// indicator: shows the active mode; it does NOT switch on click. Cycle it with Shift+Tab
-// (default → acceptEdits → plan) or change any mode in Settings. bypass is shown danger-styled so
-// "tools run unattended" is never silent. The mode is the global active-provider setting.
+// indicator: just the active mode word as plain text; it does NOT switch on click. Cycle it with
+// Shift+Tab (default → acceptEdits → plan → bypass) or change any mode in Settings. bypass renders
+// red so "tools run unattended" is never silent. The mode is the global active-provider setting.
 function PermModeHint({ mode }: { mode: string }) {
-  const d = PERM_DISPLAY[mode] ?? { icon: '🔒', label: mode };
+  const label = PERM_DISPLAY[mode] ?? mode;
   return (
     <div
       className={`perm-hint nodrag nopan${mode === 'bypassPermissions' ? ' perm-hint--danger' : ''}`}
-      title="Permission mode — Shift+Tab to cycle (default → acceptEdits → plan); change any mode in Settings"
+      title="Permission mode — Shift+Tab to cycle (default → acceptEdits → plan → bypass); change any mode in Settings"
     >
-      <span className="perm-hint__ic">{d.icon}</span>
-      <span className="perm-hint__mode">{d.label}</span>
-      <kbd>⇧⇥</kbd>
+      <span className="perm-hint__mode">{label}</span>
     </div>
   );
 }
