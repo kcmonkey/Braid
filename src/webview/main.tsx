@@ -921,6 +921,11 @@ const TAG_FLOOR_ZOOM = 0.85;
 // only when crossing the threshold, not on every zoom delta; the LOD-height change then flows through the
 // existing measured-size → relayoutAnchored repack (same path as selection-driven detail↔far). Tunable.
 const COMPRESS_ZOOM = 0.55;
+// At/above this zoom the signpost label is HIDDEN: you're zoomed in close enough to read the cards
+// directly (or focused a detail lineage), so the floating branch label is redundant clutter. It only
+// earns its place in the zoomed-out "map" view (zoom < this AND the board isn't itself in detail). Must be
+// > COMPRESS_ZOOM so there's a visible band. Same boolean-selector pattern → re-render only on crossing. Tunable.
+const LABEL_HIDE_ZOOM = 0.9;
 function TagChips({ tags }: { tags?: BoardTag[] }) {
   // Re-renders only when the zoom factor (transform[2]) changes — panning (transform[0]/[1]) is ignored.
   const zoom = useStore((s) => s.transform[2]);
@@ -1052,6 +1057,10 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // at that scale), so even the detail lineage collapses + the graph repacks tighter around the labels.
   const zoomCompressed = useStore((s) => s.transform[2] < COMPRESS_ZOOM);
   const lod: Lod = !zoomCompressed && (detailSet.has(id) || isFresh) ? 'detail' : 'far';
+  // Signpost label visibility: only in the zoomed-out map view. Hidden when this board is in DETAIL (its
+  // card already shows the full content) OR when zoomed in past LABEL_HIDE_ZOOM (cards are readable, label
+  // is redundant). Boolean selector → re-render only when crossing the threshold, not every zoom delta.
+  const zoomReadable = useStore((s) => s.transform[2] >= LABEL_HIDE_ZOOM);
   // A just-triggered compact node, still running /compact (no prompt yet) → show the compacting spinner.
   // Once the user asks a question in it, prompt is set and it renders as a normal streaming turn.
   const compacting = !!data.compact && data.status === 'streaming' && !data.prompt;
@@ -1118,8 +1127,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
     <>
     {/* Branch-Signposts: floating "this branch explores X" label above structural nodes. NodeToolbar is
         portal-rendered and does NOT scale with the viewport, so it stays readable even when the card shrinks
-        to a far-LOD gist. Shown only when a label exists (signpost + non-empty text). */}
-    {signpostLabel && (
+        to a far-LOD gist. Shown only in the zoomed-out map view: a non-empty label, the board NOT in detail
+        (its card already shows full content), and not zoomed in past LABEL_HIDE_ZOOM (cards are readable). */}
+    {signpostLabel && lod !== 'detail' && !zoomReadable && (
       <NodeToolbar position={Position.Top} isVisible offset={6} align="center">
         <div className="branch-signpost nodrag nopan" title={signpostLabel}>{signpostLabel}</div>
       </NodeToolbar>
