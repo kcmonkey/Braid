@@ -1127,6 +1127,18 @@ body {
 .settings__warn { font-size: 11px; line-height: 1.45; color: var(--fork); }
 .settings__cur { color: var(--text); font-weight: 700; margin-left: 4px; }
 
+/* Provider-scoped sectioned settings dropdown (provider spine + Generation/Permissions/Canvas sections) */
+.settings__panel--sectioned { width: 352px; gap: 10px; }
+.settings__panelsub { font-size: 10.5px; font-weight: 500; color: var(--muted-2); margin-left: 6px; }
+.settings__section { border: 1px solid var(--border-sub); border-radius: 10px; padding: 8px 10px 10px; display: flex; flex-direction: column; gap: 10px; }
+.settings__sectiontitle { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted-2); display: flex; gap: 6px; align-items: baseline; }
+.settings__scope { font-weight: 600; text-transform: none; letter-spacing: 0; }
+.settings__scope--prov { color: var(--accent); }
+.settings__scope--neutral { color: var(--merge); }
+.settings__genwrap { display: flex; flex-direction: column; gap: 10px; }
+.settings__gated { opacity: .5; }
+.settings__gnote { font-size: 10.5px; color: var(--muted-2); font-style: italic; }
+
 /* Effort dots slider (official-style) */
 .settings__dots { display: flex; align-items: center; gap: 7px; }
 .settings__dot {
@@ -1194,6 +1206,80 @@ body {
 .mcprow__tools-toggle:hover { color: var(--text); }
 .mcprow__tools { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 .mcprow__tool { font-size: 10px; color: var(--text-2); background: var(--bg-deep); border: 1px solid var(--border-sub); border-radius: 4px; padding: 1px 6px; }
+
+/* ---- Accounts overlay + provider spine + usage (Provider-Engine-Layer UI) ---- */
+.acct__backdrop { position: fixed; inset: 0; z-index: 59; background: rgba(20,19,18,.55); }
+.acct-panel {
+  position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 60;
+  width: 560px; max-width: 94vw; max-height: 84vh; display: flex; flex-direction: column;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 14px; box-shadow: 0 18px 50px rgba(0,0,0,.5);
+}
+.acct-panel__head { display: flex; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid var(--border-sub); background: linear-gradient(180deg,#37352f,var(--panel)); border-radius: 14px 14px 0 0; }
+.acct-panel__head h2 { font-size: 15px; margin: 0; display: flex; gap: 9px; align-items: baseline; }
+.acct-panel__sub { font-size: 11px; color: var(--muted-2); font-weight: 500; }
+.acct-panel__x { font: inherit; font-size: 18px; line-height: 1; cursor: pointer; background: none; border: none; color: var(--muted); padding: 0 4px; }
+.acct-panel__x:hover { color: var(--text); }
+.acct-panel__body { overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
+.acct-panel__foot { font-size: 11px; color: var(--muted-2); padding: 10px 18px; border-top: 1px solid var(--border-sub); line-height: 1.5; }
+
+/* Shared active-provider selector (also reused inside the settings dropdown) */
+.spine { display: flex; align-items: center; gap: 10px; }
+.spine__lbl { font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: var(--muted-2); }
+.seg { display: flex; gap: 4px; background: var(--bg-deep); border: 1px solid var(--border-sub); border-radius: 9px; padding: 3px; }
+.seg__btn { font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; border: none; background: transparent; color: var(--muted); padding: 5px 11px; border-radius: 6px; display: flex; align-items: center; gap: 6px; }
+.seg__btn:disabled { cursor: not-allowed; opacity: .5; }
+.seg__btn.on { background: var(--panel); color: var(--text); box-shadow: 0 0 0 1px var(--border); }
+.seg__dot { width: 8px; height: 8px; border-radius: 50%; }
+
+/* Provider account card */
+.pcard { border: 1px solid var(--border-sub); border-radius: 12px; background: var(--panel-2); overflow: hidden; }
+.pcard--active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
+.pcard--off { opacity: .62; }
+.pcard__head { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-bottom: 1px solid var(--border-sub); }
+.pcard__dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.pcard__name { font-size: 14px; font-weight: 700; color: var(--text); }
+.pcard__vendor { font-size: 11px; color: var(--muted-2); }
+.pcard__spacer { flex: 1; }
+.badge { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; padding: 3px 8px; border-radius: 6px; white-space: nowrap; }
+.badge--active { color: #1c1b1a; background: var(--accent); }
+.badge--setup { color: var(--muted-2); background: var(--bg-deep); border: 1px solid var(--border-sub); }
+.pcard__body { padding: 12px 14px; display: flex; flex-direction: column; gap: 11px; }
+.pcard__busy { font-size: 12px; color: var(--accent); display: flex; align-items: center; gap: 8px; }
+.pcard__identity { display: flex; flex-direction: column; gap: 3px; }
+.pcard__email { font-size: 13px; font-weight: 600; color: var(--text); word-break: break-all; }
+.pcard__plan { font-size: 12px; color: var(--muted); }
+.pcard__plan b { color: var(--green); font-weight: 700; }
+.pcard__divider { height: 1px; background: var(--border-sub); }
+.pcard__cost { font-size: 12px; color: var(--muted); display: flex; gap: 7px; align-items: baseline; }
+.pcard__cost b { color: var(--text); font-size: 13px; font-variant-numeric: tabular-nums; }
+.pcard__cost span { color: var(--muted-2); font-size: 11px; }
+.pcard__signedout { font-size: 12px; color: var(--muted); }
+.pcard__actions { display: flex; align-items: center; gap: 8px; padding: 11px 14px; border-top: 1px solid var(--border-sub); background: var(--bg-deep); }
+
+/* Plan-limit usage bars */
+.usage { display: flex; flex-direction: column; gap: 9px; }
+.urow { display: grid; grid-template-columns: 58px 1fr auto; align-items: center; gap: 10px; }
+.urow__lbl { font-size: 11px; color: var(--muted-2); font-weight: 600; }
+.ubar { height: 7px; border-radius: 5px; background: var(--bg-deep); overflow: hidden; border: 1px solid var(--border-sub); }
+.ubar__fill { height: 100%; border-radius: 5px; transition: width .4s ease; }
+.ubar__fill--ok { background: var(--green); }
+.ubar__fill--warn { background: var(--fork); }
+.ubar__fill--high { background: var(--red); }
+.urow__meta { font-size: 11px; color: var(--muted-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.urow__meta b { color: var(--text-2); font-weight: 700; }
+
+/* Danger button (sign out) */
+.btn--danger { color: var(--red); border-color: #5a2f2b; background: transparent; }
+.btn--danger:hover:not(:disabled) { background: var(--red-bg); border-color: var(--red); color: var(--red); }
+
+/* Passive usage chip in the toolbar */
+.usagechip { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; letter-spacing: .02em;
+  padding: 5px 9px; border-radius: 8px; border: 1px solid var(--border-sub); background: var(--bg-deep); color: var(--muted-2); }
+.usagechip:hover { border-color: var(--border); color: var(--text-2); }
+.usagechip__dot { width: 8px; height: 8px; border-radius: 50%; }
+.usagechip__pct { font-variant-numeric: tabular-nums; }
+.usagechip--warn { color: #d8a43a; border-color: #6b5417; background: #2a2616; }
+.usagechip--high { color: var(--red); border-color: var(--red); background: var(--red-bg); }
 
 /* In-canvas notification panel (opened from the toolbar 🔔). Anchored bottom-right above the toolbar,
    which sits at bottom:14px. Mirrors the MCP panel's floating-card look. */

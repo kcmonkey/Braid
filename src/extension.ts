@@ -8,6 +8,9 @@ import type { BraidConfig, ProviderConfig, CanvasConfig, LegacyFlatProviderConfi
 import { DEFAULT_PROVIDER_CONFIG, DEFAULT_CANVAS_CONFIG, migrateLegacyConfig } from './sdkOptions';
 import type { BraidSettings } from './engine/host';
 import { EngineHost } from './engine/host';
+import { toCapabilitiesView } from './engine/capabilities';
+import { PROVIDER_CATALOG } from './protocol';
+import type { EngineId, ProviderCapabilitiesView } from './protocol';
 import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry, resolveClaudeBinaryFromEntry } from './runtime/sdk-provision';
 import { ensureSdkInstalled } from './runtime/sdk-download';
 import type { EventSink, PreToolInterceptor, PreToolDecision, PermissionVerdict, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
@@ -172,8 +175,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Keep every open canvas's settings UI in sync — also fires for edits made in the native Settings page.
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('braid')) return;
-      const config = readConfigView();
-      for (const id of panels.keys()) postTo(id, { type: 'config', config });
+      void pushConfig();
     }),
   );
   // First run: surface the getting-started walkthrough once (guarded by globalState so it never nags).
@@ -498,9 +500,17 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       break;
     }
     case 'getConfig':
-      // In-canvas settings UI mounted → hand it the active provider's flat config view.
-      postTo(canvasId, { type: 'config', config: readConfigView() });
+      // In-canvas settings UI mounted → hand it the active provider's flat view + active provider + caps.
+      await pushConfig(canvasId);
       break;
+    case 'setActiveProvider': {
+      // Provider spine: switch the active engine (only implemented providers are offered by the UI). The
+      // onDidChangeConfiguration listener rebroadcasts the enriched config to all panels.
+      if (engineHost.has(msg.provider)) {
+        await vscode.workspace.getConfiguration('braid').update('activeProvider', msg.provider, vscode.ConfigurationTarget.Global);
+      }
+      break;
+    }
     case 'setConfig':
       // UI changed a setting → write back to global VS Code settings (SSOT). The
       // onDidChangeConfiguration listener then broadcasts the new config to all panels.
@@ -815,6 +825,29 @@ function readSettings(): BraidSettings {
 function readConfigView(): BraidConfig {
   const s = readSettings();
   return { ...(s.providers[s.activeProvider] ?? DEFAULT_PROVIDER_CONFIG), ...s.canvas };
+}
+
+/** Capability views for every *implemented* (registered) provider — drives the webview's provider spine +
+ * capability gating. Unbuilt catalog providers have no engine, so they're absent (UI shows them disabled). */
+async function readCapabilities(): Promise<Partial<Record<EngineId, ProviderCapabilitiesView>>> {
+  const caps: Partial<Record<EngineId, ProviderCapabilitiesView>> = {};
+  for (const p of PROVIDER_CATALOG) {
+    if (p.implemented && engineHost.has(p.id)) {
+      try { caps[p.id] = await toCapabilitiesView(engineHost.get(p.id)); }
+      catch (e: any) { console.error(`[Braid] capabilities for '${p.id}' failed:`, e?.message ?? e); }
+    }
+  }
+  return caps;
+}
+
+/** Push the enriched `config` (flat view + active provider + capabilities) to one canvas or all open ones. */
+async function pushConfig(canvasId?: string) {
+  const config = readConfigView();
+  const activeProvider = readSettings().activeProvider;
+  const capabilities = await readCapabilities();
+  const msg = { type: 'config' as const, config, activeProvider, capabilities };
+  if (canvasId) postTo(canvasId, msg);
+  else for (const id of panels.keys()) postTo(id, msg);
 }
 
 /** Write a partial flat-view change back to global VS Code settings (the in-canvas UI is just an editor).

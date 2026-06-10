@@ -221,6 +221,9 @@ export type WebviewMessage =
   | { type: 'accountClose' }
   | { type: 'accountSignIn'; provider: EngineId }
   | { type: 'accountSignOut'; provider: EngineId }
+  // Provider spine: make `provider` the active engine for new turns (persists `braid.activeProvider`).
+  // Only implemented providers are selectable; the host rebroadcasts `config` with the new active + caps.
+  | { type: 'setActiveProvider'; provider: EngineId }
   // M10 AskUserQuestion: the user answered (or canceled) an interactive question card. The webview
   // pre-formats the choice into `reason` (via merge.ts/formatAskUserAnswer) so the extension bundle
   // never pulls in merge.ts. The host resolves the blocked PreToolUse hook by `toolUseId` (= the
@@ -251,7 +254,10 @@ export type WebviewMessage =
 /** extension host → webview */
 export type HostMessage =
   | { type: 'restored'; graph: SerializedGraph | null }
-  | { type: 'config'; config: BraidConfig }
+  // `config` = the active provider's flat settings view. `activeProvider` + `capabilities` (per implemented
+  // provider) let the webview render the provider spine + capability-gate controls (reasoning → effort/thinking,
+  // compact → auto-compact). `capabilities` only carries implemented providers (unbuilt ones have no engine).
+  | { type: 'config'; config: BraidConfig; activeProvider: EngineId; capabilities: Partial<Record<EngineId, ProviderCapabilitiesView>> }
   // The resolved model id from a query's init message (e.g. claude-opus-4-8) — for showing the full
   // model name actually in use. Canvas-level (not per-board): the latest query's model wins.
   | { type: 'model'; model: string }

@@ -23,7 +23,10 @@ import {
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
 import { relayoutAnchored, type LayoutDir } from './layout';
-import type { HostMessage, WebviewMessage, McpServerInfo, BoardTag, SlashCommandSpec } from '../protocol';
+import type {
+  HostMessage, WebviewMessage, McpServerInfo, BoardTag, SlashCommandSpec,
+  EngineId, ProviderAccount, ProviderUsage, RateLimitSnapshot, ProviderCapabilitiesView,
+} from '../protocol';
 import { PROVIDER_CATALOG } from '../protocol';
 import { detectTrigger, filterCommands, applyCompletion, type Trigger } from './autofill';
 import type { BraidConfig } from '../sdkOptions';
@@ -1315,6 +1318,7 @@ function ChatNav({ items, activeId, onJump, onClose }: {
 // advances focus to it, staying full-screen. Ctrl+wheel outward exits; plain wheel scrolls.
 function ChatView({
   boards, leafId, entryId, leafStatus, branches, onBranch, onSend, onStop, onExit, config, onConfigChange, resolvedModel, onOpenMcp, origin, closing,
+  activeProvider, providerCaps, onSetActive,
 }: {
   boards: BoardNodeT[];
   leafId: string;
@@ -1331,6 +1335,9 @@ function ChatView({
   onOpenMcp: () => void; // open the MCP servers manager from the composer's gear panel
   origin: { x: number; y: number } | null; // screen anchor for the zoom in/out animation
   closing: boolean; // playing the exit animation → unmounting shortly
+  activeProvider: EngineId;
+  providerCaps: Partial<Record<EngineId, ProviderCapabilitiesView>>;
+  onSetActive: (id: EngineId) => void;
 }) {
   // Shared per-board draft (SSOT via DraftCtx), keyed by the view leaf = the board this composer sends
   // to. Text typed on the canvas card for this board shows up here (and vice-versa); see DraftCtx.
@@ -1621,7 +1628,7 @@ function ChatView({
           {af.menu}
           <div className="composer__bar">
             <div className="composer__left">
-              {config && <SettingsControls config={config} onChange={onConfigChange} resolvedModel={resolvedModel} up onOpenMcp={onOpenMcp} showPerm />}
+              {config && <SettingsControls config={config} onChange={onConfigChange} resolvedModel={resolvedModel} up onOpenMcp={onOpenMcp} showPerm activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActive} />}
               <AttachBar boardId={leafId} />
               <ImageBar boardId={leafId} />
             </div>
@@ -1741,17 +1748,25 @@ function ThinkingToggle({ value, onChange }: { value: string; onChange: (v: stri
 // The 6 non-model settings, opened from the ⚙ gear. Array/object settings edit as text in local
 // state and commit on blur, so per-keystroke re-parsing never reorders/strips mid-typed input.
 // Mounted fresh each time the gear opens, so local state seeds from the current config.
-function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp }: {
+function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, activeProvider, providerCaps, onSetActive }: {
   config: BraidConfig;
   onChange: (patch: Partial<BraidConfig>) => void;
   resolvedModel: string | null; // full id from the last run (e.g. claude-opus-4-8); shown here, not in the bar
   onClose: () => void;
   onOpenMcp: () => void; // open the MCP servers manager (relocated here from the toolbar)
+  activeProvider: EngineId;
+  providerCaps: Partial<Record<EngineId, ProviderCapabilitiesView>>;
+  onSetActive: (id: EngineId) => void;
 }) {
   const [append, setAppend] = useState(() => config.appendSystemPrompt);
   const [allowed, setAllowed] = useState(() => listToText(config.allowedTools));
   const [disallowed, setDisallowed] = useState(() => listToText(config.disallowedTools));
   const [env, setEnv] = useState(() => envToText(config.env));
+  // Capability gating (default permissive until caps arrive): reasoning → effort/thinking; compact → auto-compact.
+  const caps = providerCaps[activeProvider];
+  const reasoning = caps?.reasoning ?? true;
+  const compact = caps?.compact ?? true;
+  const pName = PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.name ?? activeProvider;
   // The approval UI now exists, so non-bypass modes work. Surface only the two caveats worth a note:
   // bypass runs tools with NO prompt (a safety warning), and plan mode runs nothing until you approve.
   const permWarn = config.permissionMode === 'bypassPermissions'
@@ -1760,91 +1775,115 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp }: 
     ? 'ℹ️ Plan mode: Claude proposes a plan and runs no tools until you approve it.'
     : null;
   return (
-    <div className="settings__panel" onClick={(e) => e.stopPropagation()}>
+    <div className="settings__panel settings__panel--sectioned" onClick={(e) => e.stopPropagation()}>
       <div className="settings__panelhead">
-        <span>Session settings</span>
+        <span>Settings <span className="settings__panelsub">provider-scoped</span></span>
         <button className="settings__close" onClick={onClose}>✕</button>
       </div>
 
-      {resolvedModel && (
-        <div className="settings__row">
-          <span className="settings__lbl">Active model</span>
-          <span className="settings__modelid" title="The model actually in use (from the last run)">{resolvedModel}</span>
+      <ProviderSpine activeProvider={activeProvider} onSetActive={onSetActive} />
+
+      <div className="settings__section">
+        <div className="settings__sectiontitle">Generation <span className="settings__scope settings__scope--prov">· {pName}</span></div>
+        {resolvedModel && (
+          <div className="settings__row">
+            <span className="settings__lbl">Active model</span>
+            <span className="settings__modelid" title="The model actually in use (from the last run)">{resolvedModel}</span>
+          </div>
+        )}
+        <div className={`settings__genwrap ${reasoning ? '' : 'settings__gated'}`}>
+          <EffortSlider value={config.effort} onChange={(v) => onChange({ effort: v })} />
+          <ThinkingToggle value={config.thinking} onChange={(v) => onChange({ thinking: v })} />
+          {!reasoning && <div className="settings__gnote">Effort &amp; thinking are not supported by {pName}.</div>}
         </div>
-      )}
-
-      <div className="settings__row">
-        <span className="settings__lbl">MCP servers</span>
-        <button
-          className="settings__mcpbtn" title="Manage MCP servers — status, tools, reconnect / authenticate"
-          onClick={() => { onClose(); onOpenMcp(); }}
-        >🔌 Manage</button>
+        <label className="settings__row">
+          <span className="settings__lbl">Max turns (0 = unlimited)</span>
+          <input
+            type="number" min={0} value={config.maxTurns}
+            onChange={(e) => onChange({ maxTurns: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
+          />
+        </label>
       </div>
 
-      <label className="settings__row" title="On: selecting a board also expands its whole parent lineage to detail. Off: only the selected board expands.">
-        <span className="settings__lbl">Expand parent lineage on select</span>
-        <input
-          type="checkbox" checked={config.expandAncestorsOnSelect}
-          onChange={(e) => onChange({ expandAncestorsOnSelect: e.target.checked })}
-        />
-      </label>
+      <div className="settings__section">
+        <div className="settings__sectiontitle">Permissions &amp; tools <span className="settings__scope settings__scope--prov">· {pName}</span></div>
+        <label className="settings__row">
+          <span className="settings__lbl">Permission mode</span>
+          <select value={config.permissionMode} onChange={(e) => onChange({ permissionMode: e.target.value })}>
+            {PERM_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        </label>
+        {permWarn && <div className="settings__warn">{permWarn}</div>}
 
-      <label className="settings__row">
-        <span className="settings__lbl">Permission mode</span>
-        <select value={config.permissionMode} onChange={(e) => onChange({ permissionMode: e.target.value })}>
-          {PERM_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-        </select>
-      </label>
-      {permWarn && (
-        <div className="settings__warn">{permWarn}</div>
-      )}
+        <div className="settings__row">
+          <span className="settings__lbl">MCP servers</span>
+          <button
+            className="settings__mcpbtn" title="Manage MCP servers — status, tools, reconnect / authenticate"
+            onClick={() => { onClose(); onOpenMcp(); }}
+          >🔌 Manage</button>
+        </div>
 
-      <EffortSlider value={config.effort} onChange={(v) => onChange({ effort: v })} />
-      <ThinkingToggle value={config.thinking} onChange={(v) => onChange({ thinking: v })} />
+        <div className="settings__field">
+          <span className="settings__lbl">Allowed tools (comma-separated)</span>
+          <input
+            value={allowed} placeholder="Empty = unrestricted"
+            onChange={(e) => setAllowed(e.target.value)}
+            onBlur={() => onChange({ allowedTools: textToList(allowed) })}
+          />
+        </div>
 
-      <label className="settings__row">
-        <span className="settings__lbl">Max turns (0 = unlimited)</span>
-        <input
-          type="number" min={0} value={config.maxTurns}
-          onChange={(e) => onChange({ maxTurns: Math.max(0, Math.floor(Number(e.target.value) || 0)) })}
-        />
-      </label>
+        <div className="settings__field">
+          <span className="settings__lbl">Disallowed tools (comma-separated)</span>
+          <input
+            value={disallowed} placeholder="Empty = none"
+            onChange={(e) => setDisallowed(e.target.value)}
+            onBlur={() => onChange({ disallowedTools: textToList(disallowed) })}
+          />
+        </div>
 
-      <div className="settings__field">
-        <span className="settings__lbl">Append system prompt</span>
-        <textarea
-          className="settings__ta" rows={3} value={append} placeholder="Empty = none"
-          onChange={(e) => setAppend(e.target.value)}
-          onBlur={() => onChange({ appendSystemPrompt: append })}
-        />
+        <div className="settings__field">
+          <span className="settings__lbl">Append system prompt</span>
+          <textarea
+            className="settings__ta" rows={3} value={append} placeholder="Empty = none"
+            onChange={(e) => setAppend(e.target.value)}
+            onBlur={() => onChange({ appendSystemPrompt: append })}
+          />
+        </div>
+
+        <div className="settings__field">
+          <span className="settings__lbl">Env vars (KEY=VALUE per line)</span>
+          <textarea
+            className="settings__ta" rows={3} value={env}
+            placeholder="Do NOT set ANTHROPIC_API_KEY (switches to metered API billing)"
+            onChange={(e) => setEnv(e.target.value)}
+            onBlur={() => onChange({ env: textToEnv(env) })}
+          />
+        </div>
       </div>
 
-      <div className="settings__field">
-        <span className="settings__lbl">Allowed tools (comma-separated)</span>
-        <input
-          value={allowed} placeholder="Empty = unrestricted"
-          onChange={(e) => setAllowed(e.target.value)}
-          onBlur={() => onChange({ allowedTools: textToList(allowed) })}
-        />
-      </div>
-
-      <div className="settings__field">
-        <span className="settings__lbl">Disallowed tools (comma-separated)</span>
-        <input
-          value={disallowed} placeholder="Empty = none"
-          onChange={(e) => setDisallowed(e.target.value)}
-          onBlur={() => onChange({ disallowedTools: textToList(disallowed) })}
-        />
-      </div>
-
-      <div className="settings__field">
-        <span className="settings__lbl">Env vars (KEY=VALUE per line)</span>
-        <textarea
-          className="settings__ta" rows={3} value={env}
-          placeholder="Do NOT set ANTHROPIC_API_KEY (switches to metered API billing)"
-          onChange={(e) => setEnv(e.target.value)}
-          onBlur={() => onChange({ env: textToEnv(env) })}
-        />
+      <div className="settings__section">
+        <div className="settings__sectiontitle">Canvas <span className="settings__scope settings__scope--neutral">· all providers</span></div>
+        <label className="settings__row" title="On: selecting a board also expands its whole parent lineage to detail. Off: only the selected board expands.">
+          <span className="settings__lbl">Expand parent lineage on select</span>
+          <input
+            type="checkbox" checked={config.expandAncestorsOnSelect}
+            onChange={(e) => onChange({ expandAncestorsOnSelect: e.target.checked })}
+          />
+        </label>
+        <label className={`settings__row ${compact ? '' : 'settings__gated'}`} title="Auto-spawn a compact node when the chain's context fill crosses the threshold.">
+          <span className="settings__lbl">Auto-compact{compact ? '' : ` (n/a for ${pName})`}</span>
+          <input
+            type="checkbox" checked={config.autoCompactEnabled && compact} disabled={!compact}
+            onChange={(e) => onChange({ autoCompactEnabled: e.target.checked })}
+          />
+        </label>
+        <label className={`settings__row ${compact && config.autoCompactEnabled ? '' : 'settings__gated'}`}>
+          <span className="settings__lbl">Auto-compact threshold (%)</span>
+          <input
+            type="number" min={1} max={100} value={config.autoCompactThreshold} disabled={!compact || !config.autoCompactEnabled}
+            onChange={(e) => onChange({ autoCompactThreshold: Math.max(1, Math.min(100, Math.floor(Number(e.target.value) || 95))) })}
+          />
+        </label>
       </div>
     </div>
   );
@@ -1853,22 +1892,27 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp }: 
 // In-canvas settings (M5): a model quick-switch dropdown + the resolved full model name + ⚙ gear.
 // Changes write through to global VS Code settings (host applies; see App.setConfigField).
 // `resolvedModel` is the full id from the last query's init message (e.g. claude-opus-4-8).
-function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, showPerm }: {
+function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, showPerm, activeProvider, providerCaps, onSetActive }: {
   config: BraidConfig;
   onChange: (patch: Partial<BraidConfig>) => void;
   resolvedModel: string | null;
   up?: boolean; // open the gear panel upward (when the controls sit at the bottom, e.g. the composer)
   onOpenMcp: () => void; // open the MCP servers manager from inside the gear panel
   showPerm?: boolean; // show the read-only permission-mode indicator (composer only — the canvas chip is hidden behind the focus view)
+  activeProvider: EngineId;
+  providerCaps: Partial<Record<EngineId, ProviderCapabilitiesView>>;
+  onSetActive: (id: EngineId) => void;
 }) {
   const [open, setOpen] = useState(false);
+  // The quick-switch model list follows the active provider's capabilities (falls back to the catalog default).
+  const models = providerCaps[activeProvider]?.models ?? MODEL_OPTS;
   return (
     <div className={`settings nodrag nopan ${up ? 'settings--up' : ''}`}>
       <select
         className="settings__model" title="Model" value={config.model}
         onChange={(e) => onChange({ model: e.target.value })}
       >
-        {MODEL_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        {models.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
       {/* Read-only permission-mode indicator: the canvas PermModeHint chip is hidden behind the focus
           view, so surface the active mode here too. Switch via Shift+Tab or the ⚙ panel; bypass = red. */}
@@ -1885,7 +1929,10 @@ function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, show
       {open && (
         <>
           <div className="settings__backdrop" onClick={() => setOpen(false)} />
-          <SettingsPanel config={config} onChange={onChange} resolvedModel={resolvedModel} onClose={() => setOpen(false)} onOpenMcp={onOpenMcp} />
+          <SettingsPanel
+            config={config} onChange={onChange} resolvedModel={resolvedModel} onClose={() => setOpen(false)} onOpenMcp={onOpenMcp}
+            activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActive}
+          />
         </>
       )}
     </div>
@@ -1968,6 +2015,184 @@ function McpPanel({ servers, busy, onReconnect, onClose }: {
         </div>
       </div>
     </>
+  );
+}
+
+// ---- Provider hierarchy UI (Accounts overlay + usage chip + provider spine) ----
+// Consumes the engine-layer contracts: PROVIDER_CATALOG (catalog), `account`/`rateLimit` host messages,
+// and `capabilities` from the `config` message. Accounts = a dedicated centered overlay (McpPanel twin);
+// usage chip = the passive plan-limit indicator. (plans/Provider-Engine-Layer UI)
+type ProviderDesc = (typeof PROVIDER_CATALOG)[number];
+type AccountSnap = { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean };
+
+// Plan-limit utilization color band (mirrors ContextBadge thresholds): <60 calm, 60–85 warn, ≥85 high.
+const usageBand = (pct: number | null | undefined): 'ok' | 'warn' | 'high' =>
+  pct == null ? 'ok' : pct >= 85 ? 'high' : pct >= 60 ? 'warn' : 'ok';
+
+// ISO reset timestamp → short "resets HH:MM" (or the raw string if unparseable).
+function formatReset(iso?: string | null): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return 'resets ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Shared active-provider selector. Only implemented (registered) providers are selectable; unbuilt ones
+// render disabled (their engine doesn't exist yet). Switching posts `setActiveProvider`.
+function ProviderSpine({ activeProvider, onSetActive }: { activeProvider: EngineId; onSetActive: (id: EngineId) => void }) {
+  return (
+    <div className="spine">
+      <span className="spine__lbl">Provider</span>
+      <div className="seg">
+        {PROVIDER_CATALOG.map((p) => (
+          <button
+            key={p.id}
+            type="button"
+            className={`seg__btn ${activeProvider === p.id ? 'on' : ''}`}
+            disabled={!p.implemented}
+            title={p.implemented ? `Use ${p.name} for new turns` : `${p.name} — coming soon`}
+            onClick={() => p.implemented && onSetActive(p.id)}
+          >
+            <span className="seg__dot" style={{ background: p.accent }} />{p.name}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive }: {
+  p: ProviderDesc;
+  snap?: AccountSnap;
+  active: boolean;
+  onSignIn: (id: EngineId) => void;
+  onSignOut: (id: EngineId) => void;
+  onSetActive: (id: EngineId) => void;
+}) {
+  const acct = snap?.account ?? null;
+  const usage = snap?.usage ?? null;
+  const busy = !!snap?.busy;
+  const signedIn = !!acct?.signedIn;
+  const isActive = active && signedIn;
+  return (
+    <div className={`pcard ${isActive ? 'pcard--active' : ''} ${p.implemented ? '' : 'pcard--off'}`}>
+      <div className="pcard__head">
+        <span className="pcard__dot" style={{ background: p.accent }} />
+        <span className="pcard__name">{p.name}</span>
+        <span className="pcard__vendor">{p.vendor}</span>
+        <span className="pcard__spacer" />
+        {isActive
+          ? <span className="badge badge--active">◆ Active</span>
+          : signedIn ? null : <span className="badge badge--setup">not set up</span>}
+      </div>
+      <div className="pcard__body">
+        {busy ? (
+          <div className="pcard__busy"><span className="working__dot" /> Working… a browser window may open to authorize.</div>
+        ) : signedIn ? (
+          <>
+            <div className="pcard__identity">
+              <span className="pcard__email">{acct!.email ?? '(signed in)'}</span>
+              <span className="pcard__plan">
+                {acct!.plan ? <b>{acct!.plan}</b> : null}{acct!.backend ? `${acct!.plan ? ' · ' : ''}${acct!.backend}` : ''}
+              </span>
+            </div>
+            {usage && usage.windows.length > 0 && (
+              <>
+                <div className="pcard__divider" />
+                <div className="usage">
+                  {usage.windows.map((w) => (
+                    <div className="urow" key={w.id}>
+                      <span className="urow__lbl">{w.label}</span>
+                      <div className="ubar"><div className={`ubar__fill ubar__fill--${usageBand(w.utilizationPct)}`} style={{ width: `${Math.max(0, Math.min(100, w.utilizationPct ?? 0))}%` }} /></div>
+                      <span className="urow__meta">
+                        {w.utilizationPct == null ? '—' : <b>{Math.round(w.utilizationPct)}%</b>}
+                        {w.resetsAt ? ` · ${formatReset(w.resetsAt)}` : ''}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+            {usage?.sessionCostUsd != null && (
+              <div className="pcard__cost"><span>Session</span><b>${usage.sessionCostUsd.toFixed(2)}</b><span>{usage.sessionCostUsd === 0 ? 'covered by subscription' : ''}</span></div>
+            )}
+          </>
+        ) : (
+          <div className="pcard__signedout">{p.implemented ? 'Not signed in.' : 'Engine not built yet — sign-in arrives with this provider.'}</div>
+        )}
+      </div>
+      <div className="pcard__actions">
+        {signedIn ? (
+          <>
+            {isActive
+              ? <span className="badge badge--active">◆ Active</span>
+              : <button className="btn" onClick={() => onSetActive(p.id)}>Set active</button>}
+            <span className="pcard__spacer" />
+            <button className="btn btn--danger" disabled={busy} onClick={() => onSignOut(p.id)}>Sign out</button>
+          </>
+        ) : (
+          <>
+            <span className="pcard__spacer" />
+            <button className="btn primary" disabled={!p.implemented || busy} onClick={() => onSignIn(p.id)}>
+              Sign in{p.implemented ? '' : ' (soon)'}
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Accounts overlay (dedicated centered panel; mirrors McpPanel's backdrop + floating card structure).
+function AccountsPanel({ accounts, activeProvider, onSignIn, onSignOut, onSetActive, onClose }: {
+  accounts: Partial<Record<EngineId, AccountSnap>>;
+  activeProvider: EngineId;
+  onSignIn: (id: EngineId) => void;
+  onSignOut: (id: EngineId) => void;
+  onSetActive: (id: EngineId) => void;
+  onClose: () => void;
+}) {
+  return (
+    <>
+      <div className="acct__backdrop" onClick={onClose} />
+      <div className="acct-panel nodrag nopan" onClick={(e) => e.stopPropagation()}>
+        <div className="acct-panel__head">
+          <h2>Accounts <span className="acct-panel__sub">providers · identity · usage</span></h2>
+          <button className="acct-panel__x" title="Close" onClick={onClose}>×</button>
+        </div>
+        <div className="acct-panel__body">
+          <ProviderSpine activeProvider={activeProvider} onSetActive={onSetActive} />
+          {PROVIDER_CATALOG.map((p) => (
+            <AccountCard
+              key={p.id} p={p} snap={accounts[p.id]} active={activeProvider === p.id}
+              onSignIn={onSignIn} onSignOut={onSignOut} onSetActive={onSetActive}
+            />
+          ))}
+        </div>
+        <div className="acct-panel__foot">
+          Identity &amp; plan-limit usage come from your signed-in subscription. Sign-in opens your browser; tokens are stored locally (never an API key).
+        </div>
+      </div>
+    </>
+  );
+}
+
+// Passive plan-limit chip — the always-visible usage indicator, fed by the free `rate_limit_event` that
+// rides every turn stream (no control session). Hidden until a snapshot with a utilization% arrives.
+function UsageChip({ snapshot, accent, onClick }: { snapshot: RateLimitSnapshot | null; accent: string; onClick: () => void }) {
+  if (!snapshot || snapshot.utilizationPct == null) return null;
+  const pct = Math.round(snapshot.utilizationPct);
+  const band = usageBand(pct);
+  const win = snapshot.windowId === 'seven_day' ? '7d' : snapshot.windowId === 'five_hour' ? '5h' : '';
+  return (
+    <button
+      type="button"
+      className={`usagechip ${band === 'high' ? 'usagechip--high' : band === 'warn' ? 'usagechip--warn' : ''}`}
+      title="Plan usage — click for Accounts" onClick={onClick}
+    >
+      <span className="usagechip__dot" style={{ background: accent }} />
+      <span className="usagechip__pct">{win ? `${win} ` : ''}{pct}%</span>
+    </button>
   );
 }
 
@@ -2119,6 +2344,14 @@ function App() {
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[] | null>(null);
   const [mcpBusy, setMcpBusy] = useState<string[]>([]);
+  // Provider hierarchy (Provider-Engine-Layer UI): which engine is active + per-implemented-provider
+  // capabilities (drives the spine + capability gating), the Accounts overlay, per-provider identity/usage
+  // snapshots (host-pushed on accountOpen / after sign in/out), and the passive plan-limit chip snapshot.
+  const [activeProvider, setActiveProviderState] = useState<EngineId>('claude');
+  const [providerCaps, setProviderCaps] = useState<Partial<Record<EngineId, ProviderCapabilitiesView>>>({});
+  const [acctPanelOpen, setAcctPanelOpen] = useState(false);
+  const [accounts, setAccounts] = useState<Partial<Record<EngineId, { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }>>>({});
+  const [rateLimit, setRateLimit] = useState<RateLimitSnapshot | null>(null);
   // Composer autofill (workspace-level): the host-served slash-command list + latest `@`-file search reply.
   // `searchFiles` debounces the host round-trip; the reply echoes its query so the menu drops stale results.
   const [slashCommands, setSlashCommands] = useState<SlashCommandSpec[]>([]);
@@ -3011,6 +3244,29 @@ function App() {
     });
   }, []);
 
+  // Accounts overlay: opening asks the host to spin up the account control session + push identity/usage;
+  // closing tears it down. Mirrors toggleMcpPanel. (Provider-Engine-Layer UI)
+  const toggleAcctPanel = useCallback(() => {
+    setAcctPanelOpen((open) => {
+      if (open) post({ type: 'accountClose' });
+      else post({ type: 'accountOpen' });
+      return !open;
+    });
+  }, []);
+  const openAcctPanel = useCallback(() => {
+    setAcctPanelOpen((open) => { if (!open) post({ type: 'accountOpen' }); return true; });
+  }, []);
+  // Sign in/out optimistically flip the card to a busy state (the host's account refresh clears it).
+  const acctSignIn = useCallback((id: EngineId) => {
+    setAccounts((prev) => ({ ...prev, [id]: { account: prev[id]?.account ?? null, usage: prev[id]?.usage ?? null, busy: true } }));
+    post({ type: 'accountSignIn', provider: id });
+  }, []);
+  const acctSignOut = useCallback((id: EngineId) => {
+    setAccounts((prev) => ({ ...prev, [id]: { account: prev[id]?.account ?? null, usage: prev[id]?.usage ?? null, busy: true } }));
+    post({ type: 'accountSignOut', provider: id });
+  }, []);
+  const onSetActiveProvider = useCallback((id: EngineId) => post({ type: 'setActiveProvider', provider: id }), []);
+
   // host → webview
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -3023,7 +3279,14 @@ function App() {
           hydratedRef.current = true; // auto-save may run now
           break;
         }
-        case 'config': setConfig(m.config); configRef.current = m.config; break;
+        case 'config':
+          setConfig(m.config); configRef.current = m.config;
+          setActiveProviderState(m.activeProvider); setProviderCaps(m.capabilities);
+          break;
+        case 'account':
+          setAccounts((prev) => ({ ...prev, [m.provider]: { account: m.account, usage: m.usage, busy: m.busy } }));
+          break;
+        case 'rateLimit': setRateLimit(m.snapshot); break;
         case 'model': setResolvedModel(m.model); break;
         case 'slashCommands': setSlashCommands(m.commands); break;
         case 'fileResults': setFileResults({ query: m.query, files: m.files }); break;
@@ -3682,8 +3945,20 @@ function App() {
         >
           <span className="tb-ico">🔔</span>{noticeBadge > 0 && <span className="btn__badge">{noticeBadge}</span>}
         </button>
+        <UsageChip
+          snapshot={rateLimit}
+          accent={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.accent ?? '#d97757'}
+          onClick={openAcctPanel}
+        />
+        <button
+          className={`btn ${acctPanelOpen ? 'active' : ''}`}
+          onClick={toggleAcctPanel}
+          title="Accounts & usage"
+        >
+          <span className="tb-ico">👤</span>
+        </button>
         <span className="toolbar__sep" />
-        {config && <SettingsControls config={config} onChange={setConfigField} resolvedModel={resolvedModel} up onOpenMcp={toggleMcpPanel} />}
+        {config && <SettingsControls config={config} onChange={setConfigField} resolvedModel={resolvedModel} up onOpenMcp={toggleMcpPanel} activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActiveProvider} />}
       </div>
 
       {/* M12: transient hint when a board is dropped on a non-fusable neighbor. */}
@@ -3740,6 +4015,17 @@ function App() {
         />
       )}
 
+      {acctPanelOpen && (
+        <AccountsPanel
+          accounts={accounts}
+          activeProvider={activeProvider}
+          onSignIn={acctSignIn}
+          onSignOut={acctSignOut}
+          onSetActive={(id) => post({ type: 'setActiveProvider', provider: id })}
+          onClose={toggleAcctPanel}
+        />
+      )}
+
       {noticePanelOpen && (
         <NoticePanel notices={notices} ongoing={ongoing} onOpen={openNotice} onClose={() => setNoticePanelOpen(false)} />
       )}
@@ -3776,6 +4062,9 @@ function App() {
           onOpenMcp={toggleMcpPanel}
           origin={focusOrigin}
           closing={focusClosing}
+          activeProvider={activeProvider}
+          providerCaps={providerCaps}
+          onSetActive={onSetActiveProvider}
         />
       )}
 
