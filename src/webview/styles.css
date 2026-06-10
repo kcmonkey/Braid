@@ -236,14 +236,19 @@ body {
 .board.lod-far .board__tags { padding: 6px 9px 0; }
 .board.lod-far .tag { font-size: 11px; }
 
-/* Far-far LOD (branch map): a signpost node shows ONLY its branch label, IN the card — so it SCALES with
-   the board (never a constant-size overlay → no overlap). Digest gist + tags are hidden. A large font makes
-   the label the card's dominant content and keeps it as legible as scaling allows; a non-signpost node has
-   an empty title (a bare badge chip). Quiet warm grey, per the user's "not red" preference. */
+/* Far-far LOD (branch map): the board collapses to a compact chip (type badge + tags, no gist). The branch
+   label is NOT in the card — it floats ABOVE the board (.board__toplabel), rendered in node DOM so it scales
+   with the board (never a constant-size overlay → no overlap) and reserves its own layout space. */
 .board.lod-far-far .board__head { border-bottom: none; align-items: center; }
-.board.lod-far-far .board__title {
-  font-size: 26px; font-weight: 700; line-height: 1.25; letter-spacing: .01em;
-  color: #b3aea4; -webkit-line-clamp: 3; word-break: normal; overflow-wrap: break-word;
+/* The signpost label floating above the board (far-far map). Width matches the board so the node stays
+   ~320px (stable column spacing); a 2-line clamp keeps long branch titles tidy. Quiet warm grey (the user's
+   "not red" preference) with a strong shadow so it's legible over the canvas / other nodes. */
+.board__toplabel {
+  width: 320px; max-width: 320px; margin-bottom: 7px; padding: 0 6px; box-sizing: border-box;
+  font-size: 19px; font-weight: 700; line-height: 1.25; text-align: center;
+  color: #b3aea4; text-shadow: 0 1px 3px rgba(0, 0, 0, .9), 0 0 2px rgba(0, 0, 0, .95);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  overflow: hidden; overflow-wrap: break-word; cursor: default; user-select: none;
 }
 /* M12: transient hint shown when a board is dropped on a non-fusable neighbor. */
 .fuse-hint {
