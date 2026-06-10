@@ -119,3 +119,38 @@ export function layoutGraph(nodes: BoardNodeT[], edges: Edge[], dir: LayoutDir =
     return p ? { ...n, position: p } : n;
   });
 }
+
+/** Top-left corner of a node set's bounding box (min position x / y). Empty set → (0,0). */
+export function graphTopLeft(nodes: BoardNodeT[]): { x: number; y: number } {
+  let x = Infinity, y = Infinity;
+  for (const n of nodes) {
+    if (n.position.x < x) x = n.position.x;
+    if (n.position.y < y) y = n.position.y;
+  }
+  return Number.isFinite(x) ? { x, y } : { x: 0, y: 0 };
+}
+
+/**
+ * Re-layout, then translate the WHOLE graph so it doesn't jump on screen. `layoutGraph` normalizes every
+ * layout to the origin (top-left → 0,0); replacing the graph with that raw result would snap it back to the
+ * origin while the viewport stays wherever the user left it — flinging every node off-canvas. This pins an
+ * anchor so the repack preserves the prior on-screen position (the viewport is never touched by the caller):
+ *  - `selectedId` present → pin THAT board: its lineage expanding (fisheye) reflows the others around it,
+ *    and the board you clicked never slides to the screen edge.
+ *  - else → pin the graph's bounding-box top-left, so an unselected repack holds its position instead of
+ *    snapping to (0,0). (Fixes the "dramatic drift on re-arrange" where the graph had drifted off-origin
+ *    via accumulated selected-anchor translations.)
+ * Pure: the viewport is not involved; callers feed the current nodes and apply the returned positions.
+ */
+export function relayoutAnchored(
+  nodes: BoardNodeT[], edges: Edge[], dir: LayoutDir, selectedId: string | null,
+): BoardNodeT[] {
+  const laid = layoutGraph(nodes, edges, dir);
+  if (!nodes.length) return laid;
+  const before = selectedId ? nodes.find((n) => n.id === selectedId)?.position : graphTopLeft(nodes);
+  const after = selectedId ? laid.find((n) => n.id === selectedId)?.position : graphTopLeft(laid);
+  if (!before || !after) return laid;
+  const dx = before.x - after.x, dy = before.y - after.y;
+  if (!dx && !dy) return laid;
+  return laid.map((n) => ({ ...n, position: { x: n.position.x + dx, y: n.position.y + dy } }));
+}

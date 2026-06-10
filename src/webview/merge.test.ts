@@ -3,7 +3,7 @@ import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
-  diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission,
+  diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
@@ -353,6 +353,13 @@ describe('branchSummaryKey / needsBranchSummary', () => {
     const { nodes, edges } = mk();
     expect(needsBranchSummary('a', nodes, edges)).toBe(false);             // 'a' is a plain continuation node
   });
+
+  it('labels an idle-compact-headed segment (the boundary never runs but is stable)', () => {
+    const nodes = [node('K', 0, { compact: true, status: 'idle', prompt: '', answer: '' }), node('c1', 1)];
+    const edges = [compactEdge('K', 'c1')];
+    expect(branchSegment('K', nodes, edges)).toEqual(['K', 'c1']);
+    expect(needsBranchSummary('K', nodes, edges)).toBe(true);              // idle compact + done child → summarize
+  });
 });
 
 describe('computeMerge with a compact node (M9)', () => {
@@ -624,6 +631,11 @@ describe('turnViewStatus (queued follow-up display order)', () => {
     const turns: Turn[] = [{ prompt: 'q0', answer: 'partial' }];
     expect(ts(turns, 'streaming')).toEqual(['streaming']);
   });
+
+  it("'waiting' (async-continuation hold): every round renders as done — the wait is board-level", () => {
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'a0', done: true }, { prompt: 'q1', answer: 'a1' }];
+    expect(ts(turns, 'waiting')).toEqual(['done', 'done']);
+  });
 });
 
 describe('hasPendingAsk (needs-response state)', () => {
@@ -659,6 +671,19 @@ describe('hasPendingPermission (needs-approval state)', () => {
   it('scans every round of a multi-turn board', () => {
     const turns: Turn[] = [{ prompt: 'q0', answer: 'a0' }, { prompt: 'q1', answer: '', steps: [perm()] }];
     expect(hasPendingPermission(node('m', 0, { turns }).data)).toBe(true);
+  });
+});
+
+describe('nextPermMode (Shift+Tab permission cycle)', () => {
+  it('cycles default → acceptEdits → plan → default', () => {
+    expect(nextPermMode('default')).toBe('acceptEdits');
+    expect(nextPermMode('acceptEdits')).toBe('plan');
+    expect(nextPermMode('plan')).toBe('default');
+  });
+  it('jumps to default from a mode outside the cycle (bypass / inherit / unknown)', () => {
+    expect(nextPermMode('bypassPermissions')).toBe('default');
+    expect(nextPermMode('inherit')).toBe('default');
+    expect(nextPermMode('')).toBe('default');
   });
 });
 
@@ -708,6 +733,20 @@ describe('serializeGraph', () => {
     expect(g.nodes[0].data.steps).toEqual([{ id: 'tu1', name: 'Bash', input: { command: 'ls' } }]);
     expect(g.nodes[0].data.turns).toEqual([{ prompt: 'q', answer: 'a', steps: [{ id: 'tu2', name: 'Write', input: { file_path: 'a.ts' } }] }]);
   });
+
+  it("degrades a 'waiting' board to done + asyncAbandoned, dropping the transient asyncPending (AD6)", () => {
+    const pending = { background: [{ id: 't1', type: 'shell', status: 'running' }], crons: [] };
+    const g = serializeGraph([node('a', 0, { status: 'waiting', asyncPending: pending })], [], 1, 1);
+    expect(g.nodes[0].data.status).toBe('done');
+    expect(g.nodes[0].data.asyncAbandoned).toBe(true);
+    expect(g.nodes[0].data).not.toHaveProperty('asyncPending');
+  });
+
+  it('leaves a non-waiting board untouched (no asyncAbandoned marker)', () => {
+    const g = serializeGraph([node('a', 0, { status: 'done' })], [], 1, 1);
+    expect(g.nodes[0].data.status).toBe('done');
+    expect(g.nodes[0].data).not.toHaveProperty('asyncAbandoned');
+  });
 });
 
 describe('settleRestoredStatus', () => {
@@ -722,6 +761,17 @@ describe('settleRestoredStatus', () => {
   it('leaves non-streaming states untouched', () => {
     expect(settleRestoredStatus('done', 'x')).toEqual({ status: 'done', answer: 'x' });
     expect(settleRestoredStatus('idle', '')).toEqual({ status: 'idle', answer: '' });
+    // 'waiting' (async-continuation hold): the held session is gone after reload → settle to done.
+    expect(settleRestoredStatus('waiting', 'a')).toEqual({ status: 'done', answer: 'a' });
+  });
+});
+
+describe('describeAsyncPending (异步续接)', () => {
+  it('summarizes background tasks + scheduled wakeups, pluralizing; empty/undefined → ""', () => {
+    expect(describeAsyncPending(undefined)).toBe('');
+    expect(describeAsyncPending({ background: [], crons: [] })).toBe('');
+    expect(describeAsyncPending({ background: [{ id: 't1', type: 'shell', status: 'running' }], crons: [] })).toBe('1 background task running');
+    expect(describeAsyncPending({ background: [{ id: 't1', type: 'shell', status: 'running' }, { id: 't2', type: 'shell', status: 'running' }], crons: [{ id: 'c1', schedule: '* * * * *', recurring: false, prompt: 'go' }] })).toBe('2 background tasks running · 1 scheduled wakeup');
   });
 });
 

@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import {
-  ReactFlow, ReactFlowProvider, Background, MiniMap, Handle, Position,
+  ReactFlow, ReactFlowProvider, Background, MiniMap, Handle, Position, NodeToolbar,
   applyNodeChanges, useUpdateNodeInternals, type Edge, type NodeChange, type Node,
   type ReactFlowInstance, type Viewport,
 } from '@xyflow/react';
@@ -16,12 +16,13 @@ import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
   GRAPH_VERSION, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit,
-  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission,
-  serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock,
+  isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, MAX_CONCURRENT_BRANCH_SUMMARIES,
+  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
+  serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
-import { layoutGraph, type LayoutDir } from './layout';
+import { layoutGraph, relayoutAnchored, type LayoutDir } from './layout';
 import type { HostMessage, WebviewMessage, McpServerInfo, BoardTag, SlashCommandSpec } from '../protocol';
 import { PROVIDER_CATALOG } from '../protocol';
 import { detectTrigger, filterCommands, applyCompletion, type Trigger } from './autofill';
@@ -652,6 +653,11 @@ const MergeCtxHL = React.createContext<Set<string>>(new Set());
 // matching BoardNode shows a transient pulse ring (`.board.revealed`) until App clears it after a beat.
 const RevealCtx = React.createContext<string | null>(null);
 
+// Branch-Signposts: signpost id → its floating branch-label text. Only signposts (root / branch head /
+// merge / compact) with a non-empty label are present. Provided by App (memoized over the graph); each
+// BoardNode renders a NodeToolbar above the card iff its id is present. (Branch-Signposts plan)
+const SignpostCtx = React.createContext<Map<string, string>>(new Map());
+
 // M12 drag-fusion: the board currently hovered as a VALID fuse drop-target during an active drag (or
 // null). Provided by App so that board shows a `.fuse-target` ring — live "drop here to merge" feedback.
 // Same context pattern as DirCtx/MergeCtxHL (React Flow's node memo doesn't block context propagation).
@@ -982,6 +988,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const isFuseTarget = React.useContext(FuseTargetCtx) === id;
   // Just jumped here from a completion notification → transient pulse ring (cleared by App).
   const revealed = React.useContext(RevealCtx) === id;
+  // Branch-Signposts: this board's floating branch-label text (present only for signpost nodes with a
+  // non-empty label). Rendered via NodeToolbar so it stays readable at every zoom (it doesn't scale).
+  const signpostLabel = React.useContext(SignpostCtx).get(id);
   // This board has an AskUserQuestion awaiting an answer → prominent pending-answer ring/badge (open to answer).
   const needsAsk = hasPendingAsk(data);
   // This board has a tool awaiting permission approval (canUseTool) → 🔐 badge/ring + a compact approve
@@ -1041,10 +1050,10 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
 
   // No stop during compaction: it's a discrete /compact op, not a stoppable generation, and aborting it
   // mid-flight would strand the node in 'streaming' (runCompact doesn't settle on abort). Cancel = delete.
-  const stopBtn = data.status === 'streaming' && !compacting ? (
+  const stopBtn = (data.status === 'streaming' || data.status === 'waiting') && !compacting ? (
     <button
       className="board__stop nodrag nopan"
-      title="Stop generating"
+      title={data.status === 'waiting' ? 'Stop waiting — end background work and finalize this board' : 'Stop generating'}
       onClick={(e) => { e.stopPropagation(); data.onStop(id); }}
     >■</button>
   ) : null;
@@ -1060,6 +1069,14 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
 
   return (
     <>
+    {/* Branch-Signposts: floating "this branch explores X" label above structural nodes. NodeToolbar is
+        portal-rendered and does NOT scale with the viewport, so it stays readable even when the card shrinks
+        to a far-LOD gist. Shown only when a label exists (signpost + non-empty text). */}
+    {signpostLabel && (
+      <NodeToolbar position={Position.Top} isVisible offset={6} align="center">
+        <div className="branch-signpost nodrag nopan" title={signpostLabel}>{signpostLabel}</div>
+      </NodeToolbar>
+    )}
     {/* The board slot sizes to its card in BOTH LODs now (no fixed height): far cards are content-tight
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
@@ -1560,6 +1577,34 @@ const PERM_OPTS: { value: string; label: string }[] = [
   { value: 'plan', label: 'plan · no tool execution' },
   { value: 'bypassPermissions', label: 'bypass · skip approval' },
 ];
+// Short icon+label for the always-visible canvas permission-mode chip (PermModeHint). Mirrors the modes
+// above but compact; bypass is flagged danger-styled. Unknown modes fall back to a generic lock.
+const PERM_DISPLAY: Record<string, { icon: string; label: string }> = {
+  default: { icon: '🛡', label: 'default' },
+  acceptEdits: { icon: '✎', label: 'acceptEdits' },
+  plan: { icon: '📋', label: 'plan' },
+  bypassPermissions: { icon: '⚡', label: 'bypass' },
+  inherit: { icon: '⚙', label: 'inherit' },
+};
+
+// Always-visible permission-mode chip (top-left, twin of the Ctrl+scroll zoom hint). Shows the active
+// mode and cycles it on click — same step as Shift+Tab (default → acceptEdits → plan). bypass is shown
+// danger-styled so "tools run unattended" is never silent. The mode is the global active-provider setting.
+function PermModeHint({ mode, onCycle }: { mode: string; onCycle: () => void }) {
+  const d = PERM_DISPLAY[mode] ?? { icon: '🔒', label: mode };
+  return (
+    <button
+      type="button"
+      className={`perm-hint nodrag nopan${mode === 'bypassPermissions' ? ' perm-hint--danger' : ''}`}
+      title="Permission mode — click or Shift+Tab to cycle (default → acceptEdits → plan)"
+      onClick={onCycle}
+    >
+      <span className="perm-hint__ic">{d.icon}</span>
+      <span className="perm-hint__mode">{d.label}</span>
+      <kbd>⇧⇥</kbd>
+    </button>
+  );
+}
 // Effort levels low→max, in order. '' = default (inherit the model default; nothing sent).
 const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 
@@ -1901,6 +1946,11 @@ const RELAYOUT_DEBOUNCE_MS = 30;
 // in-memory counters and gives it a fresh round. Strategy here, mechanism in the effect (principle 14).
 const MAX_SUMMARY_ATTEMPTS = 4;
 const SUMMARY_RETRY_BASE_MS = 1500; // delays: ~1.5s, 4.5s, 13.5s (base * 3^(failCount-1))
+// Branch-Signposts: same bounded-retry policy as digests, but the fail budget is keyed by the segment
+// CONTENT KEY (branchSummaryKey) not the boardId — so when a branch grows (new key) it gets a fresh budget
+// automatically, while a permanently-failing summarizer for one content state still stops hammering.
+const MAX_BRANCH_SUMMARY_ATTEMPTS = 4;
+const BRANCH_SUMMARY_RETRY_BASE_MS = 1500;
 function App() {
   const idRef = useRef(2);
   const seqRef = useRef(1); // root is seq 0; every new board takes the next seq
@@ -1908,6 +1958,13 @@ function App() {
   const summaryReqRef = useRef<Set<string>>(new Set()); // boards with a summary request in flight or already succeeded — avoid duplicate requests
   const summaryFailRef = useRef<Map<string, number>>(new Map()); // boardId → failed/empty summary attempts (bounds auto-retry)
   const [summaryRetryTick, setSummaryRetryTick] = useState(0); // bumped after a backoff delay to re-run the auto-summary effect for a failed board
+  // Branch-Signposts: in-flight branch-label requests (per signpost board), the content key each was
+  // dispatched for (stored on success so needsBranchSummary's recompute matches), and the per-content-key
+  // fail budget. retry tick re-runs the auto-branch-summary effect after a backoff.
+  const branchReqRef = useRef<Set<string>>(new Set());
+  const branchReqKeyRef = useRef<Map<string, string>>(new Map());
+  const branchFailRef = useRef<Map<string, number>>(new Map());
+  const [branchRetryTick, setBranchRetryTick] = useState(0);
   const [nodes, setNodes] = useState<BoardNodeT[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [drawer, setDrawer] = useState<{ merge: MergeResult; context: string; ids: string[]; base: { lcaId: string; uncoveredShared: string[] } | null } | null>(null);
@@ -2119,7 +2176,11 @@ function App() {
   // Stop a streaming turn: tell the host to abort. The host settles the board to 'done'
   // with whatever text streamed so far (see runQuery's abort branch), so partial output is kept.
   const onStop = useCallback((boardId: string) => {
-    post({ type: 'abort', boardId });
+    // A 'waiting' board (held open for async work) is stopped GRACEFULLY: close the held session + stop its
+    // background tasks (stopWaiting) → it finalizes to 'done'. A streaming board is aborted. (异步续接 AD5)
+    const b = nodesRef.current.find((n) => n.id === boardId);
+    if (b?.data.status === 'waiting') post({ type: 'stopWaiting', boardId });
+    else post({ type: 'abort', boardId });
   }, []);
 
   // M11 mid-stream follow-up: a follow-up stays in THIS board as a new round (no child board). Materialize turns[]
@@ -2131,6 +2192,10 @@ function App() {
     const leaf = nodesRef.current.find((n) => n.id === leafId);
     if (!leaf) return;
     const wasStreaming = leaf.data.status === 'streaming';
+    // Async continuation (异步续接): a 'waiting' board's session is also still OPEN — route the follow-up
+    // into it (push) like streaming, not send+resume. But it has NO live round to keep unsettled (all rounds
+    // are done) and nothing to interrupt. (AD8)
+    const sessionLive = wasStreaming || leaf.data.status === 'waiting';
     // Mark every existing round settled EXCEPT, while streaming, the live (last) one — the engine is still
     // writing it, so its `done` arrives later via the `done` handler. The new round is queued (done:false)
     // → turnViewStatus shows it 'queued', not 'Generating…', until the engine reaches it. (chronological fix)
@@ -2160,10 +2225,11 @@ function App() {
     // silently dropped on a follow-up (the global ref was read only in onSend); per-board makes it consistent.
     const attached = attachByBoardRef.current[leafId]?.attachment;
     const sendText = attached ? `${buildEditorContextBlock(attached)}\n\n${text}` : text;
-    if (wasStreaming) {
+    if (sessionLive) {
       // resume/turnIndex = self-heal: if the live query already closed (rare race), the host runs this
-      // as a send+resume into the same board instead of dropping it (so the board never hangs).
-      post({ type: 'followup', boardId: leafId, text: sendText, interrupt, resume: leaf.data.sessionId, turnIndex, images });
+      // as a send+resume into the same board instead of dropping it (so the board never hangs). interrupt
+      // only applies while actively generating; a waiting board has nothing to cut.
+      post({ type: 'followup', boardId: leafId, text: sendText, interrupt: wasStreaming && interrupt, resume: leaf.data.sessionId, turnIndex, images });
     } else {
       post({ type: 'send', boardId: leafId, prompt: sendText, resume: leaf.data.sessionId, fork: false, turnIndex, images });
     }
@@ -2301,6 +2367,21 @@ function App() {
     return s;
   }, [selectedIds, edges, expandAncestors]);
 
+  // Branch-Signposts: the floating label text for each signpost (root / branch head / merge / compact).
+  // Multi-node segments use the synthesized branchSummary; single-node segments (and multi-node ones whose
+  // synthesis hasn't landed yet) fall back to the signpost round's own miniSummary, so the label never
+  // shows an empty gap. Only non-empty entries are kept → a BoardNode renders its toolbar iff present.
+  const signpostLabels = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const n of nodes) {
+      if (!isSignpost(n.id, nodes, edges)) continue;
+      const multi = branchSegment(n.id, nodes, edges).length > 1;
+      const text = (multi && n.data.branchSummary) ? n.data.branchSummary : (n.data.miniSummary || '');
+      if (text) m.set(n.id, text);
+    }
+    return m;
+  }, [nodes, edges]);
+
   // The root→leaf ancestor chain for the focused board, ordered by seq, rendered as one conversation.
   // (focusedId is the VIEW LEAF, which auto-descended below the entered node — so this chain spans the
   // whole thread from the root down to the leaf/branch we stopped at.)
@@ -2424,7 +2505,9 @@ function App() {
       onSend(leafId, prompt);
       return;
     }
-    if (leaf.data.status === 'streaming') {
+    // Streaming OR waiting (异步续接 AD8): the session is held open → the follow-up becomes a new round in
+    // THIS board (sendFollowup pushes into the live query), not a fork.
+    if (leaf.data.status === 'streaming' || leaf.data.status === 'waiting') {
       sendFollowup(leafId, prompt, !!interrupt);
       return;
     }
@@ -2726,6 +2809,9 @@ function App() {
   // and write through to global VS Code settings. The host echoes back a 'config' broadcast (idempotent).
   const setConfigField = useCallback((patch: Partial<BraidConfig>) => {
     setConfig((prev) => (prev ? { ...prev, ...patch } : prev));
+    // Mirror optimistically so the keydown handler (Shift+Tab cycle) reads the latest mode on rapid
+    // presses, ahead of the host's echoed 'config' broadcast. The echo re-sets it idempotently.
+    if (configRef.current) configRef.current = { ...configRef.current, ...patch };
     post({ type: 'setConfig', patch });
   }, []);
 
@@ -2863,6 +2949,31 @@ function App() {
           }
           break;
         }
+        case 'branchSummary': {
+          // Branch signpost label reply. Store the result keyed by the content key the request was
+          // dispatched for (branchReqKeyRef) so needsBranchSummary's later recompute matches → no churn.
+          // Always clear the in-flight flag + release the board (staleness is governed by the key compare,
+          // not a forever-marked ref — a growing branch SHOULD re-request when its key changes).
+          const reqKey = branchReqKeyRef.current.get(m.boardId);
+          branchReqRef.current.delete(m.boardId);
+          branchReqKeyRef.current.delete(m.boardId);
+          patch(m.boardId, () => ({
+            branchSummarizing: false,
+            ...(m.text && reqKey ? { branchSummary: m.text, branchSummaryKey: reqKey } : {}),
+          }));
+          if (m.text) {
+            if (reqKey) branchFailRef.current.delete(reqKey); // success → forget this content's failures
+          } else if (reqKey) {
+            // Empty/failed → bound retries per content key with backoff (new content gets a fresh budget).
+            const fails = (branchFailRef.current.get(reqKey) ?? 0) + 1;
+            branchFailRef.current.set(reqKey, fails);
+            if (fails < MAX_BRANCH_SUMMARY_ATTEMPTS) {
+              const delay = BRANCH_SUMMARY_RETRY_BASE_MS * Math.pow(3, fails - 1);
+              setTimeout(() => setBranchRetryTick((t) => t + 1), delay);
+            }
+          }
+          break;
+        }
         case 'compacted':
           // Compaction done: turn the compact node idle (awaiting a prompt), with the compacted
           // (forked) session as its parent so onSend resumes the compressed context. Summary cached
@@ -2897,6 +3008,30 @@ function App() {
             };
           });
           break;
+        case 'waiting': {
+          // Async continuation (异步续接): the board's session is held open for in-flight background tasks /
+          // scheduled wakeups. Non-empty pending → 'waiting' (a board-level hold; the rounds stayed 'done').
+          // EMPTY pending = the host's finalize after the held session closed → drop back to 'done' and clear
+          // the chips. Don't disturb a board that wasn't waiting (a normal turn's finalize is a no-op).
+          const has = m.pending.background.length > 0 || m.pending.crons.length > 0;
+          patch(m.boardId, (d) => has
+            ? { status: 'waiting', asyncPending: m.pending }
+            : (d.status === 'waiting' ? { status: 'done', asyncPending: undefined } : { asyncPending: undefined }));
+          break;
+        }
+        case 'task': {
+          // Background-task lifecycle. The authoritative chip set is the `waiting` snapshot (Stop hook); a
+          // notification just refreshes the matching chip's status live (running → completed/failed) before
+          // the next round's `waiting` arrives. Best-effort: no-op if there's no pending snapshot yet.
+          if (m.ev.phase === 'notification') {
+            patch(m.boardId, (d) => {
+              if (!d.asyncPending) return {};
+              const background = d.asyncPending.background.map((t) => (t.id === m.ev.id ? { ...t, status: m.ev.status ?? t.status } : t));
+              return { asyncPending: { ...d.asyncPending, background } };
+            });
+          }
+          break;
+        }
       }
     };
     window.addEventListener('message', handler);
@@ -2913,18 +3048,14 @@ function App() {
   useEffect(() => {
     if (!hydratedRef.current) return;
     const t = setTimeout(() => setNodes((ns) => {
-      // Pin the selected board across the repack: capture its position, re-layout, then translate the
-      // WHOLE graph so it lands back where it was. Expanding its lineage (fisheye) thus reflows the OTHER
-      // nodes around it — the board you clicked never slides to the screen edge / off-screen. (No selection
-      // → no anchor, just repack.) Viewport is untouched, so this never jumps the canvas. (decisions.md)
-      const anchorId = ns.find((n) => n.selected)?.id;
-      const before = anchorId ? ns.find((n) => n.id === anchorId)!.position : undefined;
-      const laid = autoLayout(ns, edgesRef.current);
-      if (!before) return laid;
-      const after = laid.find((n) => n.id === anchorId)?.position;
-      if (!after) return laid;
-      const dx = before.x - after.x, dy = before.y - after.y;
-      return dx || dy ? laid.map((n) => ({ ...n, position: { x: n.position.x + dx, y: n.position.y + dy } })) : laid;
+      // Repack via dagre, then translate the WHOLE graph so it stays put on screen (the viewport is never
+      // touched here). A SELECTED board pins itself — its lineage expanding (fisheye) reflows the OTHERS
+      // around it and the board you clicked never slides to the edge. With NO selection we pin the graph's
+      // bounding-box top-left instead of letting layoutGraph's origin-normalization snap it back to (0,0):
+      // the graph can have drifted off-origin (accumulated selected-anchor translations), and snapping it
+      // to the origin while the viewport sits elsewhere is what flung every node off-canvas. (decisions.md)
+      const selectedId = ns.find((n) => n.selected)?.id ?? null;
+      return relayoutAnchored(ns, edgesRef.current, dirRef.current, selectedId);
     }), RELAYOUT_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [sizeSig]);
@@ -2975,6 +3106,31 @@ function App() {
       }
     }
   }, [nodes, summaryRetryTick]);
+
+  // Branch-Signposts: (re)generate the floating "this branch explores X" label for each signpost whose
+  // segment is stale (needsBranchSummary: signpost, ≥2 done boards, content key changed). Mirrors the digest
+  // effect — concurrency-capped, with a per-content-key bounded retry budget. The request text = the
+  // segment's concatenated Q/A; the stored key (branchReqKeyRef) ties the eventual reply to this content.
+  useEffect(() => {
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n] as const));
+    let inFlight = nodes.reduce((c, n) => c + (n.data.branchSummarizing ? 1 : 0), 0);
+    for (const n of nodes) {
+      if (inFlight >= MAX_CONCURRENT_BRANCH_SUMMARIES) break;
+      if (branchReqRef.current.has(n.id)) continue;
+      if (!needsBranchSummary(n.id, nodes, edges)) continue;
+      const segment = branchSegment(n.id, nodes, edges);
+      const key = branchSummaryKey(segment, byId);
+      if ((branchFailRef.current.get(key) ?? 0) >= MAX_BRANCH_SUMMARY_ATTEMPTS) continue;
+      const text = segment
+        .map((id) => `Q: ${byId[id]?.data.prompt ?? ''}\nA: ${byId[id]?.data.answer ?? ''}`)
+        .join('\n\n');
+      branchReqRef.current.add(n.id);
+      branchReqKeyRef.current.set(n.id, key);
+      post({ type: 'branchSummarize', boardId: n.id, text });
+      patch(n.id, () => ({ branchSummarizing: true }));
+      inFlight++;
+    }
+  }, [nodes, edges, branchRetryTick]);
 
   const onNodesChange = useCallback((ch: NodeChange[]) => {
     setNodes((ns) => applyNodeChanges(ch, ns) as BoardNodeT[]);
@@ -3093,6 +3249,23 @@ function App() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [undoDelete]);
+
+  // Shift+Tab cycles the permission mode (default → acceptEdits → plan), like the official extension.
+  // Ignored while typing in a composer / settings field (Shift+Tab there = normal back-tab / autofill).
+  // Reads the latest mode via configRef (kept fresh by setConfigField's optimistic mirror). Subscribe once.
+  useEffect(() => {
+    const onPermKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || !e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+      const cfg = configRef.current;
+      if (!cfg) return;
+      e.preventDefault();
+      setConfigField({ permissionMode: nextPermMode(cfg.permissionMode) });
+    };
+    window.addEventListener('keydown', onPermKey);
+    return () => window.removeEventListener('keydown', onPermKey);
+  }, [setConfigField]);
 
   // M12 drag-fusion: a transient hint shown when a board is dropped on a non-fusable neighbor.
   const [fuseNote, setFuseNote] = useState('');
@@ -3260,6 +3433,7 @@ function App() {
     <DirCtx.Provider value={dir}>
     <DetailIdsCtx.Provider value={detailIds}>
     <MergeCtxHL.Provider value={mergeCtxIds}>
+    <SignpostCtx.Provider value={signpostLabels}>
     <RevealCtx.Provider value={revealedId}>
     <FuseTargetCtx.Provider value={fuseTarget}>
     <AttachCtx.Provider value={attachState}>
@@ -3306,6 +3480,9 @@ function App() {
           cursor (React Flow pinch-zoom). pointer-events:none so it never blocks canvas interaction.
           Hidden whenever a panel/ChatView/backdrop is up (they all sit at a higher z-index). */}
       <div className="zoom-hint" aria-hidden="true"><kbd>Ctrl</kbd> + scroll to zoom</div>
+      {/* Always-visible permission-mode chip (twin of the zoom hint): shows the active mode + cycles it
+          on click / Shift+Tab. Hidden until config loads. */}
+      {config && <PermModeHint mode={config.permissionMode} onCycle={() => setConfigField({ permissionMode: nextPermMode(config.permissionMode) })} />}
 
       <div className="toolbar">
         <button className="btn primary" onClick={() => newConversation()} title="New conversation">+</button>
@@ -3501,6 +3678,7 @@ function App() {
     </AttachCtx.Provider>
     </FuseTargetCtx.Provider>
     </RevealCtx.Provider>
+    </SignpostCtx.Provider>
     </MergeCtxHL.Provider>
     </DetailIdsCtx.Provider>
     </DirCtx.Provider>

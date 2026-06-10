@@ -353,6 +353,17 @@ export interface MergeResult {
 
 export const firstLine = (s: string) => (s.split('\n')[0] || '').slice(0, 40);
 
+/** One-line human summary of pending async work (异步续接), for the waiting indicator's tooltip. '' = none.
+ * Timing is intentionally vague ("scheduled wakeup") — cron fires at minute granularity, not the exact
+ * delay requested (knowledge.md), so we never show a precise countdown. Pure → unit-tested. */
+export function describeAsyncPending(p?: AsyncPending): string {
+  if (!p) return '';
+  const parts: string[] = [];
+  if (p.background.length) parts.push(`${p.background.length} background task${p.background.length === 1 ? '' : 's'} running`);
+  if (p.crons.length) parts.push(`${p.crons.length} scheduled wakeup${p.crons.length === 1 ? '' : 's'}`);
+  return parts.join(' · ');
+}
+
 // ---- M11: context-window usage meter (policy/mechanism split — principle 14; thresholds are tunables) ----
 // Color-bucket cutoffs for the usage badge. pct ≥ HIGH → red (near the window limit).
 export const CONTEXT_WARN_PCT = 60;
@@ -594,7 +605,10 @@ export function needsBranchSummary(signpostId: string, nodes: BoardNodeT[], edge
   const segment = branchSegment(signpostId, nodes, edges);
   if (segment.length < 2) return false;
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n] as const));
-  if (!segment.every((id) => byId[id]?.data.status === 'done')) return false;
+  // Don't summarize a mid-stream branch. An idle compact node is a STABLE boundary (it never "runs" — you
+  // fork it to continue), so it counts as settled and doesn't block its branch from being labeled.
+  const settled = (d?: BoardData) => d?.status === 'done' || (!!d?.compact && d?.status === 'idle');
+  if (!segment.every((id) => settled(byId[id]?.data))) return false;
   return byId[signpostId]?.data.branchSummaryKey !== branchSummaryKey(segment, byId);
 }
 
@@ -692,6 +706,19 @@ export function hasPendingAsk(d: BoardData): boolean {
 // SSOT (boardNeedsAttention). Scans every round's steps (single- or multi-turn). Pure → unit-testable.
 export function hasPendingPermission(d: BoardData): boolean {
   return boardTurns(d).some((t) => (t.steps ?? []).some((s) => s.permission != null && s.result == null));
+}
+
+// Permission modes the Shift+Tab / canvas-chip cycle steps through, in order — matches the official
+// extension's Normal → Auto-accept edits → Plan. `bypassPermissions` and `inherit` are intentionally
+// excluded from the quick cycle (still selectable in Settings; bypass is dangerous to land on by accident).
+// Policy in data (principle 14). Pure → unit-tested.
+export const PERM_MODE_CYCLE = ['default', 'acceptEdits', 'plan'] as const;
+
+// The next mode in the cycle after `current`. A mode outside the cycle (bypass/inherit/unknown) → the
+// first entry ('default'), so Shift+Tab always lands on a known cycle state. Pure → unit-tested.
+export function nextPermMode(current: string): string {
+  const i = PERM_MODE_CYCLE.indexOf(current as typeof PERM_MODE_CYCLE[number]);
+  return PERM_MODE_CYCLE[(i + 1) % PERM_MODE_CYCLE.length];
 }
 
 /**

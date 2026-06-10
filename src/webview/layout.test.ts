@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { Edge } from '@xyflow/react';
 import type { BoardData, BoardNodeT } from './merge';
 import { makeEdge } from './merge';
-import { layoutGraph } from './layout';
+import { layoutGraph, relayoutAnchored, graphTopLeft } from './layout';
 
 const noop = () => {};
 function node(id: string, seq = 0): BoardNodeT {
@@ -92,5 +92,63 @@ describe('layoutGraph', () => {
     const out = layoutGraph(nodes, edges, 'LR');
     // both roots start at the left edge of their band (x ≈ 0).
     expect(box(out, 'r1').x0).toBeCloseTo(box(out, 'r2').x0, 5);
+  });
+});
+
+// Move a node set to a given top-left (simulates the graph having drifted off the layout origin, e.g. via
+// accumulated selected-anchor translations or a manual pan-then-persist).
+function offsetBy(nodes: BoardNodeT[], dx: number, dy: number): BoardNodeT[] {
+  return nodes.map((n) => ({ ...n, position: { x: n.position.x + dx, y: n.position.y + dy } }));
+}
+const at = (out: BoardNodeT[], id: string) => out.find((n) => n.id === id)!.position;
+
+describe('graphTopLeft', () => {
+  it('returns (0,0) for an empty set', () => {
+    expect(graphTopLeft([])).toEqual({ x: 0, y: 0 });
+  });
+  it('returns the min x / min y across nodes (independently)', () => {
+    const ns = [
+      { ...node('a'), position: { x: 10, y: 500 } },
+      { ...node('b'), position: { x: 300, y: 40 } },
+    ];
+    expect(graphTopLeft(ns)).toEqual({ x: 10, y: 40 });
+  });
+});
+
+describe('relayoutAnchored', () => {
+  const edges: Edge[] = [makeEdge('a', 'b', 'fork')];
+
+  it('keeps an UNSELECTED drifted graph in place instead of snapping to the origin (the drift bug)', () => {
+    // A graph that has drifted far off-origin (top-left at 4000,3000). layoutGraph would normalize it back
+    // to ~(0,0); relayoutAnchored with no selection must hold its top-left so it doesn't fly off-canvas.
+    const drifted = offsetBy(layoutGraph([node('a'), node('b')], edges), 4000, 3000);
+    const beforeTL = graphTopLeft(drifted);
+    const out = relayoutAnchored(drifted, edges, 'TB', null);
+    expect(graphTopLeft(out)).toEqual(beforeTL); // position preserved — NOT (≈0,0)
+    expect(graphTopLeft(out).x).toBeGreaterThan(1000);
+  });
+
+  it('preserves relative structure while holding position (child still below parent, TB)', () => {
+    const drifted = offsetBy(layoutGraph([node('a'), node('b')], edges), 4000, 3000);
+    const out = relayoutAnchored(drifted, edges, 'TB', null);
+    expect(at(out, 'b').y).toBeGreaterThan(at(out, 'a').y);
+  });
+
+  it('pins the SELECTED board to its prior position across a repack', () => {
+    const laid = layoutGraph([node('a'), node('b')], edges);
+    const beforeB = at(laid, 'b');
+    const out = relayoutAnchored(laid, edges, 'TB', 'b');
+    expect(at(out, 'b')).toEqual(beforeB); // the selected board does not move on screen
+  });
+
+  it('does not snap a selected, drifted graph to the origin either', () => {
+    const drifted = offsetBy(layoutGraph([node('a'), node('b')], edges), 4000, 3000);
+    const beforeA = at(drifted, 'a');
+    const out = relayoutAnchored(drifted, edges, 'TB', 'a');
+    expect(at(out, 'a')).toEqual(beforeA);
+  });
+
+  it('returns the laid graph unchanged for an empty set', () => {
+    expect(relayoutAnchored([], [], 'TB', null)).toEqual([]);
   });
 });
