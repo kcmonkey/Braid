@@ -363,12 +363,18 @@ function registerCanvasSerializer(context: vscode.ExtensionContext): vscode.Disp
   return vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
     async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown) {
       const id = (state as { canvasId?: unknown } | null)?.canvasId;
+      console.log('[Braid] deserializeWebviewPanel fired; persisted canvasId =', id);
       const canvases = await ensureCanvases(context);
       const canvas = typeof id === 'string' ? canvases.find((c) => c.id === id) : undefined;
-      if (!canvas || panels.has(canvas.id)) { panel.dispose(); return; } // unmappable or already open → drop
+      if (!canvas || panels.has(canvas.id)) {
+        console.log('[Braid] revive dropped (no matching canvas or already open):', id);
+        panel.dispose();
+        return; // unmappable or already open → drop
+      }
       panel.title = canvas.name;
       panel.webview.options = webviewOptions(context); // revived panels can come back with scripts disabled
       wireCanvasPanel(context, canvas.id, panel);
+      console.log('[Braid] revived canvas', canvas.id, canvas.name);
     },
   });
 }
