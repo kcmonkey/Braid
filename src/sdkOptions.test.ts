@@ -54,6 +54,12 @@ describe('buildSdkOptions', () => {
     expect('allowDangerouslySkipPermissions' in o).toBe(false);
   });
 
+  it('default mode is emitted and carries no skip flag (the approval UI gates risky tools via canUseTool)', () => {
+    const o = buildSdkOptions(base({ permissionMode: 'default' }));
+    expect(o.permissionMode).toBe('default');
+    expect('allowDangerouslySkipPermissions' in o).toBe(false);
+  });
+
   it('permissionMode=inherit → no permissionMode key', () => {
     const o = buildSdkOptions(base({ permissionMode: 'inherit' }));
     expect('permissionMode' in o).toBe(false);
@@ -113,6 +119,7 @@ describe('migrateLegacyConfig', () => {
     expect(partial.model).toBe('sonnet');
     expect(partial.effort).toBe('xhigh');
     expect(partial.thinking).toBe('adaptive');
-    expect(partial.permissionMode).toBe('bypassPermissions');
+    // Default permission mode is now 'default' (prompt for risky tools via the approval UI), not bypass.
+    expect(partial.permissionMode).toBe('default');
   });
 });
