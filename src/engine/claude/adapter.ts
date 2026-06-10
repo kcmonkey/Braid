@@ -331,6 +331,58 @@ export class ClaudeAdapter implements Engine {
     return ctrl;
   }
 
+  // ---- slash-command list (composer autofill cold-start) ----
+  // supportedCommands() is a streaming-input control method → needs the same empty-input keep-alive session
+  // as mcpControl/accountControl, but only for a one-shot fetch, so it is created + disposed inline here.
+  // Verified rich under subscription auth (knowledge.md: 27 cmds w/ descriptions). Never throws → [].
+  async listSlashCommands(cwd: string): Promise<SlashCommandSpec[]> {
+    return this.withControlSession<SlashCommandSpec[]>(cwd, async (q) => {
+      let raw: any;
+      try { raw = await q.supportedCommands(); } catch { /* fall back to initializationResult */ }
+      if (!Array.isArray(raw)) {
+        try { const init = await q.initializationResult(); raw = init?.commands; } catch { /* ignore */ }
+      }
+      if (!Array.isArray(raw)) return [];
+      return raw.map(toSlashCommandSpec).filter(Boolean) as SlashCommandSpec[];
+    }, []);
+  }
+
+  /** Run `fn` over a short-lived streaming-input control session (empty keep-alive input, like
+   * mcpControl/accountControl), then always dispose it. Returns `fallback` on any failure or timeout —
+   * never throws, never leaves a CLI subprocess alive. */
+  private async withControlSession<T>(cwd: string, fn: (q: any) => Promise<T>, fallback: T, timeoutMs = 8000): Promise<T> {
+    const sdk = await this.deps.loadSdk();
+    if (!sdk) return fallback;
+    let release: () => void = () => {};
+    const keepAlive = new Promise<void>((r) => { release = r; });
+    async function* input() { await keepAlive; } // yields nothing; stays open until release()
+    let q: any;
+    try {
+      q = sdk.query({ prompt: input(), options: { cwd, permissionMode: 'bypassPermissions', persistSession: false } });
+    } catch (e: any) {
+      console.error('[Braid] control session failed to start:', e?.message ?? e);
+      return fallback;
+    }
+    const drain = (async () => {
+      try { for await (const _m of q as AsyncIterable<any>) { /* pump transport */ } }
+      catch { /* ended on dispose */ }
+    })();
+    try {
+      const call = fn(q);
+      call.catch(() => {}); // swallow a late rejection if the timeout wins the race
+      let timer: ReturnType<typeof setTimeout>;
+      const timeout = new Promise<never>((_, rej) => { timer = setTimeout(() => rej(new Error('control session timed out')), timeoutMs); });
+      try { return await Promise.race([call, timeout]); }
+      finally { clearTimeout(timer!); }
+    } catch (e: any) {
+      console.error('[Braid] control session call failed:', e?.message ?? e);
+      return fallback;
+    } finally {
+      release();                    // closes input() → the query ends
+      await drain.catch(() => {});  // let the drain unwind so no subprocess lingers
+    }
+  }
+
   // ---- subscription-auth probe (was checkEnvironment's inner query) ----
   async checkAuth(cwd: string, abort: AbortController): Promise<AuthResult> {
     const sdk = await this.deps.loadSdk();
