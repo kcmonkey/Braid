@@ -13,15 +13,15 @@ import 'highlight.js/styles/github-dark.css';
 import './styles.css';
 import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
-  type EditorContext, type AskUserQuestion, type Turn, type ThinkMark,
-  GRAPH_VERSION, firstLine, summaryHeadline, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit,
-  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, buildRebuildSeed, hasPendingAsk,
+  type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
+  GRAPH_VERSION, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit,
+  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
 import { layoutGraph, type LayoutDir } from './layout';
-import type { HostMessage, WebviewMessage, McpServerInfo } from '../protocol';
+import type { HostMessage, WebviewMessage, McpServerInfo, BoardTag } from '../protocol';
 import type { BraidConfig } from '../sdkOptions';
 
 declare function acquireVsCodeApi(): { postMessage: (m: unknown) => void };
@@ -339,7 +339,7 @@ function StepList({ steps, parentId }: { steps: ToolStep[]; parentId?: string })
 // (action). Consecutive tool cards with no prose between them group under one .tools block; a thinking
 // pill is standalone (closes any open tool run first).
 function TurnBody({ data }: {
-  data: { answer?: string; steps?: ToolStep[]; status: Status; thinks?: ThinkMark[]; thinking?: string; thoughtMs?: number };
+  data: { answer?: string; steps?: ToolStep[]; status: TurnViewStatus; thinks?: ThinkMark[]; thinking?: string; thoughtMs?: number };
 }) {
   const answer = data.answer ?? '';
   const steps = data.steps ?? [];
@@ -418,8 +418,11 @@ function TurnBody({ data }: {
 function TurnView({ boardId, prompt, body }: {
   boardId: string;
   prompt: string;
-  body: { answer?: string; steps?: ToolStep[]; status: Status; thinks?: ThinkMark[]; thinking?: string; thoughtMs?: number };
+  body: { answer?: string; steps?: ToolStep[]; status: TurnViewStatus; thinks?: ThinkMark[]; thinking?: string; thoughtMs?: number };
 }) {
+  // A queued follow-up: the engine processes rounds in order, so this round hasn't started yet — show a
+  // distinct "queued" line, NOT the "Generating…" pulse (that belongs to the round actually being written).
+  const queued = body.status === 'queued';
   // The "generating" pulse shows while streaming and no thinking block is currently open (an active
   // thinking mark already shows its own "Thinking…" pulse inline, so we don't double up).
   const anyThinking = body.status === 'streaming' && thinkMarks(body).some((m) => m.active);
@@ -430,9 +433,15 @@ function TurnView({ boardId, prompt, body }: {
       </div>
       <div className="turn__a">
         <span className="turn__rail" aria-hidden />
-        <TurnBody data={body} />
-        {body.status === 'streaming' && !anyThinking && (
-          <div className="turn__working"><span className="working__dot" />Generating…</div>
+        {queued ? (
+          <div className="turn__queued"><span className="queued__dot" />Queued — sends after the current answer</div>
+        ) : (
+          <>
+            <TurnBody data={body} />
+            {body.status === 'streaming' && !anyThinking && (
+              <div className="turn__working"><span className="working__dot" />Generating…</div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -518,30 +527,34 @@ const RevealCtx = React.createContext<string | null>(null);
 // Same context pattern as DirCtx/MergeCtxHL (React Flow's node memo doesn't block context propagation).
 const FuseTargetCtx = React.createContext<string | null>(null);
 
-// M7 gap3: a single pending editor-context attachment (the active/last-focused file's selection or
-// whole file). Provided by App so any compose box (card or ChatView) renders the same chip + button.
-// One slot at a time; onSend prepends it to the prompt and clears it.
+// M7 gap3: pending editor-context attachment (the active/last-focused file's selection or whole file),
+// now keyed PER BOARD so a board's card and its ChatView composer share one chip while different boards
+// stay independent. Provided by App; onSend/sendFollowup prepend the board's attachment to the engine
+// prompt and clear it. One slot per board.
 interface AttachState {
-  attachment: EditorContext | null;
-  note: string;            // transient hint, e.g. when no file editor is available
-  request: () => void;     // ask the host for the current editor context
-  clear: () => void;       // remove the pending attachment
+  // Per-board pending editor-context attachment, keyed by composer board id (DraftCtx-style SSOT) so the
+  // card and the ChatView composer for the SAME board share one chip, and one board's attachment never
+  // bleeds onto another's composer.
+  get: (id: string) => { attachment: EditorContext | null; note: string };
+  request: (id: string) => void;   // ask the host for the current editor context for this board
+  clear: (id: string) => void;     // remove this board's pending attachment
 }
-const AttachCtx = React.createContext<AttachState>({ attachment: null, note: '', request: () => {}, clear: () => {} });
+const AttachCtx = React.createContext<AttachState>({ get: () => ({ attachment: null, note: '' }), request: () => {}, clear: () => {} });
 
-// Attach button + (when set) a removable chip. Lives in a compose box; reads the shared AttachCtx.
-function AttachBar() {
-  const { attachment, note, request, clear } = React.useContext(AttachCtx);
+// Attach button + (when set) a removable chip. Lives in a compose box; reads the shared AttachCtx for its board.
+function AttachBar({ boardId }: { boardId: string }) {
+  const ctx = React.useContext(AttachCtx);
+  const { attachment, note } = ctx.get(boardId);
   return (
     <div className="attach nodrag nopan" onClick={(e) => e.stopPropagation()}>
-      <button className="attach__btn" title="Attach the active editor's selection as context (whole file if no selection)" onClick={request}>📎</button>
+      <button className="attach__btn" title="Attach the active editor's selection as context (whole file if no selection)" onClick={() => ctx.request(boardId)}>📎</button>
       {note && <span className="attach__note">{note}</span>}
       {attachment && (
         <span className="attach__chip" title={attachment.path}>
           <span className="attach__path">
             {attachment.path}{attachment.isSelection ? `:${attachment.startLine}-${attachment.endLine}` : ' (whole file)'}
           </span>
-          <button className="attach__x" title="Remove" onClick={clear}>×</button>
+          <button className="attach__x" title="Remove" onClick={() => ctx.clear(boardId)}>×</button>
         </span>
       )}
     </div>
@@ -553,11 +566,23 @@ function AttachBar() {
 // merged / summarized (D1/D2). `url` is the data: URL, reused as the thumbnail src.
 interface PendingImage { id: string; mediaType: string; data: string; url: string }
 interface ImageAttachState {
-  images: PendingImage[];
-  add: (files: FileList | File[]) => void;
-  remove: (id: string) => void;
+  // Per-board pending images, keyed by composer board id (mirrors AttachState/DraftState) so the card and
+  // the ChatView composer for the same board share one strip, and images never bleed across boards.
+  get: (id: string) => PendingImage[];
+  add: (id: string, files: FileList | File[]) => void;
+  remove: (id: string, imgId: string) => void;
 }
-const ImageCtx = React.createContext<ImageAttachState>({ images: [], add: () => {}, remove: () => {} });
+const ImageCtx = React.createContext<ImageAttachState>({ get: () => [], add: () => {}, remove: () => {} });
+
+// Per-board compose draft, keyed by board id — the SSOT so the canvas card's composer and the
+// full-screen ChatView composer for the SAME board read/write ONE value (typing on the card and
+// then zooming in shows the same unsent text, and vice-versa). Transient: held in App state, never
+// persisted/merged/summarized; cleared on send (empty entries are pruned).
+interface DraftState {
+  get: (id: string) => string;
+  set: (id: string, text: string) => void;
+}
+const DraftCtx = React.createContext<DraftState>({ get: () => '', set: () => {} });
 
 // Just the image files out of a clipboard/drop FileList (the compose boxes wire paste/drop themselves).
 const imageFilesFrom = (list: FileList | File[] | null | undefined): File[] =>
@@ -565,22 +590,23 @@ const imageFilesFrom = (list: FileList | File[] | null | undefined): File[] =>
 
 // Thumbnail strip + file-picker button. Lives in a compose box; reads the shared ImageCtx. Paste/drop
 // capture is wired on each compose box's textarea/container (they call add() with the dropped files).
-function ImageBar() {
-  const { images, add, remove } = React.useContext(ImageCtx);
+function ImageBar({ boardId }: { boardId: string }) {
+  const ctx = React.useContext(ImageCtx);
+  const images = ctx.get(boardId);
   const inputRef = useRef<HTMLInputElement>(null);
   return (
     <div className="imgbar nodrag nopan" onClick={(e) => e.stopPropagation()}>
       <button className="imgbar__btn" title="Attach images (also paste Ctrl+V / drop here)" onClick={() => inputRef.current?.click()}>🖼</button>
       <input
         ref={inputRef} type="file" accept="image/*" multiple hidden
-        onChange={(e) => { add(e.target.files ?? []); e.currentTarget.value = ''; }}
+        onChange={(e) => { ctx.add(boardId, e.target.files ?? []); e.currentTarget.value = ''; }}
       />
       {images.length > 0 && (
         <div className="imgbar__strip">
           {images.map((img) => (
             <span key={img.id} className="imgbar__thumb">
               <img src={img.url} alt="" />
-              <button className="imgbar__x" title="Remove" onClick={() => remove(img.id)}>×</button>
+              <button className="imgbar__x" title="Remove" onClick={() => ctx.remove(boardId, img.id)}>×</button>
             </span>
           ))}
         </div>
@@ -608,6 +634,20 @@ function ContextBadge({ tokens, window: win }: { tokens?: number; window?: numbe
     >
       {pct.toFixed(0)}%
     </span>
+  );
+}
+
+// Digest tags: color-coded content-hint chips at the top of a card (closed TAG_VOCAB → one CSS color
+// rule per tag). The SAME data.tags renders at both zoom LODs (far inherits the full set from detail —
+// they're never generated separately), capped at MAX_TAGS upstream.
+function TagChips({ tags }: { tags?: BoardTag[] }) {
+  if (!tags || !tags.length) return null;
+  return (
+    <div className="board__tags">
+      {tags.map((t) => (
+        <span key={t} className={`tag tag--${t}`} title={`Topic: ${t}`}>{t}</span>
+      ))}
+    </div>
   );
 }
 
@@ -665,8 +705,14 @@ function BranchSwitcher({ opts, onPick }: { opts: BranchOpt[]; onPick: (id: stri
 }
 
 function BoardNode({ id, data, selected }: { id: string; data: BoardData; selected: boolean }) {
-  const [draft, setDraft] = useState('');
-  const { add: addImages } = React.useContext(ImageCtx);
+  // Shared per-board draft (SSOT via DraftCtx): the same unsent text is visible whether you type on
+  // this card or in the full-screen ChatView for this board. setDraft writes the keyed entry.
+  const drafts = React.useContext(DraftCtx);
+  const draft = drafts.get(id);
+  const setDraft = (text: string) => drafts.set(id, text);
+  // Compact-boundary card: whether the full raw /compact analysis is expanded under the condensed digest.
+  const [showRawCompact, setShowRawCompact] = useState(false);
+  const imgCtx = React.useContext(ImageCtx);
   const dir = React.useContext(DirCtx);
   const detailSet = React.useContext(DetailIdsCtx);
   // Ancestor of a merge-selected board (its context will be folded into the merge) but not itself
@@ -758,6 +804,8 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           detail↔far switch. Handles stay OUTSIDE it so React Flow's cached handle geometry / edges
           are never disturbed (the classic handle-remount pitfall). */}
       <div className="board__content" key={lod}>
+      {/* Digest tags: content-hint chips on top of the card (far zoom → primary tag only). */}
+      <TagChips tags={data.tags} />
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
         {/* Multi-turn board: M11 in-board follow-ups or an M12 fusion — show how many rounds it holds. */}
@@ -794,15 +842,36 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         // (truncated) instead of a composer; continue by forking (the + handle), or select it to merge.
         // Guard on !prompt so a LEGACY compact node that already holds a Q/A turn still renders it below.
         <div className="board__summary board__compact-boundary">
-          <div className="board__compactlabel">🗜 Compacted boundary — fork (+) to continue · select to merge</div>
-          {data.compactSummary && <Markdown text={data.compactSummary.length > 240 ? `${data.compactSummary.slice(0, 240)}…` : data.compactSummary} />}
+          <div className="board__compactlabel">
+            🗜 Compacted boundary — fork (+) to continue · select to merge
+            {/* Disclosure: reveal the full raw /compact analysis under the condensed digest (icon-only). */}
+            {data.summary && data.compactSummary && (
+              <button
+                className="board__compactraw-toggle nodrag nopan"
+                onClick={(e) => { e.stopPropagation(); setShowRawCompact((v) => !v); }}
+                title={showRawCompact ? 'Hide the full compacted summary' : 'Show the full compacted summary'}
+              >{showRawCompact ? '▾' : '▸'}</button>
+            )}
+          </div>
+          {/* Glanceable digest of the compacted context (condensed by Haiku); falls back to a truncated
+              slice of the raw summary when no digest was generated. */}
+          {data.summary ? (
+            <Markdown text={data.summary} />
+          ) : data.compactSummary ? (
+            <Markdown text={data.compactSummary.length > 240 ? `${data.compactSummary.slice(0, 240)}…` : data.compactSummary} />
+          ) : null}
+          {showRawCompact && data.compactSummary && (
+            <div className="board__compactraw nodrag nopan" onClick={(e) => e.stopPropagation()}>
+              <Markdown text={data.compactSummary} />
+            </div>
+          )}
         </div>
       ) : isFresh ? (
         <div className="board__body">
           <div
             className="compose nodrag nopan"
             onClick={(e) => e.stopPropagation()}
-            onDrop={(e) => { const f = imageFilesFrom(e.dataTransfer.files); if (f.length) { e.preventDefault(); addImages(f); } }}
+            onDrop={(e) => { const f = imageFilesFrom(e.dataTransfer.files); if (f.length) { e.preventDefault(); imgCtx.add(id, f); } }}
             onDragOver={(e) => { if (Array.from(e.dataTransfer.items || []).some((i) => i.kind === 'file')) e.preventDefault(); }}
           >
             {data.merged && data.mergeContext && (
@@ -816,13 +885,13 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
               placeholder={data.merged ? 'Ask a new question based on the merged context…' : data.compact ? 'Continue based on the compacted context…' : 'Ask something…  (Enter to send / Shift+Enter for newline)'}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              onPaste={(e) => { const f = imageFilesFrom(e.clipboardData.files); if (f.length) { e.preventDefault(); addImages(f); } }}
+              onPaste={(e) => { const f = imageFilesFrom(e.clipboardData.files); if (f.length) { e.preventDefault(); imgCtx.add(id, f); } }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
               }}
             />
-            <AttachBar />
-            <ImageBar />
+            <AttachBar boardId={id} />
+            <ImageBar boardId={id} />
             <button className="btn primary" onClick={submit} title="Send (Enter)">↑</button>
           </div>
         </div>
@@ -914,8 +983,12 @@ function ChatView({
   origin: { x: number; y: number } | null; // screen anchor for the zoom in/out animation
   closing: boolean; // playing the exit animation → unmounting shortly
 }) {
-  const [draft, setDraft] = useState('');
-  const { add: addImages } = React.useContext(ImageCtx);
+  // Shared per-board draft (SSOT via DraftCtx), keyed by the view leaf = the board this composer sends
+  // to. Text typed on the canvas card for this board shows up here (and vice-versa); see DraftCtx.
+  const drafts = React.useContext(DraftCtx);
+  const draft = drafts.get(leafId);
+  const setDraft = (text: string) => drafts.set(leafId, text);
+  const imgCtx = React.useContext(ImageCtx);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
@@ -927,6 +1000,11 @@ function ChatView({
   // Floating "scroll to bottom" affordance: shown only while the user is scrolled meaningfully up
   // from the latest output (mirrors pinnedRef's threshold). Hidden when at/near the bottom.
   const [atBottom, setAtBottom] = useState(true);
+  // Branch-switch motion: clicking a sibling branch chip changes entryId to a new fork child while focus
+  // stays open. Instead of the new branch snapping in, the below-fork region fades+slides into place.
+  // `entry` marks where the chosen branch begins (so only that region animates — shared ancestors above
+  // the fork stay put); `tick` retriggers the one-shot wrapper animation on each successive switch.
+  const [branchAnim, setBranchAnim] = useState<{ entry: string; tick: number } | null>(null);
   // Auto-follow streaming output only while the user is pinned at (or near) the bottom. Once they
   // scroll up to read earlier turns, stop yanking the view down on every delta; scrolling back to
   // the bottom re-pins. Tracked in a ref (read inside the scroll effect, no re-render needed).
@@ -940,9 +1018,17 @@ function ChatView({
   const currentViewedId = (): string | null => {
     const el = scrollRef.current;
     if (!el) return null;
+    const turns = el.querySelectorAll<HTMLElement>('.turn[data-board-id]');
+    if (!turns.length) return null;
+    // Bottom guard: a final board shorter than the viewport can never scroll its top up to the spy
+    // line (you hit the scroll end first), so the line-crossing rule below would stall on an earlier
+    // turn while you're actually reading the last one. At the bottom, the viewed board IS the last turn.
+    if (el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_PIN_THRESHOLD) {
+      return turns[turns.length - 1].dataset.boardId ?? null;
+    }
     const top = el.getBoundingClientRect().top;
     let active: string | null = null;
-    el.querySelectorAll<HTMLElement>('.turn[data-board-id]').forEach((t) => {
+    turns.forEach((t) => {
       if (t.getBoundingClientRect().top - top <= NAV_SPY_OFFSET) active = t.dataset.boardId ?? active;
     });
     return active;
@@ -983,6 +1069,34 @@ function ChatView({
   const last = boards[boards.length - 1];
   const tail = last ? last.data.answer : '';
   const rendered = boards.filter((b) => b.data.prompt || b.data.answer);
+  // Where the switched-to branch begins in the chain — boards from here down belong to the chosen branch.
+  // <0 when not switching (focus-open) or the entry left the chain.
+  const branchSplit = branchAnim ? rendered.findIndex((b) => b.id === branchAnim.entry) : -1;
+  // One chain board's turn(s) + its trailing branch switcher, wrapped in a stable per-board div (keyed by
+  // board id) — SSOT for a thread entry's markup. The wrapper structure NEVER changes shape across renders,
+  // so the shared ancestors keep their DOM identity on a branch switch (no remount → scroll position holds).
+  // `animate` tags only the freshly-mounted branch boards (id differs from the old branch) with `branchenter`,
+  // so the CSS fade+slide plays on mount for exactly the chosen branch and never for the unchanged ancestors.
+  // A fused board (M12) holds multiple rounds in `turns`; a normal board renders its single round.
+  const renderBoard = (b: BoardNodeT, animate: boolean) => (
+    <div className={`chainboard${animate ? ' branchenter' : ''}`} key={b.id}>
+      {b.data.turns && b.data.turns.length ? (
+        // turnViewStatus picks which round is LIVE so a queued follow-up shows 'queued' instead of stealing
+        // the generating indicator from the round still being written (chronological-order fix).
+        b.data.turns.map((t, i) => (
+          <TurnView
+            key={`${b.id}#${i}`}
+            boardId={b.id}
+            prompt={t.prompt}
+            body={{ answer: t.answer, steps: t.steps, status: turnViewStatus(b.data.turns!, b.data.status, i), thinks: t.thinks, thinking: t.thinking, thoughtMs: t.thoughtMs }}
+          />
+        ))
+      ) : (
+        <TurnView boardId={b.id} prompt={b.data.prompt} body={b.data} />
+      )}
+      {branches[b.id] && <BranchSwitcher opts={branches[b.id]} onPick={onBranch} />}
+    </div>
+  );
   // M9: the focused leaf is a compact node mid-/compact (no prompt yet) → show a compacting state
   // instead of the composer; or done compacting and awaiting its first question (idle + summary).
   const leafCompacting = !!last?.data.compact && last.data.status === 'streaming' && !last.data.prompt;
@@ -990,22 +1104,42 @@ function ChatView({
   // The view leaf is a fork node (≥2 branches, none followed yet) → show the branch picker instead of
   // the composer (decision 2026-06-09: hide the prompt box at fork nodes). Descending into a true leaf restores it.
   const leafIsBranch = !!branches[leafId];
-  // Scroll anchoring: whenever the ENTRY node changes (entering focus, or switching a branch), jump
-  // instantly to the START of that node's turn so you begin reading from where you navigated. While the
-  // entry is unchanged (same view, streaming deltas), smoothly follow the bottom if pinned. (entryId may
-  // sit above the auto-descended leaf — you land on the entered node, the thread below is scrollable.)
+  // Scroll anchoring on ENTRY-node change. Two distinct cases:
+  //  • Opening focus (first entry): jump instantly to the START of the entered node's turn so reading
+  //    begins where you navigated.
+  //  • Branch switch (goBranch while mounted): do NOT jump. The fork's chips sit in the unchanged region
+  //    above the animated branch, so leaving the scroll put keeps them in place while the chosen branch
+  //    fades+slides in below (a reveal scroll only kicks in if it lands off-screen — see next effect).
+  // While the entry is unchanged (same view, streaming deltas), smoothly follow the bottom if pinned.
   const scrolledEntryRef = useRef<string | null>(null);
   useEffect(() => {
     if (scrolledEntryRef.current !== entryId) {
-      const anchor = entryId ?? leafId;
-      const el = scrollRef.current?.querySelector<HTMLElement>(`.turn[data-board-id="${anchor}"]`);
-      if (el) el.scrollIntoView({ behavior: 'auto', block: 'start' });
-      else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+      const isSwitch = scrolledEntryRef.current !== null;
       scrolledEntryRef.current = entryId;
+      if (isSwitch && entryId) {
+        setBranchAnim((p) => ({ entry: entryId, tick: (p?.tick ?? 0) + 1 }));
+      } else {
+        const anchor = entryId ?? leafId;
+        const el = scrollRef.current?.querySelector<HTMLElement>(`.turn[data-board-id="${anchor}"]`);
+        if (el) el.scrollIntoView({ behavior: 'auto', block: 'start' });
+        else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
+      }
     } else if (pinnedRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [boards.length, tail, entryId, leafId]);
+  // After a branch switch mounts the chosen branch, reveal it ONLY if it landed below the fold (e.g.
+  // switching at a fork that sat at the bottom — the picker case). A mid-chain switch where the branch is
+  // already on-screen doesn't move (the condition is false), so the clicked chips stay exactly in place.
+  useEffect(() => {
+    if (!branchAnim) return;
+    const wrap = scrollRef.current;
+    const region = wrap?.querySelector<HTMLElement>('.branchenter');
+    if (!wrap || !region) return;
+    const wr = wrap.getBoundingClientRect();
+    const rr = region.getBoundingClientRect();
+    if (rr.top > wr.bottom - 120) region.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }, [branchAnim?.tick]);
 
   // interrupt = send now » (cut the streaming turn); plain Enter / ↑ = queue after it (or send when idle).
   const submit = (interrupt = false) => {
@@ -1049,32 +1183,12 @@ function ChatView({
       <div className="chatview__main">
       <div className="chatview__scrollwrap">
       <div className="chatview__scroll" ref={scrollRef} onScroll={onScroll}>
-        {/* A fused board (M12) holds multiple rounds in `turns` — render each as its own turn (all done).
-            A normal board renders its single round. Both go through TurnView (SSOT for a turn's markup).
-            A fork node (branches[b.id]) gets a BranchSwitcher after its turn(s): mid-chain it shows which
-            branch is followed (switchable); at the view leaf it's the picker for the unchosen branches. */}
-        {rendered.map((b) => (
-          <React.Fragment key={b.id}>
-            {b.data.turns && b.data.turns.length ? (
-              // Each round renders as its own turn. The LAST round carries the board's live status so a
-              // streaming follow-up shows the thinking indicator + the "generating" pulse; earlier rounds are done.
-              b.data.turns.map((t, i) => {
-                const isLast = i === b.data.turns!.length - 1;
-                return (
-                  <TurnView
-                    key={`${b.id}#${i}`}
-                    boardId={b.id}
-                    prompt={t.prompt}
-                    body={{ answer: t.answer, steps: t.steps, status: isLast ? b.data.status : 'done', thinks: t.thinks, thinking: t.thinking, thoughtMs: t.thoughtMs }}
-                  />
-                );
-              })
-            ) : (
-              <TurnView boardId={b.id} prompt={b.data.prompt} body={b.data} />
-            )}
-            {branches[b.id] && <BranchSwitcher opts={branches[b.id]} onPick={onBranch} />}
-          </React.Fragment>
-        ))}
+        {/* The thread, root → leaf. A fork node (branches[b.id]) gets a BranchSwitcher after its turn(s):
+            mid-chain it shows which branch is followed (switchable); at the view leaf it's the picker.
+            On a branch switch the chosen branch (from branchSplit down) mounts fresh and fades+slides in
+            (the `animate` flag), while the shared ancestors above keep their DOM identity and stay still —
+            so the scroll position holds and only the new branch moves. */}
+        {rendered.map((b, i) => renderBoard(b, branchSplit >= 0 && i >= branchSplit))}
         <div ref={bottomRef} />
       </div>
       {!atBottom && (
@@ -1095,7 +1209,7 @@ function ChatView({
         ) : (
         <div
           className="composer"
-          onDrop={(e) => { const f = imageFilesFrom(e.dataTransfer.files); if (f.length) { e.preventDefault(); addImages(f); } }}
+          onDrop={(e) => { const f = imageFilesFrom(e.dataTransfer.files); if (f.length) { e.preventDefault(); imgCtx.add(leafId, f); } }}
           onDragOver={(e) => { if (Array.from(e.dataTransfer.items || []).some((i) => i.kind === 'file')) e.preventDefault(); }}
         >
           {leafCompactIdle && (
@@ -1108,14 +1222,14 @@ function ChatView({
             rows={1}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            onPaste={(e) => { const f = imageFilesFrom(e.clipboardData.files); if (f.length) { e.preventDefault(); addImages(f); } }}
+            onPaste={(e) => { const f = imageFilesFrom(e.clipboardData.files); if (f.length) { e.preventDefault(); imgCtx.add(leafId, f); } }}
             onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(false); } }}
           />
           <div className="composer__bar">
             <div className="composer__left">
               {config && <SettingsControls config={config} onChange={onConfigChange} resolvedModel={resolvedModel} up onOpenMcp={onOpenMcp} />}
-              <AttachBar />
-              <ImageBar />
+              <AttachBar boardId={leafId} />
+              <ImageBar boardId={leafId} />
             </div>
             {/* M11 mid-stream follow-up: while streaming, the composer stays usable — Enter / ⊕ queues the follow-up
                 (runs after the current turn), » interrupts to steer now, ■ stops. Idle → plain send.
@@ -1492,11 +1606,20 @@ const UNDO_STACK_CAP = 50;
 // (cheap) dagre runs during streaming. 160→60→30: kept just large enough to coalesce a single LOD flip's
 // ResizeObserver burst, small enough that the reflow starts almost immediately (policy/mechanism).
 const RELAYOUT_DEBOUNCE_MS = 30;
+// Auto-summary (collapsed-digest) retry policy. A summarize request can come back empty — a transient
+// rate-limit/model hiccup, or the SDK momentarily unavailable. Without bounded retry the board would
+// show its raw answer forever (the request set was added optimistically and never released). Retry up
+// to MAX attempts (initial + retries) with exponential backoff; after that, a canvas reopen resets the
+// in-memory counters and gives it a fresh round. Strategy here, mechanism in the effect (principle 14).
+const MAX_SUMMARY_ATTEMPTS = 4;
+const SUMMARY_RETRY_BASE_MS = 1500; // delays: ~1.5s, 4.5s, 13.5s (base * 3^(failCount-1))
 function App() {
   const idRef = useRef(2);
   const seqRef = useRef(1); // root is seq 0; every new board takes the next seq
   const hydratedRef = useRef(false); // gate auto-save until restore/seed finished (else we overwrite the store with [])
-  const summaryReqRef = useRef<Set<string>>(new Set()); // boards already asked to summarize — avoid duplicate requests
+  const summaryReqRef = useRef<Set<string>>(new Set()); // boards with a summary request in flight or already succeeded — avoid duplicate requests
+  const summaryFailRef = useRef<Map<string, number>>(new Map()); // boardId → failed/empty summary attempts (bounds auto-retry)
+  const [summaryRetryTick, setSummaryRetryTick] = useState(0); // bumped after a backoff delay to re-run the auto-summary effect for a failed board
   const [nodes, setNodes] = useState<BoardNodeT[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [drawer, setDrawer] = useState<{ merge: MergeResult; context: string; ids: string[]; base: { lcaId: string; uncoveredShared: string[] } | null } | null>(null);
@@ -1516,16 +1639,31 @@ function App() {
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[] | null>(null);
   const [mcpBusy, setMcpBusy] = useState<string[]>([]);
-  // M7 gap3: one pending editor-context attachment + a transient hint. onSend reads attachmentRef
-  // (not the state) so a send in the same tick as a change isn't stale (resume-loss lesson).
-  const [attachment, setAttachment] = useState<EditorContext | null>(null);
-  const [attachNote, setAttachNote] = useState('');
-  const attachmentRef = useRef<EditorContext | null>(null);
-  // M8 image input: pending images for the next send. onSend reads imagesRef (not state) so a send
-  // in the same tick as an add isn't stale (resume-loss lesson). Cleared after a send consumes them.
-  const [images, setImages] = useState<PendingImage[]>([]);
-  const imagesRef = useRef<PendingImage[]>([]);
+  // M7 gap3: per-board pending editor-context attachment, keyed by composer board id (DraftCtx-style SSOT
+  // so the card and the ChatView composer for one board share a chip, and attachments never bleed across
+  // boards). A ref mirror is read at send time (not the state) so a send in the same tick as a change isn't
+  // stale (resume-loss lesson). attachReqBoardRef = which board's composer last asked the host for editor
+  // context, so the async `editorContext` reply is routed back to the right board.
+  type AttachEntry = { attachment: EditorContext | null; note: string };
+  const [attachByBoard, setAttachByBoard] = useState<Record<string, AttachEntry>>({});
+  const attachByBoardRef = useRef<Record<string, AttachEntry>>({});
+  const attachReqBoardRef = useRef<string | null>(null);
+  // M8 image input: per-board pending images for the next send (same per-board SSOT + ref-at-send-time as
+  // attachments). Cleared after a send consumes them.
+  const [imagesByBoard, setImagesByBoard] = useState<Record<string, PendingImage[]>>({});
+  const imagesByBoardRef = useRef<Record<string, PendingImage[]>>({});
   const imgIdRef = useRef(0);
+  // Per-board compose drafts, keyed by board id (DraftCtx SSOT): the canvas card composer and the
+  // full-screen ChatView composer for the same board share one entry, so unsent text isn't lost when
+  // zooming in/out. Transient — never persisted. Empty entries are pruned so sent/cleared drafts don't accrue.
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const setDraft = useCallback((id: string, text: string) => {
+    setDrafts((d) => {
+      if ((d[id] ?? '') === text) return d;
+      if (!text) { const { [id]: _drop, ...rest } = d; return rest; }
+      return { ...d, [id]: text };
+    });
+  }, []);
   // Latest nodes/edges, so fork/merge can read the current graph, re-layout, and set both atomically.
   const nodesRef = useRef<BoardNodeT[]>([]);
   const edgesRef = useRef<Edge[]>([]);
@@ -1570,29 +1708,38 @@ function App() {
   }, [dir, updateNodeInternals]);
   useEffect(() => { nodesRef.current = nodes; edgesRef.current = edges; }, [nodes, edges]);
   useEffect(() => { focusedIdRef.current = focusedId; }, [focusedId]);
-  useEffect(() => { attachmentRef.current = attachment; }, [attachment]);
-  useEffect(() => { imagesRef.current = images; }, [images]);
+  useEffect(() => { attachByBoardRef.current = attachByBoard; }, [attachByBoard]);
+  useEffect(() => { imagesByBoardRef.current = imagesByBoard; }, [imagesByBoard]);
 
   // M7: ask the host for the active/last-focused file editor's context; clear the pending attachment.
-  const requestAttach = useCallback(() => { setAttachNote(''); post({ type: 'getEditorContext' }); }, []);
-  const clearAttach = useCallback(() => { setAttachment(null); setAttachNote(''); }, []);
+  const requestAttach = useCallback((id: string) => {
+    attachReqBoardRef.current = id; // remember the asking board so the async reply routes back to it
+    setAttachByBoard((prev) => ({ ...prev, [id]: { attachment: prev[id]?.attachment ?? null, note: '' } }));
+    post({ type: 'getEditorContext' });
+  }, []);
+  const clearAttach = useCallback((id: string) => {
+    setAttachByBoard((prev) => { const { [id]: _drop, ...rest } = prev; return rest; });
+  }, []);
 
   // M8: read each image file as base64 (FileReader → data: URL, split off mediaType + bytes). The data:
   // URL doubles as the thumbnail src. base64 never leaves the send turn (D1/D2).
-  const addImages = useCallback((files: FileList | File[]) => {
+  const addImages = useCallback((boardId: string, files: FileList | File[]) => {
     for (const file of imageFilesFrom(files)) {
       const reader = new FileReader();
       reader.onload = () => {
         const url = String(reader.result || '');
-        const m = /^data:(.+?);base64,(.*)$/.exec(url);
-        if (!m) return;
-        const img: PendingImage = { id: `img${imgIdRef.current++}`, mediaType: m[1], data: m[2], url };
-        setImages((xs) => [...xs, img]);
+        const mm = /^data:(.+?);base64,(.*)$/.exec(url);
+        if (!mm) return;
+        const img: PendingImage = { id: `img${imgIdRef.current++}`, mediaType: mm[1], data: mm[2], url };
+        setImagesByBoard((prev) => ({ ...prev, [boardId]: [...(prev[boardId] ?? []), img] }));
       };
       reader.readAsDataURL(file);
     }
   }, []);
-  const removeImage = useCallback((id: string) => setImages((xs) => xs.filter((i) => i.id !== id)), []);
+  const removeImage = useCallback((boardId: string, imgId: string) =>
+    setImagesByBoard((prev) => ({ ...prev, [boardId]: (prev[boardId] ?? []).filter((i) => i.id !== imgId) })), []);
+  const clearImages = useCallback((boardId: string) =>
+    setImagesByBoard((prev) => { const { [boardId]: _drop, ...rest } = prev; return rest; }), []);
 
   const patch = useCallback((boardId: string, fn: (d: BoardData) => Partial<BoardData>) => {
     setNodes((ns) => ns.map((n) => (n.id === boardId ? { ...n, data: { ...n.data, ...fn(n.data) } } : n)));
@@ -1624,7 +1771,11 @@ function App() {
     });
   }, [patch]);
 
-  const onSend = useCallback((boardId: string, prompt: string) => {
+  // fromId = the COMPOSER's board (defaults to boardId). It differs only on focusSend's fork path, where a
+  // DONE leaf's composer (fromId=leaf) sends a question that opens a NEW child board (boardId=child): the
+  // leaf composer's pending images/attachment travel with the send and clear from the leaf. Keeps "a
+  // composer's attachments go with its send" true even when the receiving board id isn't the composer's.
+  const onSend = useCallback((boardId: string, prompt: string, fromId: string = boardId) => {
     // Read session/merge context from the authoritative snapshot (nodesRef.current) — NOT from inside
     // a setNodes updater. React only computes an updater eagerly (synchronously) for the FIRST setState
     // on a hook in a batch; callers that create a board and then send in the same tick (focusSend's
@@ -1642,11 +1793,10 @@ function App() {
       ? `${mergeContext}\n\nBased on the merged context above, answer my new question:\n${prompt}`
       : prompt;
     // M7: a pending editor-context attachment is prepended as a labeled block, then consumed.
-    const attached = attachmentRef.current;
+    const attached = attachByBoardRef.current[fromId]?.attachment;
     if (attached) {
       sendPrompt = `${buildEditorContextBlock(attached)}\n\n${sendPrompt}`;
-      setAttachment(null);
-      setAttachNote('');
+      clearAttach(fromId);
     }
     // Lazy Fork: a clean continuation child resumes its parent's session (spine → append, so a linear
     // chain stays ONE session) when it's the parent's FIRST continuation child, else branches from the
@@ -1659,15 +1809,15 @@ function App() {
       fork = mode.fork;
       resumeAt = mode.resumeAt;
     }
-    // M8: ship pending images with the turn (base64, only here); consume them after.
-    const pendingImages = imagesRef.current;
+    // M8: ship the composer's pending images with the turn (base64, only here); consume them after.
+    const pendingImages = imagesByBoardRef.current[fromId] ?? [];
     post({
       type: 'send', boardId, prompt: sendPrompt,
       resume: parentSessionId, fork, resumeAt,
       images: pendingImages.length ? pendingImages.map((i) => ({ mediaType: i.mediaType, data: i.data })) : undefined,
     });
-    if (pendingImages.length) setImages([]);
-  }, [patch]);
+    if (pendingImages.length) clearImages(fromId);
+  }, [patch, clearAttach, clearImages]);
 
   // Stop a streaming turn: tell the host to abort. The host settles the board to 'done'
   // with whatever text streamed so far (see runQuery's abort branch), so partial output is kept.
@@ -1684,7 +1834,12 @@ function App() {
     const leaf = nodesRef.current.find((n) => n.id === leafId);
     if (!leaf) return;
     const wasStreaming = leaf.data.status === 'streaming';
-    const turns: Turn[] = [...boardTurns(leaf.data), { prompt: text, answer: '', steps: [] }];
+    // Mark every existing round settled EXCEPT, while streaming, the live (last) one — the engine is still
+    // writing it, so its `done` arrives later via the `done` handler. The new round is queued (done:false)
+    // → turnViewStatus shows it 'queued', not 'Generating…', until the engine reaches it. (chronological fix)
+    const existing = boardTurns(leaf.data);
+    const settled = existing.map((t, i) => (wasStreaming && i === existing.length - 1 ? t : { ...t, done: true }));
+    const turns: Turn[] = [...settled, { prompt: text, answer: '', steps: [], done: false }];
     const turnIndex = turns.length - 1;
     const newData: Partial<BoardData> = {
       turns, answer: flattenTurns(turns), status: 'streaming',
@@ -1693,23 +1848,31 @@ function App() {
       // The card summary now describes a stale (pre-follow-up) conversation → clear it so the auto-summary
       // effect regenerates one over the full flattened transcript after this turn settles (same as M12
       // fusion). Without this the collapsed-summary moat would keep showing the old summary forever.
-      summary: undefined, miniSummary: undefined,
+      // Tags ride with the digest → clear them too so they're re-classified over the new content.
+      summary: undefined, miniSummary: undefined, tags: undefined,
     };
     const newNodes = nodesRef.current.map((n) => (n.id === leafId ? { ...n, data: { ...n.data, ...newData } } : n));
     setNodes(newNodes);
     nodesRef.current = newNodes; // sync this tick so routed messages find the new round (resume-loss lesson)
     summaryReqRef.current.delete(leafId); // re-enable the auto-summary effect for the new content
-    const pendingImages = imagesRef.current;
+    summaryFailRef.current.delete(leafId); // fresh content → reset the retry budget
+    const pendingImages = imagesByBoardRef.current[leafId] ?? [];
     const images = pendingImages.length ? pendingImages.map((i) => ({ mediaType: i.mediaType, data: i.data })) : undefined;
+    // A follow-up consumes this board's pending editor-context attachment too — prepended to the ENGINE
+    // text only (the displayed turn keeps the raw question, like onSend). Previously the attachment was
+    // silently dropped on a follow-up (the global ref was read only in onSend); per-board makes it consistent.
+    const attached = attachByBoardRef.current[leafId]?.attachment;
+    const sendText = attached ? `${buildEditorContextBlock(attached)}\n\n${text}` : text;
     if (wasStreaming) {
       // resume/turnIndex = self-heal: if the live query already closed (rare race), the host runs this
       // as a send+resume into the same board instead of dropping it (so the board never hangs).
-      post({ type: 'followup', boardId: leafId, text, interrupt, resume: leaf.data.sessionId, turnIndex, images });
+      post({ type: 'followup', boardId: leafId, text: sendText, interrupt, resume: leaf.data.sessionId, turnIndex, images });
     } else {
-      post({ type: 'send', boardId: leafId, prompt: text, resume: leaf.data.sessionId, fork: false, turnIndex, images });
+      post({ type: 'send', boardId: leafId, prompt: sendText, resume: leaf.data.sessionId, fork: false, turnIndex, images });
     }
-    if (pendingImages.length) setImages([]);
-  }, []);
+    if (pendingImages.length) clearImages(leafId);
+    if (attached) clearAttach(leafId);
+  }, [clearImages, clearAttach]);
 
   // Node-Delete Phase 1: where a fork child should resume from. Normally the parent's own session; but if
   // the parent is lineage-dirty (an ancestor was deleted → its session still contains that node), walk up
@@ -1984,7 +2147,9 @@ function App() {
     nodesRef.current = newNodes;
     focusedIdRef.current = childId;
     setFocusedId(childId);
-    onSend(childId, prompt);
+    // fromId=leafId: the composer that sent this lives on the (done) leaf, so its pending images/attachment
+    // travel with the forked child's first turn (and clear from the leaf), not get looked up under childId.
+    onSend(childId, prompt, leafId);
   }, [onSend, sendFollowup, autoLayout, forkBaseFor]);
 
   // Enter focus on a board, anchoring the zoom-in animation at that board's current screen position
@@ -2285,10 +2450,17 @@ function App() {
           }
           break;
         }
-        case 'editorContext':
-          if (m.context) { setAttachment(m.context); setAttachNote(''); }
-          else { setAttachment(null); setAttachNote('No file editor available'); }
+        case 'editorContext': {
+          // Route the async reply back to the board whose composer asked (attachReqBoardRef).
+          const reqId = attachReqBoardRef.current;
+          if (reqId) {
+            const entry: AttachEntry = m.context
+              ? { attachment: m.context, note: '' }
+              : { attachment: null, note: 'No file editor available' };
+            setAttachByBoard((prev) => ({ ...prev, [reqId]: entry }));
+          }
           break;
+        }
         // session is board-level (same session across a board's turns) → no turnIndex routing.
         case 'session': patch(m.boardId, () => ({ sessionId: m.sessionId })); break;
         // M11: route streamed content to the right round (turnIndex) of a multi-turn board; single-turn
@@ -2307,7 +2479,7 @@ function App() {
           // it clears when they open the ChatView.
           const unread = isFinal && wantsAttention(m.boardId);
           patchTurn(m.boardId, m.turnIndex,
-            () => ({ answer: m.text || '', thinking: m.thinking ?? '', thinks: m.thinks ?? [] }),
+            () => ({ answer: m.text || '', thinking: m.thinking ?? '', thinks: m.thinks ?? [], done: true }),
             // context-usage is board-level "current fill" → only the final turn's value is meaningful;
             // applying an intermediate (e.g. interrupted) turn's would briefly flicker the badge wrong.
             { status: m.isError ? 'error' : 'done', sessionId: m.sessionId, ...(isFinal && m.messageUuid ? { messageUuid: m.messageUuid } : {}), ...(isFinal ? { contextTokens: m.contextTokens, contextWindow: m.contextWindow } : {}), ...(m.autoCompacted ? { autoCompacted: true } : {}), ...(unread ? { unread: true } : {}) });
@@ -2340,21 +2512,47 @@ function App() {
           patch(m.boardId, () => ({ status: 'error', ...(unread ? { unread: true } : {}) }));
           break;
         }
-        case 'summary':
+        case 'summary': {
           // Always clear the "Summarizing…" hint — the host posts this even when generation produced
-          // nothing (SDK unavailable / empty output), so the card falls back to the truncated answer.
-          // Apply the structured / mini summary only when present.
-          patch(m.boardId, () => ({
-            summarizing: false,
-            ...(m.summary ? { summary: m.summary } : {}),
-            ...(m.miniSummary ? { miniSummary: m.miniSummary } : {}),
-          }));
+          // nothing (SDK unavailable / empty output / a thrown engine error), so the card falls back to
+          // the truncated answer. Apply the structured / mini summary only when present.
+          {
+            const tags = normalizeTags(m.tags); // strict vocab-filter + dedup + cap (junk dropped)
+            patch(m.boardId, () => ({
+              summarizing: false,
+              // Stamp the version only on success (summary present) → a failed/empty digest stays stale
+              // and is retried; needsDigest won't consider this board current until it actually re-stamps.
+              ...(m.summary ? { summary: m.summary, digestVersion: DIGEST_VERSION } : {}),
+              ...(m.miniSummary ? { miniSummary: m.miniSummary } : {}),
+              ...(tags.length ? { tags } : {}),
+            }));
+          }
+          if (m.summary) {
+            // Success → keep the board marked in summaryReqRef (never re-request) and forget any past failures.
+            summaryFailRef.current.delete(m.boardId);
+          } else {
+            // Empty/failed (the card summary is the primary signal; a missing miniSummary alone has a fallback
+            // chain and isn't worth retrying). Release the board so the effect can retry, and bound the
+            // attempts with backoff so a permanently-failing summarizer doesn't hammer in a tight loop.
+            const fails = (summaryFailRef.current.get(m.boardId) ?? 0) + 1;
+            summaryFailRef.current.set(m.boardId, fails);
+            summaryReqRef.current.delete(m.boardId);
+            if (fails < MAX_SUMMARY_ATTEMPTS) {
+              const delay = SUMMARY_RETRY_BASE_MS * Math.pow(3, fails - 1);
+              setTimeout(() => setSummaryRetryTick((t) => t + 1), delay);
+            }
+          }
           break;
+        }
         case 'compacted':
           // Compaction done: turn the compact node idle (awaiting a prompt), with the compacted
           // (forked) session as its parent so onSend resumes the compressed context. Summary cached
           // for the merge boundary + persistence. (status was 'streaming' = the compacting spinner)
-          patch(m.boardId, () => ({ status: 'idle', parentSessionId: m.sessionId, compactSummary: m.summary }));
+          // compactSummary = raw /compact analysis (full fidelity for merge/fork). summary = the short
+          // condensed digest shown on the card through the standard card-gist machinery (far gist + detail
+          // body) at every zoom. Left unset if the digest came back empty → the card falls back to a
+          // truncated slice of the raw summary (never the full ~5K dump in the always-rendered slot).
+          patch(m.boardId, () => ({ status: 'idle', parentSessionId: m.sessionId, compactSummary: m.summary, summary: m.digest || undefined }));
           break;
         case 'toolUse':
           patchTurn(m.boardId, m.turnIndex, (t) => ({ steps: [...(t.steps ?? []), { id: m.id, name: m.name, input: m.input, parentId: m.parentId, textOffset: m.textOffset, seq: m.seq }] }));
@@ -2423,17 +2621,27 @@ function App() {
     return () => clearTimeout(t);
   }, [nodes, edges]);
 
-  // request a Haiku summary once per board after it finishes (skips boards that already have one)
+  // (Re)generate the Haiku digest for each finished board that needs one — no summary yet, OR summarized
+  // under an older DIGEST_VERSION (the backfill path: a version bump marks every board stale). Skips
+  // boards with a request in flight / already current (summaryReqRef) and boards out of retry budget
+  // (summaryFailRef). The `summary` handler releases a board from summaryReqRef on empty/failed output and
+  // schedules a tick bump, so a failed digest is retried (bounded) instead of leaving the card raw forever.
+  // Concurrency-capped: a version bump can mark MANY boards stale at once → dispatch up to
+  // MAX_CONCURRENT_SUMMARIES; each completion re-renders → re-runs this effect → pulls the next in.
   useEffect(() => {
+    let inFlight = nodes.reduce((c, n) => c + (n.data.summarizing ? 1 : 0), 0);
     for (const n of nodes) {
+      if (inFlight >= MAX_CONCURRENT_SUMMARIES) break;
       const d = n.data;
-      if (d.status === 'done' && d.answer && !d.summary && !summaryReqRef.current.has(n.id)) {
+      const fails = summaryFailRef.current.get(n.id) ?? 0;
+      if (needsDigest(d) && !summaryReqRef.current.has(n.id) && fails < MAX_SUMMARY_ATTEMPTS) {
         summaryReqRef.current.add(n.id);
         post({ type: 'summarize', boardId: n.id, prompt: d.prompt, answer: d.answer });
         patch(n.id, () => ({ summarizing: true })); // drives the "Summarizing…" card hint until `summary` returns
+        inFlight++;
       }
     }
-  }, [nodes]);
+  }, [nodes, summaryRetryTick]);
 
   const onNodesChange = useCallback((ch: NodeChange[]) => {
     setNodes((ns) => applyNodeChanges(ch, ns) as BoardNodeT[]);
@@ -2633,6 +2841,7 @@ function App() {
     if (!fuseEligibility(curEdges, c.ancestorId, c.descendantId, byIdNow)) return;
     const fused = fuseAdjacent(curNodes, curEdges, c.ancestorId, c.descendantId);
     summaryReqRef.current.delete(c.ancestorId); // re-summarize the survivor over the combined content
+    summaryFailRef.current.delete(c.ancestorId); // combined content → reset the retry budget
     if (focusedIdRef.current === c.descendantId) { focusedIdRef.current = c.ancestorId; setFocusedId(c.ancestorId); setFocusEntryId(c.ancestorId); }
     const laid = autoLayout(fused.nodes, fused.edges);
     nodesRef.current = laid;
@@ -2698,12 +2907,16 @@ function App() {
   }, [newConversation]);
 
   const attachState = useMemo<AttachState>(
-    () => ({ attachment, note: attachNote, request: requestAttach, clear: clearAttach }),
-    [attachment, attachNote, requestAttach, clearAttach],
+    () => ({ get: (id) => attachByBoard[id] ?? { attachment: null, note: '' }, request: requestAttach, clear: clearAttach }),
+    [attachByBoard, requestAttach, clearAttach],
   );
   const imageState = useMemo<ImageAttachState>(
-    () => ({ images, add: addImages, remove: removeImage }),
-    [images, addImages, removeImage],
+    () => ({ get: (id) => imagesByBoard[id] ?? [], add: addImages, remove: removeImage }),
+    [imagesByBoard, addImages, removeImage],
+  );
+  const draftState = useMemo<DraftState>(
+    () => ({ get: (id) => drafts[id] ?? '', set: setDraft }),
+    [drafts, setDraft],
   );
 
   return (
@@ -2714,6 +2927,7 @@ function App() {
     <FuseTargetCtx.Provider value={fuseTarget}>
     <AttachCtx.Provider value={attachState}>
     <ImageCtx.Provider value={imageState}>
+    <DraftCtx.Provider value={draftState}>
     <div
       style={{ width: '100vw', height: '100vh' }}
       onPointerMove={onCanvasPointerMove}
@@ -2943,6 +3157,7 @@ function App() {
         </div>
       )}
     </div>
+    </DraftCtx.Provider>
     </ImageCtx.Provider>
     </AttachCtx.Provider>
     </FuseTargetCtx.Provider>

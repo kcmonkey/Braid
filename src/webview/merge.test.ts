@@ -3,10 +3,10 @@ import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
-  diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, buildRebuildSeed, hasPendingAsk,
+  diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
-  parseTodos, todoSummary, thinkMarks,
+  parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
 } from './merge';
 
 const noop = () => {};
@@ -506,6 +506,41 @@ describe('multi-turn board merges with all rounds (M11 生成中追问)', () => 
   });
 });
 
+// Queued follow-up chronological-order fix: while streaming, the LIVE round (the one being generated)
+// carries the streaming status; a queued follow-up after it shows 'queued', NOT 'Generating…'.
+describe('turnViewStatus (queued follow-up display order)', () => {
+  const ts = (turns: Turn[], status: Parameters<typeof turnViewStatus>[1]) =>
+    turns.map((_, i) => turnViewStatus(turns, status, i));
+
+  it('settled board: last round carries the status, earlier rounds are done (legacy behavior preserved)', () => {
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'a0' }, { prompt: 'q1', answer: 'a1' }];
+    expect(ts(turns, 'done')).toEqual(['done', 'done']);
+    expect(ts(turns, 'error')).toEqual(['done', 'error']);
+    // No `done` flags (restored/fused board) must still resolve cleanly — never 'queued' when not streaming.
+    expect(ts(turns, 'idle')).toEqual(['done', 'idle']);
+  });
+
+  it('streaming with a queued follow-up: live round streams, the queued round is queued (not generating)', () => {
+    // Round 0 is being generated (done unset); round 1 was just queued (done:false).
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'partial' }, { prompt: 'q1', answer: '', done: false }];
+    expect(ts(turns, 'streaming')).toEqual(['streaming', 'queued']);
+  });
+
+  it('streaming after the first round settled: the second round becomes live, the third stays queued', () => {
+    const turns: Turn[] = [
+      { prompt: 'q0', answer: 'a0', done: true },  // engine finished this round
+      { prompt: 'q1', answer: 'now writing' },     // engine moved on to this one (done unset)
+      { prompt: 'q2', answer: '', done: false },   // still queued behind it
+    ];
+    expect(ts(turns, 'streaming')).toEqual(['done', 'streaming', 'queued']);
+  });
+
+  it('streaming single round (no queue) keeps showing as streaming', () => {
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'partial' }];
+    expect(ts(turns, 'streaming')).toEqual(['streaming']);
+  });
+});
+
 describe('hasPendingAsk (needs-response state)', () => {
   const ask = (result?: string) => ({ id: 't1', name: 'AskUserQuestion', input: {}, ...(result != null ? { result } : {}) });
   it('true when a single-turn board has an unanswered AskUserQuestion', () => {
@@ -999,5 +1034,56 @@ describe('buildPrompt withSteps (Merge-LCA-Fork)', () => {
     const prompt = buildPrompt(computeMerge(['c', 'z'], [], b), b, { withSteps: true });
     expect(prompt).toContain('SUM');
     expect(prompt).not.toContain('[Tool steps]');
+  });
+});
+
+describe('normalizeTags (digest tag validation)', () => {
+  it('keeps only vocabulary tags, lowercased and trimmed', () => {
+    expect(normalizeTags([' Coding ', 'PLAN'])).toEqual(['coding', 'plan']);
+  });
+
+  it('drops tokens outside the closed vocabulary (no fuzzy coercion)', () => {
+    expect(normalizeTags(['coding', 'implementation', 'banana', 'review'])).toEqual(['coding', 'review']);
+    expect(normalizeTags(['totally-made-up'])).toEqual([]);
+  });
+
+  it('dedupes while preserving first-seen (primary) order', () => {
+    expect(normalizeTags(['debug', 'debug', 'plan'])).toEqual(['debug', 'plan']);
+  });
+
+  it('caps at MAX_TAGS', () => {
+    const many = ['coding', 'plan', 'design', 'review', 'debug'];
+    expect(normalizeTags(many).length).toBe(MAX_TAGS);
+    expect(normalizeTags(many)).toEqual(many.slice(0, MAX_TAGS));
+  });
+
+  it('returns [] for undefined / empty / non-string junk', () => {
+    expect(normalizeTags(undefined)).toEqual([]);
+    expect(normalizeTags([])).toEqual([]);
+    expect(normalizeTags(['', '   '])).toEqual([]);
+    expect(normalizeTags([null as unknown as string, 42 as unknown as string])).toEqual([]);
+  });
+});
+
+describe('needsDigest (digest versioning / backfill)', () => {
+  const done = (extra: Partial<BoardData>) => node('b', 0, { status: 'done', answer: 'a', ...extra }).data;
+
+  it('true for a finished board with no summary yet', () => {
+    expect(needsDigest(done({}))).toBe(true);
+  });
+
+  it('false once summarized under the current DIGEST_VERSION', () => {
+    expect(needsDigest(done({ summary: 's', digestVersion: DIGEST_VERSION }))).toBe(false);
+  });
+
+  it('true when the summary is stale: older version or legacy (no stamp)', () => {
+    expect(needsDigest(done({ summary: 's', digestVersion: DIGEST_VERSION - 1 }))).toBe(true); // older
+    expect(needsDigest(done({ summary: 's' }))).toBe(true); // legacy: persisted before versioning
+  });
+
+  it('false for boards that are not a finished Q/A round', () => {
+    expect(needsDigest(done({ status: 'streaming' }))).toBe(false);            // still generating
+    expect(needsDigest(node('b', 0, { status: 'done', answer: '' }).data)).toBe(false); // no answer
+    expect(needsDigest(node('c', 0, { status: 'idle', answer: '' }).data)).toBe(false); // idle compact boundary
   });
 });

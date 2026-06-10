@@ -850,11 +850,20 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
 }
 
 /** Collapsed-summary (was runSummary): the engine summarizes the Q/A with its cheap model; the host
- * posts the result. Always posts (even empty) so the webview clears its "Summarizing…" hint. */
+ * posts the result. ALWAYS posts a `summary` message — even on empty output OR a thrown engine error —
+ * so the webview can clear its "Summarizing…" hint and, on empty/failure, retry later (principle 11:
+ * never leave the webview hanging on a swallowed error → the board would otherwise stay raw forever). */
 async function runSummaryHost(msg: Extract<WebviewMessage, { type: 'summarize' }>, canvasId: string) {
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-  const { summary, miniSummary } = await engineHost.get().summarize({ cwd, prompt: msg.prompt, answer: msg.answer });
-  postTo(canvasId, { type: 'summary', boardId: msg.boardId, summary, miniSummary });
+  try {
+    const { summary, miniSummary, tags } = await engineHost.get().summarize({ cwd, prompt: msg.prompt, answer: msg.answer });
+    postTo(canvasId, { type: 'summary', boardId: msg.boardId, summary, miniSummary, tags });
+  } catch (e: any) {
+    // summarize() itself threw (e.g. loadSdk rejected) — post an empty summary so the webview clears the
+    // stuck spinner and its bounded-retry kicks in, instead of the board hanging on "Summarizing…" forever.
+    console.error('[Braid] summarize failed:', e?.message ?? e);
+    postTo(canvasId, { type: 'summary', boardId: msg.boardId, summary: '' });
+  }
 }
 
 /**
@@ -879,7 +888,7 @@ async function runCompactHost(msg: Extract<WebviewMessage, { type: 'compact' }>,
   if (!r.ok) { postTo(canvasId, { type: 'error', boardId: msg.boardId, message: r.error ?? 'Failed to load Claude Agent SDK' }); return; }
   const summary = r.summary;
   if (!summary) { postTo(canvasId, { type: 'error', boardId: msg.boardId, message: 'Compaction produced no summary' }); return; }
-  postTo(canvasId, { type: 'compacted', boardId: msg.boardId, sessionId: r.sessionId, summary });
+  postTo(canvasId, { type: 'compacted', boardId: msg.boardId, sessionId: r.sessionId, summary, digest: r.digest });
 }
 
 function getNonce() {

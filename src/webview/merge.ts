@@ -1,8 +1,28 @@
 // Pure graph/merge/serialization logic — no React/DOM deps so it's unit-testable in plain node.
 // Types from @xyflow/react are imported type-only (erased at compile time; xyflow is never loaded at runtime).
 import type { Node, Edge } from '@xyflow/react';
+import { TAG_VOCAB, type BoardTag } from '../protocol';
 
 export type Status = 'idle' | 'streaming' | 'done' | 'error';
+
+// Max digest-tag chips kept per card. The classifier is asked for 1–2; 3 is headroom so a genuinely
+// dual-natured round isn't silently truncated, while the card never sprawls. (policy/mechanism)
+export const MAX_TAGS = 3;
+
+// Digest pipeline version. BUMP THIS whenever the digest GENERATION changes in a way that should
+// retroactively re-run on already-summarized boards: the card/mini/tag prompts (adapter.ts summarize),
+// the tag vocabulary (TAG_VOCAB), or the set of digest fields. Each board stores the version it was
+// generated under (BoardData.digestVersion); needsDigest() flags any board whose stamp != this as stale,
+// so it re-summarizes once on load (refs are per-session → fires once per reopen until it re-stamps).
+//   v1: initial card summary + mini summary.   v2: added digest tags.
+//   v3: expanded tag vocabulary (+commit/build/deploy/config/deps) → re-tag every board.
+export const DIGEST_VERSION = 3;
+
+// Rolling cap on concurrent in-flight summarize requests. A version bump can mark MANY boards stale at
+// once; without a cap the webview would post N requests and the host would spawn ~3N CLI subprocesses
+// (card+mini+tag one-shots) simultaneously. The auto-summary effect dispatches up to this many, and each
+// completion re-renders → re-runs the effect → pulls the next in (rolling window). (policy/mechanism)
+export const MAX_CONCURRENT_SUMMARIES = 3;
 
 // One tool invocation within a turn: the tool_use (id/name/input) plus its paired tool_result.
 // `result` is captured truncated (see TOOL_RESULT_CAP) and persisted with the board (M4 gap2).
@@ -202,6 +222,10 @@ export interface Turn {
   thinking?: string;     // accumulated reasoning text — usually '' (engine withholds it, see knowledge.md)
   thinks?: ThinkMark[];  // positioned thinking pills (offset + duration) for this round
   thoughtMs?: number;    // legacy: single cumulative duration on rounds persisted before `thinks` existed
+  // This round has settled — its `done` (or `error`) message arrived. A NOT-done, non-final round on a
+  // streaming board is a queued follow-up the engine hasn't started yet (it processes rounds in order):
+  // it must NOT show the "Generating…" indicator (that belongs to the live round). Drives turnViewStatus.
+  done?: boolean;
 }
 
 export interface BoardData {
@@ -232,6 +256,14 @@ export interface BoardData {
   mergeContext?: string;     // deduped structured excerpt; prepended to the user's new prompt on first send
   summary?: string;          // structured Haiku card summary (Markdown; display-only, cached via persistence)
   miniSummary?: string;      // one-line ultra-short mini summary shown at far zoom (LOD); Haiku-generated, cached
+  // Digest tags (closed TAG_VOCAB): Haiku-classified content hints rendered as color chips on the card.
+  // Validated via normalizeTags before storage. Display-only; persisted via `...data`; cleared + regenerated
+  // when the board's content changes (follow-up / fusion), same as summary. (decisions.md digest tags)
+  tags?: BoardTag[];
+  // DIGEST_VERSION the summary/mini/tags were generated under. Stamped on a successful digest; persisted.
+  // needsDigest() treats a board whose stamp != DIGEST_VERSION (incl. legacy undefined) as stale so a
+  // version bump retroactively regenerates every board's digest once. (decisions.md digest versioning)
+  digestVersion?: number;
   // Transient: true from when the post-done Haiku summarize request is sent until the `summary` message
   // returns (the host ALWAYS posts it, even when generation produced nothing). Drives the "Summarizing…"
   // card hint. NOT persisted (stripped in serializeGraph) — the auto-summary effect re-requests on reopen
@@ -309,6 +341,37 @@ export function shouldAutoCompact(pct: number | null, enabled: boolean, threshol
 export function summaryHeadline(s: string): string {
   const line = (s.split('\n').find((l) => l.trim()) ?? '').trim();
   return line.replace(/^[#\-*\s]+/, '').replace(/\*\*/g, '').trim().slice(0, 80);
+}
+
+/**
+ * Validate the model's raw digest tags against the closed TAG_VOCAB: lowercase/trim, drop anything
+ * outside the vocabulary, dedup (order-preserving), cap at MAX_TAGS. SSOT for tag validation — the
+ * engine returns raw tokens; this is the single tested gate before they're stored/rendered. Strict
+ * input, no fuzzy coercion: a token that isn't an exact vocab member is dropped, not guessed (principle 17).
+ */
+export function normalizeTags(raw: readonly string[] | undefined): BoardTag[] {
+  if (!raw) return [];
+  const vocab = TAG_VOCAB as readonly string[];
+  const out: BoardTag[] = [];
+  for (const r of raw) {
+    const t = (typeof r === 'string' ? r : '').trim().toLowerCase();
+    if (vocab.includes(t) && !out.includes(t as BoardTag)) {
+      out.push(t as BoardTag);
+      if (out.length >= MAX_TAGS) break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a board should have its digest (summary / mini / tags) (re)generated. True when the board is a
+ * finished Q/A round (done + answer) AND either has no summary yet OR was summarized under an older
+ * DIGEST_VERSION. The version clause is the backfill mechanism: bumping DIGEST_VERSION makes every
+ * existing board stale so the auto-summary effect regenerates it once. Pure (the effect ANDs the
+ * per-session in-flight / retry-budget refs on top). Idle compact-boundary nodes are excluded by `done`.
+ */
+export function needsDigest(d: BoardData): boolean {
+  return d.status === 'done' && !!d.answer && (!d.summary || d.digestVersion !== DIGEST_VERSION);
 }
 
 /**
@@ -462,6 +525,28 @@ export function boardTurns(d: BoardData): Turn[] {
     : [{ prompt: d.prompt, answer: d.answer, steps: d.steps, thinking: d.thinking, thinks: d.thinks, thoughtMs: d.thoughtMs }];
 }
 
+// Per-round display status for a multi-turn board's ChatView. A round is shown 'queued' (not yet started)
+// rather than letting it steal the "Generating…" indicator from the round actually being generated.
+export type TurnViewStatus = Status | 'queued';
+
+/**
+ * Display status of round `i` of a multi-turn board.
+ * - Settled board (not streaming): the last round carries the board status, earlier rounds are 'done'
+ *   (unchanged legacy behavior; restored/fused boards have no `done` flags and rely on this branch).
+ * - Streaming board: the LIVE round = the first not-yet-settled one (`done` still unset) — the engine
+ *   processes rounds in order, so rounds before it are 'done', the live one carries the streaming status,
+ *   and any round after it is a queued follow-up ('queued') the engine hasn't started. This stops a
+ *   just-queued follow-up from showing "Generating…" while the prior round is still being written.
+ */
+export function turnViewStatus(turns: Turn[], boardStatus: Status, i: number): TurnViewStatus {
+  if (boardStatus !== 'streaming') return i === turns.length - 1 ? boardStatus : 'done';
+  const liveIdx = turns.findIndex((t) => !t.done);
+  if (liveIdx === -1) return boardStatus; // all rounds settled yet board still streaming (transient) — safe
+  if (i < liveIdx) return 'done';
+  if (i === liveIdx) return boardStatus;
+  return 'queued';
+}
+
 // Node-Delete Phase 1: text seed to rebuild a lineage-dirty board's context after an ancestor was deleted.
 // The board (and any surviving dirty ancestors between it and the nearest clean ancestor) fork natively
 // from that clean ancestor; this replays their own Q/A on top so the deleted node is excluded. Q AND A of
@@ -505,6 +590,7 @@ export function fuseAdjacent(
             messageUuid: desc.data.messageUuid, // Lazy Fork: fused board's terminal = the descendant's terminal turn
             summary: undefined,
             miniSummary: undefined,
+            tags: undefined, // combined content → re-classify (cleared like summary)
             contextTokens: desc.data.contextTokens,
             contextWindow: desc.data.contextWindow,
           } }

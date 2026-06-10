@@ -6,6 +6,7 @@
 import type { BraidConfig } from '../../sdkOptions';
 import { buildSdkOptions } from '../../sdkOptions';
 import type { ImageInput, McpServerInfo } from '../../protocol';
+import { TAG_VOCAB } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle,
   McpController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
@@ -17,6 +18,17 @@ import {
 import { resolveSdkEntry } from '../../runtime/sdk-provision';
 
 const SUMMARY_MODEL = 'claude-haiku-4-5-20251001'; // M3 collapsed-summary model (cheap + fast)
+
+// System prompt for condensing a verbose native /compact <analysis> summary into a short, glanceable
+// digest card shown on the compacted board (compacted-context digest). Mirrors the Q/A card summarizer's
+// "headline + bullets, output only the Markdown" discipline, but framed for a whole compacted lineage.
+const COMPACT_DIGEST_SYSTEM =
+  `You are a "compacted-context digest writer". You are given the internal /compact summary of a long conversation — its full working context. Compress it into a short digest card so the user can recall at a glance, on a canvas, what this compacted context contains.\n` +
+  `Strict rules:\n` +
+  `1. Output ONLY the digest Markdown itself — never greet, confirm, ask back, comment on the input, or explain what you are doing.\n` +
+  `2. The first line is a **bold one-sentence headline** naming what this conversation/context is about.\n` +
+  `3. Then 3-6 "- " bullets covering the key topics / decisions / files·modules involved / and where it left off. Keep each short; omit any bullet with no content — less is more.\n` +
+  `4. Write in the SAME language as the source summary. Do not wrap the whole output in a code block, and do not add a prefix like "Summary:".`;
 
 export interface ClaudeAdapterDeps {
   loadSdk(): Promise<any | null>;
@@ -200,7 +212,13 @@ export class ClaudeAdapter implements Engine {
       } catch (e: any) {
         return { ok: false, error: String(e?.message ?? e) };
       }
-      return { ok: true, sessionId, summary: summary || undefined };
+      // The native /compact summary is a verbose <analysis> dump — faithful but not glanceable. Condense it
+      // into a short card digest (headline + bullets) so the compact board shows a readable digest of the
+      // compacted context. Display-only (the full `summary` is what feeds merge/fork). Best-effort: an
+      // empty/failed digest just falls back to the raw summary on the card.
+      let digest = '';
+      if (summary) digest = await this.haikuOneShot(sdk, req.cwd, COMPACT_DIGEST_SYSTEM, summary);
+      return { ok: true, sessionId, summary: summary || undefined, digest: digest || undefined };
     },
   };
 
@@ -211,7 +229,10 @@ export class ClaudeAdapter implements Engine {
       const q = sdk.query({
         prompt: content,
         // persistSession:false → one-shot, display-only, never resumed → don't pollute the session list.
-        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false },
+        // settingSources:[] → don't load project memory (CLAUDE.md / .claude/rules/*.md). Those files are
+        // mostly Chinese here and otherwise bias the cheap summarizer to emit Chinese for English Q/A,
+        // overriding the "same language as the Q/A" instruction. The summarizer needs no memory/MCP.
+        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, settingSources: [], maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false },
       });
       for await (const m of q as AsyncIterable<any>) {
         if (m.type === 'assistant') { const full = extractText(m); if (full) text = full; }
@@ -222,7 +243,7 @@ export class ClaudeAdapter implements Engine {
     return text.trim();
   }
 
-  async summarize(req: SummarizeRequest): Promise<{ summary: string; miniSummary?: string }> {
+  async summarize(req: SummarizeRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }> {
     const sdk = await this.deps.loadSdk();
     if (!sdk) return { summary: '' }; // never block on summaries — webview clears its hint, falls back
     const cardSystem =
@@ -241,14 +262,25 @@ export class ClaudeAdapter implements Engine {
       `2. Output ONLY that one sentence: no greeting, confirmation, asking back, or explanation; no surrounding quotes/brackets/asterisks or a "Summary:" prefix; no trailing punctuation.\n` +
       `3. You are NOT talking to the user — the Q/A is only material; do not answer Q.\n` +
       `4. Start with a verb, name the core, keep it short. Write in the SAME language as the Q/A.`;
+    const tagSystem =
+      `You are a "conversation tagger". Classify the single round of Q&A into 1-2 topic tags that hint what the round is about, for a glance on a canvas.\n` +
+      `Strict rules:\n` +
+      `1. Choose ONLY from this exact list (lowercase): ${TAG_VOCAB.join(', ')}. Use no other words.\n` +
+      `2. Output 1-2 tags MAX, the single most-fitting one FIRST, comma-separated on ONE line. Output ONLY the tags — no greeting, explanation, prefix, quotes, brackets, or trailing punctuation.\n` +
+      `3. Prefer fewer: pick one tag unless a second is clearly just as central. If none fits well, output the single closest tag from the list.\n` +
+      `4. Tag the NATURE of the work: coding = writing/changing code; plan = planning/strategy/architecture; design = API/UI/data-model design; review = critiquing code or a design; debug = diagnosing/fixing a bug; refactor = restructuring without behavior change; test = tests/verification; research = investigating/comparing/learning; docs = writing documentation; commit = creating a git commit / version-control actions; build = building/compiling/bundling/packaging; deploy = releasing/publishing/installing/shipping (e.g. packaging a .vsix); config = configuration/settings/tooling/environment setup; deps = dependency/package management (adding or upgrading libraries).`;
     const content =
       `Summarize the following round of Q&A (output only the summary; do not answer it):\n\n` +
       `Q: ${req.prompt}\n\nA: ${req.answer}`;
-    const [summary, miniSummary] = await Promise.all([
+    const [summary, miniSummary, tagsText] = await Promise.all([
       this.haikuOneShot(sdk, req.cwd, cardSystem, content),
       this.haikuOneShot(sdk, req.cwd, miniSystem, content),
+      this.haikuOneShot(sdk, req.cwd, tagSystem, content),
     ]);
-    return { summary, miniSummary: miniSummary || undefined };
+    // Light parse only — split into raw tokens; the webview's normalizeTags (SSOT, tested) does the
+    // authoritative vocab-filter + dedup + cap, so model junk outside TAG_VOCAB is dropped there.
+    const tags = tagsText.split(/[,\n]/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+    return { summary, miniSummary: miniSummary || undefined, tags: tags.length ? tags : undefined };
   }
 
   // ---- MCP control session (was McpControl) ----

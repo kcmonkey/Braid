@@ -103,7 +103,10 @@ export type CompactCap =
   | { mode: 'none' };
 
 export interface CompactRequest { boardId: string; resume: string; cwd: string }
-export interface CompactResult { ok: boolean; sessionId?: string; summary?: string; error?: string }
+// `summary` = the raw native /compact analysis (full fidelity, used for merge/fork). `digest` = a short
+// card-style condensed summary of it (headline + bullets), generated for glanceable display on the
+// compact board card. (compacted-context digest)
+export interface CompactResult { ok: boolean; sessionId?: string; summary?: string; digest?: string; error?: string }
 
 export interface EngineCapabilities {
   fork: 'native' | 'replay';
@@ -121,7 +124,8 @@ export interface Engine {
   // live handle via ctl.onLive. Resolves when the burst ends (host then clears aborters/liveQueries).
   runTurn(req: TurnRequest, sink: EventSink, pre: PreToolInterceptor, ctl: TurnControl): Promise<void>;
   compact: CompactCap;
-  summarize(req: SummarizeRequest): Promise<{ summary: string; miniSummary?: string }>;
+  // `tags` = raw digest-tag tokens the cheap model proposed (validated webview-side against TAG_VOCAB).
+  summarize(req: SummarizeRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }>;
   mcpControl(cwd: string): Promise<McpController | null>;
   checkAuth(cwd: string, abort: AbortController): Promise<AuthResult>;
 }

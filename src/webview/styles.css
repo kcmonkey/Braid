@@ -131,7 +131,9 @@ body {
 }
 @keyframes board-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
-  .board__working { animation: none; }
+  /* NOTE: .board__working is intentionally NOT reset here — the "working" spinner is functional status,
+     not decoration, and must keep spinning regardless of the reduced-motion preference (it kept looking
+     frozen otherwise). The rotation is a small, contained ring, not a large screen-wide motion. */
   .board.needs-ask { animation: none; }
 }
 .board.error { border-color: var(--red); }
@@ -181,6 +183,32 @@ body {
 .chatview__float .ctxbadge { font-size: 11px; margin-top: 0; padding: 4px 7px; }
 /* M12: fused-board badge — number of rounds drag-merged into this board (blue, like merge). */
 .board__fused { flex: none; margin-top: 1px; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--merge); background: #2a2c36; border: 1px solid var(--merge); border-radius: 6px; padding: 2px 6px; white-space: nowrap; }
+
+/* Digest tags: color-coded content-hint chips on TOP of a card (closed TAG_VOCAB → one color rule per
+   tag). The strip sits above the head bar; chips are small uppercase pills with a tinted bg + border.
+   normalizeTags guarantees the tag ∈ vocab, so a matching .tag--<name> rule always exists. */
+.board__tags { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 11px 0; }
+.tag {
+  flex: none; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  border-radius: 5px; padding: 1px 6px; line-height: 1.6; white-space: nowrap;
+  border: 1px solid var(--border-sub); color: var(--muted-2); background: var(--bg-deep);
+}
+.tag--coding   { color:#5aa1ff; border-color:#2f5ea8; background:#16223a; }
+.tag--plan     { color:#b78cff; border-color:#5a3fa0; background:#221a38; }
+.tag--design   { color:#ff8ad1; border-color:#9c3f78; background:#34182a; }
+.tag--review   { color:#e0b341; border-color:#8a6a1c; background:#2c2512; }
+.tag--debug    { color:#ff6b6b; border-color:#a83f3f; background:#371919; }
+.tag--refactor { color:#36c5b0; border-color:#1f7a6e; background:#0f2c27; }
+.tag--test     { color:#6cd06c; border-color:#3f8a3f; background:#152c15; }
+.tag--research { color:#3fb8d4; border-color:#1f7a8a; background:#0f2b32; }
+.tag--docs     { color:#9aa6b2; border-color:#55606b; background:#1e242b; }
+.tag--commit   { color:#f0883e; border-color:#a85a1c; background:#36210f; }
+.tag--build    { color:#a8c93a; border-color:#6b7d1c; background:#232a0f; }
+.tag--deploy   { color:#8a86f5; border-color:#4f4ba8; background:#1c1b38; }
+.tag--config   { color:#7f9cb0; border-color:#4a6675; background:#16232a; }
+.tag--deps     { color:#c98a5e; border-color:#8a5e2c; background:#2c2012; }
+.board.lod-far .board__tags { padding: 6px 9px 0; }
+.board.lod-far .tag { font-size: 11px; }
 /* M12: transient hint shown when a board is dropped on a non-fusable neighbor. */
 .fuse-hint {
   position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 50;
@@ -252,7 +280,18 @@ body {
 .board__summary .md strong { color: var(--text); }
 /* M9: compacted-boundary node body — a green label marking it as a context checkpoint (no input box),
    above the truncated compacted summary. Continue by forking (+ handle); select to merge. */
-.board__compact-boundary .board__compactlabel { font-size: 11px; color: var(--compact); line-height: 1.4; margin-bottom: 6px; }
+.board__compact-boundary .board__compactlabel { font-size: 11px; color: var(--compact); line-height: 1.4; margin-bottom: 6px; display: flex; align-items: baseline; gap: 6px; }
+/* Disclosure toggle (icon-only ▸/▾) revealing the full raw /compact analysis under the condensed digest. */
+.board__compactraw-toggle {
+  margin-left: auto; flex: none; font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+  color: var(--compact); background: transparent; border: none; padding: 0 2px;
+}
+.board__compactraw-toggle:hover { color: var(--text); }
+/* The expanded full summary: scroll-capped so a ~5K-char analysis never blows up the card. */
+.board__compactraw {
+  margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--compact);
+  max-height: 260px; overflow-y: auto; font-size: 12px;
+}
 
 /* ---- Far LOD (the compact gist card) ----
    A board NOT in the selected lineage: the head's title becomes the fused gist (mini summary) and the
@@ -260,10 +299,15 @@ body {
    head's own padding gives breathing room), and the layout reflows to that real (short) height. */
 /* In far mode the head IS the whole card — drop the divider line under it. */
 .board.lod-far .board__head { border-bottom: none; }
-/* Bigger font so the gist stays legible at a glance. A tight line-clamp keeps the far card compact (and
-   bounds a pathologically long fallback gist from making a giant card). */
+/* The gist needs to read as a sentence at a glance. The card is a fixed 320px wide, so an oversized
+   font (was 22px) fit only ~3 words per line and the 3-line clamp guillotined most gists mid-phrase
+   ("…animation:none with…"). A moderate size fits ~5 words/line so lines wrap on natural word breaks,
+   and a 4th clamped line lets the full mini-summary land before truncating. 4×17px ≈ the old 3×22px,
+   so the measured card height is ~unchanged → board arrangement is unaffected. word-break:normal +
+   overflow-wrap stops normal words snapping mid-token (only genuinely unbreakable strings break). */
 .board.lod-far .board__title {
-  font-size: 22px; font-weight: 600; line-height: 1.35; letter-spacing: .02em; -webkit-line-clamp: 3; color: var(--text);
+  font-size: 17px; font-weight: 600; line-height: 1.4; -webkit-line-clamp: 4; color: var(--text);
+  word-break: normal; overflow-wrap: break-word;
 }
 
 /* LOD content dissolve: when a board flips detail↔far (it entered/left the selected lineage), its
@@ -701,6 +745,18 @@ body {
   background: rgba(210,153,34,.14); color: var(--text);
 }
 .branchsel__gist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Branch switch: the chosen branch's turns fade + slide up into place instead of snapping. One-shot
+   wrapper around the below-fork region (see ChatView), keyed per switch so it replays each time. The
+   expo-out curve matches chatview-in / board-lod (fast then gently settles). */
+.branchenter { animation: branch-enter .34s cubic-bezier(.16, 1, .3, 1); }
+@keyframes branch-enter {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .branchenter { animation: branch-enter-fade .16s ease; }
+  @keyframes branch-enter-fade { from { opacity: 0; } to { opacity: 1; } }
+}
 
 /* ---- Markdown rendering (assistant output) ---- */
 .md { font-size: 12px; line-height: 1.6; color: var(--text-2); word-break: break-word; }
@@ -844,7 +900,13 @@ body {
   border: 2px solid var(--accent-soft); border-top-color: var(--accent);
   animation: board-spin .7s linear infinite;
 }
-@media (prefers-reduced-motion: reduce) { .working__dot { animation: none; } }
+/* The "Generating…" spinner keeps spinning even under reduced motion — it's a live progress indicator,
+   not decoration, and a frozen ring reads as "stuck" (see .board__working note). No guard here on purpose. */
+/* A queued follow-up round: not yet started by the engine (it finishes the current round first). A static
+   hollow dot (NOT the spinner) + muted italic line distinguishes it from the live "Generating…" round. */
+.turn--queued { opacity: .72; }
+.turn__queued { display: flex; align-items: center; gap: 7px; margin-top: 6px; font-size: 12px; font-style: italic; color: var(--muted-2); }
+.queued__dot { flex: none; width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--border); }
 .tool__body { border-top: 1px solid var(--border-sub); padding: 8px 10px; }
 .tool__result, .tool__diff {
   margin: 0; max-height: 320px; overflow: auto;
