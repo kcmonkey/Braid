@@ -44,7 +44,7 @@
         },
         "braid.effort": {
           "type": "string",
-          "default": "",
+          "default": "xhigh",
           "enum": [
             "",
             "low",
@@ -65,7 +65,7 @@
         },
         "braid.thinking": {
           "type": "string",
-          "default": "inherit",
+          "default": "adaptive",
           "enum": [
             "inherit",
             "adaptive",

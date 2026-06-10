@@ -411,6 +411,13 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       break;
     case 'abort': {
       const k = aKey(canvasId, msg.boardId);
+      // Fast-stop: a live streaming-input turn cuts almost instantly via interrupt() — a control message
+      // over the already-open stdin pipe → the engine emits a `result` right away → the adapter settles the
+      // board to 'done' (partial kept). Firing only the AbortController instead waits for the subprocess
+      // stream to actually close before the for-await loop ends/settles — the couple-second lag the user
+      // sees. Interrupt first (for the immediate settle), then abort to release the subprocess + maps.
+      const h = liveQueries.get(k);
+      if (h) { try { await h.interrupt(); } catch { /* fall through to hard abort */ } }
       aborters.get(k)?.abort();
       aborters.delete(k);
       break;
