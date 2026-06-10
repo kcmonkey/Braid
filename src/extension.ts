@@ -8,7 +8,7 @@ import type { BraidConfig, ProviderConfig, CanvasConfig, LegacyFlatProviderConfi
 import { DEFAULT_PROVIDER_CONFIG, DEFAULT_CANVAS_CONFIG, migrateLegacyConfig } from './sdkOptions';
 import type { BraidSettings } from './engine/host';
 import { EngineHost } from './engine/host';
-import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry } from './runtime/sdk-provision';
+import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry, resolveClaudeBinaryFromEntry } from './runtime/sdk-provision';
 import { ensureSdkInstalled } from './runtime/sdk-download';
 import type { EventSink, PreToolInterceptor, PreToolDecision, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
 
@@ -83,7 +83,16 @@ let provisioningPromise: Promise<boolean> | null = null; // single in-flight dow
 
 // The engine middle layer (only ClaudeAdapter registered). The host routes all SDK-backed work —
 // turns / compact / summary / MCP control / auth probe — through it. (plans/Engine-Abstraction)
-const engineHost = new EngineHost({ readSettings, getSdkInstallDir: () => provisionedSdkDir });
+// Resolve the bundled `claude` binary (for CLI subcommands the SDK doesn't expose, e.g. `auth logout`):
+// the provisioned install first, else the dev/F5 node_modules sibling.
+function resolveClaudeBinary(): string | undefined {
+  const provisioned = resolveClaudeBinaryFromEntry(resolveSdkEntry(provisionedSdkDir));
+  if (provisioned) return provisioned;
+  try { return resolveClaudeBinaryFromEntry(require.resolve('@anthropic-ai/claude-agent-sdk')); }
+  catch { return undefined; }
+}
+
+const engineHost = new EngineHost({ readSettings, getSdkInstallDir: () => provisionedSdkDir, resolveBinary: resolveClaudeBinary });
 
 // Notifications are entirely webview-side now: an in-canvas notification panel derived from each board's
 // unread / pending-ask state (which self-clears when the user opens the board). The host keeps no

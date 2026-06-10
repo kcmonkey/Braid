@@ -139,3 +139,17 @@ describe('buildTurnDone', () => {
     expect(buildTurnDone(s, false, 1).contextWindow).toBe(1_000_000);
   });
 });
+
+describe('reduceClaudeMessage — passive rate_limit_event', () => {
+  it('emits a rateLimit event carrying the mapped snapshot', () => {
+    const ev = { type: 'rate_limit_event', rate_limit_info: { status: 'allowed_warning', rateLimitType: 'five_hour', utilization: 72, resetsAt: 1_900_000_000 } };
+    const { events } = run([init(), ev]);
+    const rl = events.find((e) => e.t === 'rateLimit') as any;
+    expect(rl).toEqual({ t: 'rateLimit', snapshot: { status: 'allowed_warning', windowId: 'five_hour', utilizationPct: 72, resetsAt: 1_900_000_000 } });
+  });
+
+  it('a rate_limit_event without rate_limit_info emits nothing', () => {
+    const { events } = run([init(), { type: 'rate_limit_event' }]);
+    expect(events.some((e) => e.t === 'rateLimit')).toBe(false);
+  });
+});

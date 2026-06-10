@@ -147,3 +147,30 @@ export function loadManifest(extensionPath: string): SdkManifest | undefined {
 export function isProvisioned(installDir: string, version: string): boolean {
   return readCurrentVersion(installDir) === version && !!resolveSdkEntry(installDir);
 }
+
+/** Bundled CLI binary filename for the current platform. */
+function claudeBinaryName(): string {
+  return process.platform === 'win32' ? 'claude.exe' : 'claude';
+}
+
+/**
+ * Given a resolved SDK entry (…/@anthropic-ai/claude-agent-sdk/sdk.mjs), locate the `claude` binary that
+ * ships in the sibling `@anthropic-ai/claude-agent-sdk-<platform>` package. Used for CLI subcommands the
+ * SDK doesn't expose (e.g. `claude auth logout`). Returns undefined if not found. Thin over fs.
+ */
+export function resolveClaudeBinaryFromEntry(sdkEntry: string | undefined): string | undefined {
+  if (!sdkEntry) return undefined;
+  const scopeDir = path.dirname(path.dirname(sdkEntry)); // …/@anthropic-ai
+  const bin = claudeBinaryName();
+  try {
+    for (const name of fs.readdirSync(scopeDir)) {
+      if (name.startsWith('claude-agent-sdk-') && name !== 'claude-agent-sdk') {
+        const p = path.join(scopeDir, name, bin);
+        if (fs.existsSync(p)) return p;
+      }
+    }
+  } catch {
+    /* scope dir missing → undefined */
+  }
+  return undefined;
+}

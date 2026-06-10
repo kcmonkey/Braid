@@ -20,12 +20,17 @@ export class EngineHost {
 
   // `getSdkInstallDir` is read lazily on every load (the EngineHost is constructed at module-load,
   // before activate() knows globalStorage) — so the provisioned SDK location can be set later.
-  constructor(deps: { readSettings(): BraidSettings; getSdkInstallDir?(): string | undefined }) {
+  constructor(deps: {
+    readSettings(): BraidSettings;
+    getSdkInstallDir?(): string | undefined;
+    resolveBinary?(): string | undefined;
+  }) {
     this.readSettings = deps.readSettings;
     this.engines.set('claude', new ClaudeAdapter({
       loadSdk: () => loadClaudeSdk({ installDir: deps.getSdkInstallDir?.() }),
       // Each adapter is handed only its own provider's slice (host owns the provider→slice mapping).
       readProviderConfig: () => deps.readSettings().providers.claude ?? DEFAULT_PROVIDER_CONFIG,
+      resolveBinary: deps.resolveBinary,
     }));
   }
 

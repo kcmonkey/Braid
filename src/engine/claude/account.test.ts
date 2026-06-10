@@ -8,11 +8,11 @@ describe('toProviderAccount', () => {
   });
 
   it('signedIn is true when backend is firstParty even without an email', () => {
-    expect(toProviderAccount({ apiProvider: 'firstParty' }).signedIn).toBe(true);
+    expect(toProviderAccount({ apiProvider: 'firstParty' })!.signedIn).toBe(true);
   });
 
   it('signedIn is false for an empty/3P account', () => {
-    expect(toProviderAccount({ apiProvider: 'bedrock' }).signedIn).toBe(false);
+    expect(toProviderAccount({ apiProvider: 'bedrock' })!.signedIn).toBe(false);
     expect(toProviderAccount({})).toEqual({ signedIn: false, email: undefined, organization: undefined, plan: undefined, backend: undefined });
   });
 
@@ -38,8 +38,8 @@ describe('toProviderUsage', () => {
   });
 
   it('tolerates null/absent rate_limits → empty windows (API key / 3P provider)', () => {
-    expect(toProviderUsage({ rate_limits: null }).windows).toEqual([]);
-    expect(toProviderUsage({}).windows).toEqual([]);
+    expect(toProviderUsage({ rate_limits: null })!.windows).toEqual([]);
+    expect(toProviderUsage({})!.windows).toEqual([]);
   });
 
   it('null utilization / missing reset survive as null', () => {

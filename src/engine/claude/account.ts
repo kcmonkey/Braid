@@ -2,6 +2,7 @@
 // streaming-input session); the mappers are SDK-free so they unit-test from recorded fixtures.
 // `toRateLimitSnapshot` is consumed by the pure reducer (reduce.ts) for the passive usage chip — keeping it
 // here (not in adapter.ts) avoids an adapter↔reduce import cycle. (plans/Provider-Engine-Layer Phase 3)
+import { spawn } from 'child_process';
 import type { AccountController, AuthOutcome } from '../types';
 import type { ProviderAccount, ProviderUsage, UsageWindow, RateLimitSnapshot } from '../../protocol';
 
@@ -71,6 +72,9 @@ export class ClaudeAccountControl implements AccountController {
   _disposed = false;
   readonly busy = new Set<string>();
 
+  // `claudeBinary` = the bundled CLI path for `auth logout` (the SDK exposes no logout control method).
+  constructor(private readonly claudeBinary?: string) {}
+
   async info(): Promise<ProviderAccount | null> {
     try {
       return toProviderAccount(await this._q.accountInfo());
@@ -91,14 +95,45 @@ export class ClaudeAccountControl implements AccountController {
     }
   }
 
-  // Browser-OAuth sign-in / sign-out are implemented in Phase 4 (probe-gated entry point). Until then they
-  // resolve to a not-implemented outcome so the contract type-checks and the host can wire the handlers.
-  async signIn(_openUrl: (url: string) => void, _signal: AbortSignal): Promise<AuthOutcome> {
-    return { ok: false, error: 'Sign-in is not implemented yet (Phase 4).' };
+  // Browser-OAuth sign-in. Entry point confirmed via probe-auth.mjs (knowledge.md): the control session
+  // exposes (untyped-but-callable) `claudeAuthenticate(loginWithClaudeAi)` → `claudeOAuthWaitForCompletion()`.
+  // claudeAuthenticate(true) begins the claude.ai (subscription) flow and returns the authorize URL; the CLI
+  // subprocess runs a loopback server that catches the browser redirect, so we just open the URL and wait.
+  // Response field names are defensive (verify exact shape on F5 — the SDK doesn't type these methods).
+  async signIn(openUrl: (url: string) => void, signal: AbortSignal): Promise<AuthOutcome> {
+    this.busy.add('auth');
+    try {
+      const res: any = await this._q.claudeAuthenticate(true);
+      if (signal.aborted) return { ok: false, error: 'canceled', canceled: true };
+      const url = res?.url ?? res?.authorizationUrl ?? res?.loginUrl ?? res?.authUrl;
+      if (typeof url === 'string' && url) openUrl(url);
+      const done: any = await this._q.claudeOAuthWaitForCompletion();
+      if (signal.aborted) return { ok: false, error: 'canceled', canceled: true };
+      // The CLI rejects on failure, so a resolved call defaults to success; honor an explicit failure flag.
+      const ok = done == null ? true : (done.success ?? done.ok ?? done.authenticated ?? true);
+      return ok ? { ok: true } : { ok: false, error: typeof done?.error === 'string' ? done.error : 'sign-in did not complete' };
+    } catch (e: any) {
+      if (signal.aborted) return { ok: false, error: 'canceled', canceled: true };
+      return { ok: false, error: e?.message ?? String(e) };
+    } finally {
+      this.busy.delete('auth');
+    }
   }
 
+  // Sign-out: the SDK exposes no logout control method, so spawn the bundled CLI's `auth logout` (clears the
+  // stored OAuth credentials, affecting every subsequent turn). Best-effort: resolves even on spawn error.
   async signOut(): Promise<void> {
-    /* Phase 4 */
+    this.busy.add('auth');
+    try {
+      if (!this.claudeBinary) { console.error('[Braid] sign-out: claude binary not resolved'); return; }
+      await new Promise<void>((resolve) => {
+        const cp = spawn(this.claudeBinary!, ['auth', 'logout'], { stdio: 'ignore' });
+        cp.on('close', () => resolve());
+        cp.on('error', (e: any) => { console.error('[Braid] auth logout spawn failed:', e?.message ?? e); resolve(); });
+      });
+    } finally {
+      this.busy.delete('auth');
+    }
   }
 
   dispose() {

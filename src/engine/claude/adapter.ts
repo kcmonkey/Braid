@@ -34,6 +34,8 @@ const COMPACT_DIGEST_SYSTEM =
 export interface ClaudeAdapterDeps {
   loadSdk(): Promise<any | null>;
   readProviderConfig(): ProviderConfig;
+  // The bundled `claude` binary path, for CLI subcommands the SDK doesn't expose (account sign-out). Optional.
+  resolveBinary?(): string | undefined;
 }
 
 /**
@@ -312,7 +314,7 @@ export class ClaudeAdapter implements Engine {
   async accountControl(cwd: string): Promise<AccountController | null> {
     const sdk = await this.deps.loadSdk();
     if (!sdk) return null;
-    const ctrl = new ClaudeAccountControl();
+    const ctrl = new ClaudeAccountControl(this.deps.resolveBinary?.());
     const keepAlive = new Promise<void>((r) => { ctrl._release = r; });
     async function* input() { await keepAlive; } // yields nothing; stays open until dispose()
     try {
