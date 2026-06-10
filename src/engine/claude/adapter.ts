@@ -406,19 +406,20 @@ export class ClaudeAdapter implements Engine {
   }
 
   // ---- branch signpost label (Branch-Signposts) ----
-  // One Haiku one-shot over a branch SEGMENT's concatenated Q/A → a single "this branch explores X" line for
-  // the floating signpost label. Never blocks: empty text on SDK-unavailable / throw (haikuOneShot swallows).
+  // One Haiku one-shot over a branch SEGMENT's concatenated Q/A → a single imperative title (git-commit-
+  // subject style) for the floating signpost label. Never blocks: empty text on SDK-unavailable / throw.
   async branchSummary(req: BranchSummarizeRequest): Promise<{ text: string }> {
     const sdk = await this.deps.loadSdk();
     if (!sdk) return { text: '' };
     const system =
-      `You are a "conversation branch labeler". You are given several consecutive rounds of Q&A that form ONE branch of a larger discussion. Distill them into ONE very short label — a terse noun phrase of about 5 words or fewer (for Chinese, about 10 characters or fewer) — naming what this branch as a whole is about, so it fits on a single line and is recognized at a glance as a signpost on a canvas.\n` +
+      `You are a "branch titler". You are given several consecutive rounds of Q&A that form ONE branch of a larger discussion. Write ONE concise title — exactly like a good git commit subject line / pull-request title — naming what this branch ACCOMPLISHES as a whole, so it is recognized at a glance as a signpost on a canvas.\n` +
       `Strict rules:\n` +
-      `1. Capture the THROUGH-LINE of the whole branch, not just the first or last round — but be EXTREMELY brief: it must fit on one short line. Favor a topic phrase over a full sentence.\n` +
-      `2. Output ONLY that short label: no greeting, confirmation, asking back, or explanation; no surrounding quotes/brackets/asterisks or a "Summary:"/"Label:" prefix; no trailing punctuation.\n` +
-      `3. You are NOT talking to the user — the Q/A is only material; do not answer it or continue it.\n` +
-      `4. Name the core topic, drop filler words. Write in the SAME language as the Q/A.`;
-    const content = `Label the following branch of consecutive Q&A rounds with one very short phrase (output only the label):\n\n${req.text}`;
+      `1. Start with an imperative verb (e.g. Add, Fix, Implement, Set up, Refactor, Remove, Update, Improve, Diagnose, Build, Restore, Expand). Examples of the exact style and length: "Add summary display to root and branch nodes", "Fix message queue hanging during tool use", "Implement permission approval UI and plan confirmation", "Diagnose and fix reduced-motion animation issues".\n` +
+      `2. About 6-9 words, roughly 50 characters or fewer; ONE line; sentence case (capitalize only the first word + proper nouns like VS Code / ChatView / Haiku); NO trailing period.\n` +
+      `3. Describe the OVERALL outcome/through-line of the whole branch, not just one round.\n` +
+      `4. Output ONLY the title: no greeting, confirmation, asking back, or explanation; no surrounding quotes/brackets/asterisks or a "Title:"/"Summary:" prefix.\n` +
+      `5. You are NOT talking to the user — the Q/A is only material; do not answer it or continue it. Write in the SAME language as the Q/A (for Chinese, keep it within about 20 characters).`;
+    const content = `Write one concise imperative title for the following branch of consecutive Q&A rounds (output only the title):\n\n${req.text}`;
     const text = await this.haikuOneShot(sdk, req.cwd, system, content);
     return { text };
   }

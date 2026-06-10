@@ -914,6 +914,13 @@ function ContextBadge({ tokens, window: win }: { tokens?: number; window?: numbe
 // (accepted: when this small, you're scanning by tag). `position:relative; z-index` in CSS keeps the
 // scaled strip painted ABOVE the head.
 const TAG_FLOOR_ZOOM = 0.85;
+// Zoom-driven compression (user request 2026-06-11): below this zoom the on-card text is too small to
+// read anyway, so EVERY board collapses to the compact far gist — even a selected / ancestor detail
+// lineage — reclaiming the vertical space the tall detail cards would otherwise hold, and letting the
+// plate-less branch labels carry the map. BoardNode selects the BOOLEAN (zoom < this), so it re-renders
+// only when crossing the threshold, not on every zoom delta; the LOD-height change then flows through the
+// existing measured-size → relayoutAnchored repack (same path as selection-driven detail↔far). Tunable.
+const COMPRESS_ZOOM = 0.55;
 function TagChips({ tags }: { tags?: BoardTag[] }) {
   // Re-renders only when the zoom factor (transform[2]) changes — panning (transform[0]/[1]) is ignored.
   const zoom = useStore((s) => s.transform[2]);
@@ -1041,7 +1048,10 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // Per-node LOD (fisheye): this board renders DETAIL when it's the selected board / an ancestor of it,
   // OR it's an idle compose board (always usable so you can type even when nothing is selected).
   // Otherwise it's a compact FAR gist. The graph reflows to these mixed heights (see App.autoLayout).
-  const lod: Lod = detailSet.has(id) || isFresh ? 'detail' : 'far';
+  // Zoom-driven compression (COMPRESS_ZOOM): too far out → force FAR for every board (text is unreadable
+  // at that scale), so even the detail lineage collapses + the graph repacks tighter around the labels.
+  const zoomCompressed = useStore((s) => s.transform[2] < COMPRESS_ZOOM);
+  const lod: Lod = !zoomCompressed && (detailSet.has(id) || isFresh) ? 'detail' : 'far';
   // A just-triggered compact node, still running /compact (no prompt yet) → show the compacting spinner.
   // Once the user asks a question in it, prompt is set and it renders as a normal streaming turn.
   const compacting = !!data.compact && data.status === 'streaming' && !data.prompt;

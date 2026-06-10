@@ -36,7 +36,8 @@ export const MAX_CONCURRENT_SUMMARIES = 3;
 //   v1: initial one-sentence branch summary.   v2: terse one-line phrase (≤~5 words) so it fits a single line.
 //   v3: disabled auto-memory on the labeler (settings.autoMemoryEnabled:false) → no Chinese label for English
 //       branches (same MEMORY.md leak as digest v4) → re-label every signpost.
-export const BRANCH_SUMMARY_VERSION = 3;
+//   v4: imperative git-commit-subject-style title (~6-9 words) — matches the official extension's session titles.
+export const BRANCH_SUMMARY_VERSION = 4;
 
 // Rolling cap on concurrent in-flight branch-summary requests, separate from the digest cap (each fires
 // its own Haiku one-shot; capping them independently keeps either pipeline from starving the other while
