@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Board Canvas — Provider hierarchy (Accounts + Settings) mockup</title>
+<style>
+  /* Palette lifted verbatim from src/webview/styles.css :root so this reads like the real canvas. */
+  :root {
+    --bg:#1c1b1a; --bg-deep:#1f1e1d; --bg-code:#1a1917;
+    --panel:#30302e; --panel-2:#2b2a27;
+    --border:#423f3a; --border-sub:#383631;
+    --text:#f5f4ee; --text-2:#e3e1d8; --muted:#a8a199; --muted-2:#8c857b;
+    --accent:#d97757; --accent-2:#c2613f; --accent-soft:rgba(217,119,87,.16);
+    --fork:#d29922; --merge:#6c8cff; --compact:#57ab5a;
+    --green:#7cb573; --red:#e5645d; --red-bg:#3a201c;
+    --codex:#10a37f; /* OpenAI green — placeholder provider accent */
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--text); font-size:14px; line-height:1.5; }
+
+  /* ---- Faux canvas backdrop ---- */
+  .canvas { position:fixed; inset:0; overflow:hidden; background:radial-gradient(circle,#2a2825 1px,transparent 1px) 0 0 / 22px 22px, var(--bg); }
+  .ghost-board { position:absolute; width:230px; border:1px solid var(--border); border-radius:12px; background:var(--panel); box-shadow:0 6px 24px rgba(0,0,0,.35); opacity:.5; pointer-events:none; }
+  .ghost-board .gb-head { padding:9px 12px; border-bottom:1px solid var(--border-sub); background:linear-gradient(180deg,#37352f,var(--panel)); display:flex; gap:8px; align-items:center; }
+  .gb-dot { width:8px;height:8px;border-radius:50%;background:var(--accent); }
+  .gb-turn { font-size:11px;font-weight:700;color:var(--muted-2);background:var(--bg-deep);border-radius:6px;padding:2px 7px; }
+  .ghost-board .gb-body { padding:10px 12px; }
+  .gb-line { height:8px; border-radius:4px; background:#3a3833; margin-bottom:7px; } .gb-line.s { width:60%; }
+
+  /* ---- Floating top-right controls (icon-only) ---- */
+  .topbar { position:fixed; top:16px; right:16px; display:flex; gap:8px; align-items:center; z-index:12; }
+  .chip { display:flex; align-items:center; gap:7px; cursor:pointer; font-size:12px; font-weight:600; letter-spacing:.02em;
+    padding:6px 10px; border-radius:8px; border:1px solid var(--border-sub); background:var(--bg-deep); color:var(--muted-2); user-select:none; }
+  .chip:hover { border-color:var(--border); color:var(--text-2); }
+  .chip .dot { width:8px;height:8px;border-radius:50%; } .chip .pct { font-variant-numeric:tabular-nums; }
+  .chip--warn { color:#d8a43a; border-color:#6b5417; background:#2a2616; }
+  .chip--high { color:var(--red); border-color:var(--red); background:var(--red-bg); }
+  .iconbtn { width:34px;height:34px;border-radius:8px;border:1px solid var(--border-sub); background:var(--bg-deep); color:var(--muted);
+    cursor:pointer; font-size:15px; display:flex;align-items:center;justify-content:center; }
+  .iconbtn:hover { color:var(--text); border-color:var(--border); }
+  .iconbtn.on { color:var(--text); border-color:var(--accent); background:var(--accent-soft); }
+  .avatar { width:34px;height:34px;border-radius:50%; cursor:pointer; display:flex;align-items:center;justify-content:center;
+    font-weight:700; font-size:13px; color:#1c1b1a; background:var(--accent); border:2px solid var(--bg-deep); box-shadow:0 0 0 1px var(--accent); }
+  .avatar:hover { filter:brightness(1.08); }
+
+  /* ---- Composer (bottom) — inline high-frequency model quick-switch ---- */
+  .composer { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:5; width:560px; max-width:92vw;
+    background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.4); padding:10px 12px; }
+  .composer__ta { width:100%; min-height:34px; resize:none; background:transparent; border:none; color:var(--text); font:inherit; font-size:13px; outline:none; }
+  .composer__ta::placeholder { color:var(--muted-2); }
+  .composer__bar { display:flex; align-items:center; gap:8px; margin-top:8px; }
+  .prov-mini { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted-2); }
+  .prov-mini .dot { width:8px;height:8px;border-radius:50%; }
+  .mini-select { font:inherit; font-size:12px; color:var(--text-2); background:var(--bg-deep); border:1px solid var(--border-sub); border-radius:7px; padding:5px 8px; cursor:pointer; }
+  .composer__bar .spacer { flex:1; }
+  .send { width:32px;height:32px;border-radius:8px;border:none; background:var(--accent); color:#1c1b1a; font-size:15px; cursor:pointer; }
+
+  /* ---- Transparent click-catcher (closes any open popover on outside click) ---- */
+  .catcher { position:fixed; inset:0; z-index:9; background:transparent; }
+  .catcher.hidden { display:none; }
+
+  /* ============ SETTINGS as an ANCHORED DROPDOWN off the gear ============ */
+  .dropdown { position:fixed; top:58px; right:16px; width:404px; max-width:94vw; max-height:80vh; overflow:auto; z-index:11;
+    background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 16px 44px rgba(0,0,0,.5);
+    animation:dropIn .12s ease-out; }
+  .dropdown.hidden { display:none; }
+  @keyframes dropIn { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:none; } }
+  /* little caret pointing up at the gear */
+  .dropdown::before { content:''; position:absolute; top:-7px; right:21px; width:12px;height:12px; background:var(--panel);
+    border-left:1px solid var(--border); border-top:1px solid var(--border); transform:rotate(45deg); }
+  .dd__head { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between;
+    padding:11px 14px; border-bottom:1px solid var(--border-sub); background:linear-gradient(180deg,#37352f,var(--panel)); }
+  .dd__title { font-size:13px; font-weight:700; }
+  .dd__sub { font-size:10.5px; color:var(--muted-2); font-weight:500; margin-left:6px; }
+  .dd__close { background:none;border:none;color:var(--muted);font-size:15px;cursor:pointer;padding:2px 4px; }
+  .dd__close:hover { color:var(--text); }
+  .dd__body { padding:12px 14px; display:flex; flex-direction:column; gap:12px; }
+
+  /* ---- Account overlay (kept as a dedicated centered panel) ---- */
+  .backdrop { position:fixed; inset:0; background:rgba(20,19,18,.55); z-index:14; display:flex; align-items:flex-start; justify-content:center; padding-top:6vh; }
+  .backdrop.hidden { display:none; }
+  .panel { width:560px; max-width:94vw; max-height:86vh; overflow:auto; background:var(--panel); border:1px solid var(--border); border-radius:14px; box-shadow:0 18px 50px rgba(0,0,0,.5); }
+  .panel__head { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border-sub); background:linear-gradient(180deg,#37352f,var(--panel)); }
+  .panel__title { font-size:15px; font-weight:700; display:flex; gap:9px; align-items:center; }
+  .panel__sub { font-size:11px; color:var(--muted-2); font-weight:500; }
+  .panel__close { background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:4px; }
+  .panel__close:hover { color:var(--text); }
+  .panel__body { padding:16px 18px; display:flex; flex-direction:column; gap:14px; }
+
+  /* ---- Shared spine: active-provider selector (appears in BOTH surfaces) ---- */
+  .spine { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  .spine__lbl { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted-2); }
+  .seg { display:flex; gap:4px; background:var(--bg-deep); border:1px solid var(--border-sub); border-radius:9px; padding:3px; }
+  .seg button { font:inherit; font-size:12px; font-weight:600; cursor:pointer; border:none; background:transparent; color:var(--muted); padding:5px 10px; border-radius:6px; display:flex; align-items:center; gap:6px; }
+  .seg button .dot { width:8px;height:8px;border-radius:50%; }
+  .seg button.on { background:var(--panel); color:var(--text); box-shadow:0 0 0 1px var(--border); }
+  .spine .spacer { flex:1; }
+  .xlink { font-size:12px; color:var(--merge); cursor:pointer; background:none; border:none; }
+  .xlink:hover { text-decoration:underline; }
+
+  /* ---- Provider account card ---- */
+  .pcard { border:1px solid var(--border-sub); border-radius:12px; background:var(--panel-2); overflow:hidden; }
+  .pcard.active { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent-soft); }
+  .pcard.disabled { opacity:.62; }
+  .pcard__head { display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid var(--border-sub); }
+  .pcard__dot { width:10px;height:10px;border-radius:50%; flex:none; }
+  .pcard__name { font-size:14px; font-weight:700; }
+  .pcard__vendor { font-size:11px; color:var(--muted-2); margin-left:-4px; }
+  .pcard__spacer { flex:1; }
+  .badge { font-size:10px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; padding:3px 8px; border-radius:6px; white-space:nowrap; }
+  .badge--active { color:#1c1b1a; background:var(--accent); }
+  .badge--setup { color:var(--muted-2); background:var(--bg-deep); border:1px solid var(--border-sub); }
+  .pcard__body { padding:12px 14px; display:flex; flex-direction:column; gap:11px; }
+  .identity { display:flex; flex-direction:column; gap:3px; }
+  .identity .email { font-size:13px; font-weight:600; color:var(--text); }
+  .identity .plan { font-size:12px; color:var(--muted); } .identity .plan b { color:var(--green); font-weight:700; }
+  .divider { height:1px; background:var(--border-sub); margin:1px 0; }
+  .usage { display:flex; flex-direction:column; gap:9px; }
+  .urow { display:grid; grid-template-columns:58px 1fr auto; align-items:center; gap:10px; }
+  .urow .ulabel { font-size:11px; color:var(--muted-2); font-weight:600; }
+  .bar { height:7px; border-radius:5px; background:var(--bg-deep); overflow:hidden; border:1px solid var(--border-sub); }
+  .bar__fill { height:100%; border-radius:5px; transition:width .5s ease; }
+  .bar__fill.ok { background:var(--green); } .bar__fill.warn { background:var(--fork); } .bar__fill.high { background:var(--red); }
+  .umeta { font-size:11px; color:var(--muted-2); white-space:nowrap; font-variant-numeric:tabular-nums; } .umeta b { color:var(--text-2); font-weight:700; }
+  .cost { font-size:12px; color:var(--muted); display:flex; gap:7px; align-items:baseline; } .cost b { color:var(--text); font-size:13px; font-variant-numeric:tabular-nums; } .cost span { color:var(--muted-2); font-size:11px; }
+  .pcard__actions { display:flex; gap:8px; padding:11px 14px; border-top:1px solid var(--border-sub); background:var(--bg-deep); }
+  .pcard__actions .spacer { flex:1; }
+
+  .btn { font:inherit; font-size:12px; font-weight:600; cursor:pointer; padding:6px 12px; border-radius:7px; border:1px solid var(--border); background:var(--panel); color:var(--text-2); }
+  .btn:hover { border-color:var(--muted-2); color:var(--text); } .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .btn--primary { background:var(--accent); border-color:var(--accent); color:#1c1b1a; } .btn--primary:hover { background:var(--accent-2); border-color:var(--accent-2); }
+  .btn--ghost { background:transparent; }
+  .btn--danger { color:var(--red); border-color:#5a2f2b; background:transparent; } .btn--danger:hover { background:var(--red-bg); border-color:var(--red); }
+
+  .signedout { font-size:12px; color:var(--muted); }
+  .auth-flow { display:flex; flex-direction:column; gap:10px; }
+  .auth-step { display:flex; gap:10px; align-items:flex-start; font-size:12px; color:var(--text-2); }
+  .auth-step .num { width:18px;height:18px;border-radius:50%;flex:none; font-size:10px;font-weight:700; display:flex;align-items:center;justify-content:center; background:var(--bg-deep); color:var(--muted-2); border:1px solid var(--border-sub); }
+  .auth-step.on .num { background:var(--accent); color:#1c1b1a; border-color:var(--accent); }
+  .auth-step.done .num { background:var(--green); color:#1c1b1a; border-color:var(--green); }
+  .auth-url { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:11px; color:var(--merge); background:var(--bg-code); border:1px solid var(--border-sub); border-radius:6px; padding:6px 8px; word-break:break-all; margin-top:3px; }
+  .spinner { width:13px;height:13px;border-radius:50%;flex:none;margin-top:1px; border:2px solid var(--accent-soft); border-top-color:var(--accent); animation:spin .8s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+
+  /* ---- Settings sections (now inside the dropdown) ---- */
+  .section { border:1px solid var(--border-sub); border-radius:10px; overflow:hidden; }
+  .section__title { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted-2); padding:8px 12px; background:var(--bg-deep); border-bottom:1px solid var(--border-sub); display:flex; align-items:center; gap:8px; }
+  .section__title .scope { font-weight:600; text-transform:none; letter-spacing:0; }
+  .section__title .scope.prov { color:var(--accent); } .section__title .scope.neutral { color:var(--merge); }
+  .section__body { padding:4px 12px 10px; }
+  .frow { display:flex; align-items:center; gap:10px; padding:8px 0; border-bottom:1px solid var(--border-sub); }
+  .frow:last-child { border-bottom:none; }
+  .frow__lbl { flex:none; width:118px; font-size:12px; color:var(--text-2); }
+  .frow__lbl .cur { color:var(--muted-2); font-size:11px; margin-left:4px; }
+  .frow__ctl { flex:1; display:flex; align-items:center; gap:8px; }
+  .frow.gated { opacity:.5; }
+  .gnote { font-size:10.5px; color:var(--muted-2); font-style:italic; }
+  select.ctl, input.ctl { font:inherit; font-size:12px; color:var(--text-2); background:var(--bg-deep); border:1px solid var(--border-sub); border-radius:7px; padding:6px 8px; }
+  select.ctl { cursor:pointer; } input.ctl[type=text] { flex:1; } input.ctl[type=number] { width:60px; flex:none; }
+  .dots { display:flex; gap:6px; }
+  .dots button { width:13px;height:13px;border-radius:50%;border:1px solid var(--muted-2); background:transparent; cursor:pointer; padding:0; }
+  .dots button.on { background:var(--accent); border-color:var(--accent); } .dots button.cur { box-shadow:0 0 0 2px var(--accent-soft); }
+  .toggle { width:38px;height:22px;border-radius:11px; border:1px solid var(--border); background:var(--bg-deep); position:relative; cursor:pointer; padding:0; }
+  .toggle .knob { position:absolute; top:2px; left:2px; width:16px;height:16px;border-radius:50%; background:var(--muted); transition:all .15s; }
+  .toggle.on { background:var(--accent-soft); border-color:var(--accent); } .toggle.on .knob { left:18px; background:var(--accent); }
+  .check { width:16px;height:16px; accent-color:var(--accent); cursor:pointer; }
+  .preview-banner { font-size:11px; color:var(--merge); background:#16203a; border:1px solid #2f4a7a; border-radius:7px; padding:7px 9px; }
+  .hint { font-size:10.5px; color:var(--muted-2); line-height:1.5; border-top:1px dashed var(--border-sub); padding-top:10px; }
+  .hint code { font-family:ui-monospace,monospace; color:var(--text-2); background:var(--bg-code); padding:1px 5px; border-radius:4px; font-size:10px; }
+
+  .legend { position:fixed; left:16px; bottom:14px; max-width:430px; z-index:5; font-size:11px; color:var(--muted-2); line-height:1.55; background:rgba(31,30,29,.9); border:1px solid var(--border-sub); border-radius:9px; padding:10px 12px; }
+  .legend b { color:var(--text-2); } .legend .k { color:var(--accent); font-weight:700; }
+</style>
+</head>
+<body>
+  <div class="canvas">
+    <div class="ghost-board" style="top:16%; left:7%;"><div class="gb-head"><span class="gb-dot"></span><span class="gb-turn">root</span></div><div class="gb-body"><div class="gb-line"></div><div class="gb-line"></div><div class="gb-line s"></div></div></div>
+    <div class="ghost-board" style="top:44%; left:18%;"><div class="gb-head"><span class="gb-dot" style="background:var(--fork)"></span><span class="gb-turn">fork</span></div><div class="gb-body"><div class="gb-line"></div><div class="gb-line s"></div></div></div>
+    <div class="ghost-board" style="top:24%; left:64%;"><div class="gb-head"><span class="gb-dot" style="background:var(--merge)"></span><span class="gb-turn">merge</span></div><div class="gb-body"><div class="gb-line"></div><div class="gb-line"></div><div class="gb-line s"></div></div></div>
+  </div>
+
+  <!-- Floating top-right controls -->
+  <div class="topbar">
+    <div id="chip" class="chip" title="Active provider usage — click for Accounts">
+      <span class="dot" style="background:var(--accent)"></span><span id="chipLabel">Claude</span><span class="pct" id="chipPct">5h 68%</span>
+    </div>
+    <div id="avatarBtn" class="avatar" title="Accounts">K</div>
+    <div id="gearBtn" class="iconbtn" title="Settings (provider-scoped)">⚙</div>
+  </div>
+
+  <!-- Composer with inline quick model-switch -->
+  <div class="composer">
+    <textarea class="composer__ta" placeholder="Ask the active provider…  (quick model switch below)"></textarea>
+    <div class="composer__bar">
+      <span class="prov-mini"><span class="dot" id="composerDot" style="background:var(--accent)"></span><span id="composerProv">Claude</span></span>
+      <select class="mini-select" id="composerModel" title="Quick model switch (active provider)"></select>
+      <span class="spacer"></span><button class="send" title="Send">➤</button>
+    </div>
+  </div>
+
+  <!-- Transparent click-catcher to close popovers -->
+  <div id="catcher" class="catcher hidden"></div>
+
+  <!-- SETTINGS: anchored dropdown off the gear -->
+  <div id="dropdown" class="dropdown hidden">
+    <div class="dd__head">
+      <div><span class="dd__title">Settings</span><span class="dd__sub">provider-scoped · capability-gated</span></div>
+      <button class="dd__close" id="ddClose" title="Close">✕</button>
+    </div>
+    <div class="dd__body" id="ddBody"></div>
+  </div>
+
+  <!-- ACCOUNT: dedicated centered overlay -->
+  <div id="backdrop" class="backdrop hidden">
+    <div class="panel" onclick="event.stopPropagation()">
+      <div class="panel__head"><div class="panel__title">Accounts <span class="panel__sub">providers · identity · usage</span></div>
+        <button class="panel__close" id="closeBtn" title="Close">✕</button></div>
+      <div class="panel__body" id="acctBody"></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <b>Mockup — Settings is now an anchored dropdown.</b> Click the <span class="k">gear</span> (top-right) — Settings drops down
+    from it with a caret. The <span class="k">avatar</span> still opens the Accounts overlay. Switch the active provider via the
+    spine (or composer dropdown) to see the model list, capability-gating, and account all follow. Try <b>Codex</b> in Settings
+    to see grayed-out controls + the provider-neutral Canvas section.
+  </div>
+
+<script>
+  const CLAUDE_MODELS = [{v:'',t:'Default model'},{v:'fable',t:'Fable 5'},{v:'opus',t:'Opus'},{v:'sonnet',t:'Sonnet'},{v:'haiku',t:'Haiku'}];
+  const CODEX_MODELS  = [{v:'gpt-5-codex',t:'GPT-5 Codex'},{v:'o4',t:'o4'},{v:'o4-mini',t:'o4-mini'}];
+  const EFFORTS = ['low','medium','high','xhigh','max'];
+
+  const state = {
+    active:'claude',
+    settingsOpen:false,
+    acctOpen:false,
+    providers:{
+      claude:{ name:'Claude', vendor:'Anthropic', dot:'var(--accent)', implemented:true, signedIn:true, auth:'idle',
+        email:'kcmonkey1992@gmail.com', org:'Anthropic', plan:'Max', backend:'subscription · firstParty',
+        usage:[{label:'5-hour',pct:68,resets:'resets 14:30'},{label:'7-day',pct:31,resets:'resets Mon'}], cost:'$0.00', costNote:'covered by subscription',
+        authUrl:'https://claude.ai/oauth/authorize?client_id=…&code_challenge=…',
+        cap:{ models:CLAUDE_MODELS, reasoning:true, compact:true },
+        settings:{ model:'opus', effort:'high', thinking:'adaptive', permission:'bypassPermissions', maxTurns:0 } },
+      codex:{ name:'Codex', vendor:'OpenAI', dot:'var(--codex)', implemented:false, signedIn:false, auth:'idle',
+        authUrl:'https://auth.openai.com/authorize?…',
+        cap:{ models:CODEX_MODELS, reasoning:true, compact:false },
+        settings:{ model:'gpt-5-codex', effort:'medium', thinking:'adaptive', permission:'default', maxTurns:0 } }
+    },
+    canvas:{ expandAncestors:true, autoCompact:true, autoCompactPct:95 }
+  };
+
+  const $ = id => document.getElementById(id);
+  const barClass = p => p>=85?'high':p>=60?'warn':'ok';
+
+  function spineHTML(showAccountLink){
+    const segs = Object.entries(state.providers).map(([id,p])=>
+      `<button class="${state.active===id?'on':''}" onclick="setActive('${id}')"><span class="dot" style="background:${p.dot}"></span>${p.name}</button>`).join('');
+    return `<div class="spine"><span class="spine__lbl">Provider</span><div class="seg">${segs}</div><span class="spacer"></span>
+      ${showAccountLink?`<button class="xlink" onclick="openAcct()">Account ↗</button>`:`<button class="xlink" onclick="openSettings()">Settings ↗</button>`}</div>`;
+  }
+
+  /* ---------- ACCOUNT ---------- */
+  function usageHTML(p){ return `<div class="usage">${p.usage.map(u=>`<div class="urow"><span class="ulabel">${u.label}</span>
+    <div class="bar"><div class="bar__fill ${barClass(u.pct)}" style="width:${u.pct}%"></div></div>
+    <span class="umeta"><b>${u.pct}%</b> · ${u.resets}</span></div>`).join('')}</div>`; }
+  function cardBody(id,p){
+    if (p.signedIn) return `<div class="identity"><span class="email">${p.email}</span><span class="plan"><b>${p.plan} plan</b> · ${p.backend}</span></div>
+      <div class="divider"></div>${usageHTML(p)}<div class="cost"><span>Session</span><b>${p.cost}</b><span>${p.costNote}</span></div>`;
+    if (p.auth==='opening'||p.auth==='waiting'){ const s2=p.auth==='waiting'?'done':'on', s3=p.auth==='waiting'?'on':'';
+      return `<div class="auth-flow">
+        <div class="auth-step done"><span class="num">✓</span><div>Requested authorization from the ${p.name} CLI</div></div>
+        <div class="auth-step ${s2}"><span class="num">2</span><div>Opened your browser to sign in${p.auth==='opening'?' …':''}<div class="auth-url">${p.authUrl}</div></div></div>
+        <div class="auth-step ${s3}">${p.auth==='waiting'?'<span class="spinner"></span>':'<span class="num">3</span>'}<div>${p.auth==='waiting'?'Waiting for you to authorize in the browser…':'Complete &amp; return — token saved locally'}</div></div></div>`; }
+    return `<div class="signedout">${p.implemented?'Not signed in.':'Engine not built yet — sign-in arrives with this provider.'}</div>`;
+  }
+  function cardActions(id,p){
+    if (p.signedIn){ const setA = state.active===id?`<span class="badge badge--active" style="align-self:center">◆ Active</span>`:`<button class="btn btn--ghost" onclick="setActive('${id}')">Set active</button>`;
+      return `<button class="btn btn--ghost" onclick="renderAcct()" title="Re-fetch usage">↻ Refresh</button><div class="spacer"></div>${setA}<button class="btn btn--danger" onclick="signOut('${id}')">Sign out</button>`; }
+    if (p.auth==='opening'||p.auth==='waiting') return `<div class="spacer"></div><button class="btn btn--ghost" onclick="cancelAuth('${id}')">Cancel</button>`;
+    return `<div class="spacer"></div><button class="btn btn--primary" ${p.implemented?'':'disabled'} onclick="signIn('${id}')">Sign in${p.implemented?'':' (soon)'}</button>`;
+  }
+  function cardHTML(id,p){ const isActive = state.active===id && p.signedIn;
+    return `<div class="pcard ${isActive?'active':''} ${p.implemented?'':'disabled'}"><div class="pcard__head">
+      <span class="pcard__dot" style="background:${p.dot}"></span><span class="pcard__name">${p.name}</span><span class="pcard__vendor">${p.vendor}</span>
+      <span class="pcard__spacer"></span>${isActive?'<span class="badge badge--active">◆ Active</span>':(p.signedIn?'':'<span class="badge badge--setup">not set up</span>')}</div>
+      <div class="pcard__body">${cardBody(id,p)}</div><div class="pcard__actions">${cardActions(id,p)}</div></div>`; }
+  function renderAcct(){ $('acctBody').innerHTML = spineHTML(false) + Object.entries(state.providers).map(([id,p])=>cardHTML(id,p)).join('') +
+    `<div class="hint">Identity from <code>query.accountInfo()</code>, usage from <code>query.usage_…()</code> + the free <code>rate_limit_event</code> stream,
+     sign-in via the SDK's <code>claude_authenticate / oauth_callback</code> control requests (browser redirect through <code>vscode.env.openExternal</code>).</div>`; }
+
+  /* ---------- SETTINGS (in the dropdown) ---------- */
+  function effortDots(s){ const i=EFFORTS.indexOf(s.effort);
+    return `<div class="dots">${EFFORTS.map((lv,n)=>`<button class="${i>=0&&n<=i?'on':''} ${n===i?'cur':''}" title="${lv}" onclick="setEffort('${lv}')"></button>`).join('')}</div><span class="gnote">${i>=0?s.effort:'default'}</span>`; }
+  function renderSettings(){
+    const id=state.active, p=state.providers[id], s=p.settings, cap=p.cap;
+    const modelOpts = cap.models.map(m=>`<option value="${m.v}" ${s.model===m.v?'selected':''}>${m.t}</option>`).join('');
+    const r = cap.reasoning;
+    const preview = p.implemented?'':`<div class="preview-banner">⌁ ${p.name} engine isn't built yet — preview only. Sign in from Accounts once it lands.</div>`;
+    $('ddBody').innerHTML = spineHTML(true) + preview + `
+      <div class="section"><div class="section__title">Generation <span class="scope prov">· ${p.name}</span></div><div class="section__body">
+        <div class="frow"><span class="frow__lbl">Model</span><div class="frow__ctl"><select class="ctl" onchange="setModel(this.value)">${modelOpts}</select></div></div>
+        <div class="frow ${r?'':'gated'}"><span class="frow__lbl">Effort</span><div class="frow__ctl">${effortDots(s)}${r?'':'<span class="gnote">— n/a for '+p.name+'</span>'}</div></div>
+        <div class="frow ${r?'':'gated'}"><span class="frow__lbl">Thinking</span><div class="frow__ctl"><button class="toggle ${s.thinking==='adaptive'?'on':''}" onclick="toggleThinking()"><span class="knob"></span></button>${r?'':'<span class="gnote">— n/a for '+p.name+'</span>'}</div></div>
+        <div class="frow"><span class="frow__lbl">Max turns <span class="cur">0=∞</span></span><div class="frow__ctl"><input class="ctl" type="number" min="0" value="${s.maxTurns}"></div></div>
+      </div></div>
+      <div class="section"><div class="section__title">Permissions &amp; tools <span class="scope prov">· ${p.name}</span></div><div class="section__body">
+        <div class="frow"><span class="frow__lbl">Permission mode</span><div class="frow__ctl"><select class="ctl">
+          <option ${s.permission==='inherit'?'selected':''}>inherit</option><option ${s.permission==='default'?'selected':''}>default · prompt</option>
+          <option ${s.permission==='acceptEdits'?'selected':''}>acceptEdits</option><option ${s.permission==='plan'?'selected':''}>plan · no exec</option>
+          <option ${s.permission==='bypassPermissions'?'selected':''}>bypass · skip approval</option></select></div></div>
+        <div class="frow"><span class="frow__lbl">Allowed tools</span><div class="frow__ctl"><input class="ctl" type="text" placeholder="Empty = unrestricted"></div></div>
+        <div class="frow"><span class="frow__lbl">Disallowed</span><div class="frow__ctl"><input class="ctl" type="text" placeholder="Empty = none"></div></div>
+        <div class="frow"><span class="frow__lbl">MCP servers</span><div class="frow__ctl"><button class="btn">🔌 Manage</button></div></div>
+        <div class="frow"><span class="frow__lbl">Append system</span><div class="frow__ctl"><input class="ctl" type="text" placeholder="Empty = none"></div></div>
+        <div class="frow"><span class="frow__lbl">Env vars</span><div class="frow__ctl"><input class="ctl" type="text" placeholder="KEY=VALUE (never ANTHROPIC_API_KEY)"></div></div>
+      </div></div>
+      <div class="section"><div class="section__title">Canvas <span class="scope neutral">· all providers</span></div><div class="section__body">
+        <div class="frow"><span class="frow__lbl">Expand lineage on select</span><div class="frow__ctl"><input class="check" type="checkbox" ${state.canvas.expandAncestors?'checked':''} onchange="state.canvas.expandAncestors=this.checked"></div></div>
+        <div class="frow ${cap.compact?'':'gated'}"><span class="frow__lbl">Auto-compact at</span><div class="frow__ctl">
+          <input class="ctl" type="number" min="50" max="100" value="${state.canvas.autoCompactPct}" ${cap.compact?'':'disabled'}> %
+          <input class="check" type="checkbox" ${state.canvas.autoCompact&&cap.compact?'checked':''} ${cap.compact?'':'disabled'}>
+          ${cap.compact?'':'<span class="gnote">— '+p.name+' has no native compaction</span>'}</div></div>
+      </div></div>
+      <div class="hint">Each provider's settings map to that engine's options in its own adapter (Claude's <code>buildSdkOptions</code>);
+        controls gray out from <code>EngineCapabilities</code>. The Canvas section lives <b>outside</b> the provider hierarchy — one shared copy.</div>`;
+  }
+
+  /* ---------- chrome (chip + composer) ---------- */
+  function renderChrome(){
+    const p = state.providers[state.active]; const u = p.signedIn?p.usage[0]:null;
+    const chip = $('chip');
+    $('chipLabel').textContent = p.name;
+    $('chipPct').textContent = u?`5h ${u.pct}%`:'signed out';
+    chip.className = 'chip' + (u&&u.pct>=85?' chip--high':u&&u.pct>=60?' chip--warn':'');
+    chip.querySelector('.dot').style.background = p.dot;
+    $('composerDot').style.background = p.dot; $('composerProv').textContent = p.name;
+    $('composerModel').innerHTML = p.cap.models.map(m=>`<option value="${m.v}" ${p.settings.model===m.v?'selected':''}>${m.t}</option>`).join('');
+  }
+
+  function render(){
+    const anyOpen = state.settingsOpen || state.acctOpen;
+    $('catcher').classList.toggle('hidden', !anyOpen);
+    $('dropdown').classList.toggle('hidden', !state.settingsOpen);
+    $('backdrop').classList.toggle('hidden', !state.acctOpen);
+    $('gearBtn').classList.toggle('on', state.settingsOpen);
+    if (state.settingsOpen) renderSettings();
+    if (state.acctOpen) renderAcct();
+    renderChrome();
+  }
+
+  /* ---------- interactions ---------- */
+  window.openSettings = ()=>{ state.settingsOpen=true; state.acctOpen=false; render(); };
+  window.openAcct = ()=>{ state.acctOpen=true; state.settingsOpen=false; render(); };
+  window.setActive = id => { state.active=id; render(); };
+  window.setModel = v => { state.providers[state.active].settings.model=v; render(); };
+  window.setEffort = lv => { const s=state.providers[state.active].settings; s.effort=(s.effort===lv?'':lv); render(); };
+  window.toggleThinking = ()=>{ const s=state.providers[state.active].settings; s.thinking=s.thinking==='adaptive'?'disabled':'adaptive'; render(); };
+  window.renderAcct = renderAcct;
+  window.signOut = id => { const p=state.providers[id]; p.signedIn=false; p.auth='idle';
+    if(state.active===id){ const o=Object.keys(state.providers).find(k=>state.providers[k].signedIn); if(o) state.active=o; } render(); };
+  window.cancelAuth = id => { state.providers[id].auth='idle'; render(); };
+  window.signIn = id => { const p=state.providers[id]; if(!p.implemented) return; p.auth='opening'; render();
+    setTimeout(()=>{ p.auth='waiting'; render(); },1100);
+    setTimeout(()=>{ p.auth='idle'; p.signedIn=true;
+      if(!p.email){ p.email='you@example.com'; p.org='Personal'; p.plan='Pro'; p.backend='subscription';
+        p.usage=[{label:'5-hour',pct:12,resets:'resets 15:10'},{label:'7-day',pct:5,resets:'resets Fri'}]; p.cost='$0.00'; p.costNote='covered by subscription'; }
+      state.active=id; render(); },3000);
+  };
+
+  $('gearBtn').onclick   = ()=>{ state.settingsOpen=!state.settingsOpen; if(state.settingsOpen) state.acctOpen=false; render(); };
+  $('avatarBtn').onclick = ()=>{ state.acctOpen=!state.acctOpen; if(state.acctOpen) state.settingsOpen=false; render(); };
+  $('chip').onclick      = ()=>openAcct();
+  $('ddClose').onclick   = ()=>{ state.settingsOpen=false; render(); };
+  $('closeBtn').onclick  = ()=>{ state.acctOpen=false; render(); };
+  $('catcher').onclick   = ()=>{ state.settingsOpen=false; state.acctOpen=false; render(); };
+  $('backdrop').onclick  = ()=>{ state.acctOpen=false; render(); };
+  $('composerModel').onchange = e=>setModel(e.target.value);
+
+  state.settingsOpen = true; // open Settings dropdown first so the change is visible
+  render();
+</script>
+</body>
+</html>
