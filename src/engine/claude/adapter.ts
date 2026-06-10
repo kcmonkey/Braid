@@ -346,10 +346,15 @@ export class ClaudeAdapter implements Engine {
         // settingSources:[] → don't load project memory (CLAUDE.md / .claude/rules/*.md). Those files are
         // mostly Chinese here and otherwise bias the cheap summarizer to emit Chinese for English Q/A,
         // overriding the "same language as the Q/A" instruction. The summarizer needs no memory/MCP.
+        // settings.autoMemoryEnabled:false → ALSO disable the SEPARATE auto-memory subsystem (the recall
+        // supervisor surfaces ~/.claude/projects/<cwd>/memory/MEMORY.md into every turn). settingSources does
+        // NOT cover auto-memory (sdk.d.ts:1872 vs Settings.autoMemoryEnabled:5841) — that MEMORY.md is mostly
+        // Chinese and even says "respond in the user's language", so without this the digest came out Chinese
+        // for English Q/A despite settingSources:[]. (knowledge.md "摘要语言 / auto-memory 泄漏")
         // thinking:disabled → digest is a cheap classify/summarize task that needs no reasoning; set it
         // EXPLICITLY (not omitted) so the binary default can never turn thinking on and burn thinking
         // tokens. SUMMARY_MODEL is Haiku 4.5, which accepts {type:'disabled'} (only Fable 5 would 400).
-        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, settingSources: [], maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false, thinking: { type: 'disabled' } },
+        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, settingSources: [], settings: { autoMemoryEnabled: false }, maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false, thinking: { type: 'disabled' } },
       });
       for await (const m of q as AsyncIterable<any>) {
         if (m.type === 'assistant') { const full = extractText(m); if (full) text = full; }

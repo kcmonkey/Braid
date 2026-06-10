@@ -19,7 +19,9 @@ export const MAX_TAGS = 3;
 // so it re-summarizes once on load (refs are per-session → fires once per reopen until it re-stamps).
 //   v1: initial card summary + mini summary.   v2: added digest tags.
 //   v3: expanded tag vocabulary (+commit/build/deploy/config/deps) → re-tag every board.
-export const DIGEST_VERSION = 3;
+//   v4: disabled auto-memory on the summarizer (settings.autoMemoryEnabled:false) so an English Q/A no
+//       longer gets a Chinese digest from the recalled (mostly-Chinese) MEMORY.md → re-summarize every board.
+export const DIGEST_VERSION = 4;
 
 // Rolling cap on concurrent in-flight summarize requests. A version bump can mark MANY boards stale at
 // once; without a cap the webview would post N requests and the host would spawn ~3N CLI subprocesses
@@ -32,7 +34,9 @@ export const MAX_CONCURRENT_SUMMARIES = 3;
 // way that should retroactively re-run on already-labeled signposts. Folded into branchSummaryKey, so a
 // bump makes every signpost's stored key mismatch → needsBranchSummary flags it stale once. (Branch-Signposts)
 //   v1: initial one-sentence branch summary.   v2: terse one-line phrase (≤~5 words) so it fits a single line.
-export const BRANCH_SUMMARY_VERSION = 2;
+//   v3: disabled auto-memory on the labeler (settings.autoMemoryEnabled:false) → no Chinese label for English
+//       branches (same MEMORY.md leak as digest v4) → re-label every signpost.
+export const BRANCH_SUMMARY_VERSION = 3;
 
 // Rolling cap on concurrent in-flight branch-summary requests, separate from the digest cap (each fires
 // its own Haiku one-shot; capping them independently keeps either pipeline from starving the other while

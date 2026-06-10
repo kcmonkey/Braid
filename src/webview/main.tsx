@@ -1667,22 +1667,21 @@ const PERM_DISPLAY: Record<string, { icon: string; label: string }> = {
   inherit: { icon: '⚙', label: 'inherit' },
 };
 
-// Always-visible permission-mode chip (top-left, twin of the Ctrl+scroll zoom hint). Shows the active
-// mode and cycles it on click — same step as Shift+Tab (default → acceptEdits → plan). bypass is shown
-// danger-styled so "tools run unattended" is never silent. The mode is the global active-provider setting.
-function PermModeHint({ mode, onCycle }: { mode: string; onCycle: () => void }) {
+// Always-visible permission-mode chip (top-left, twin of the Ctrl+scroll zoom hint). Read-only
+// indicator: shows the active mode; it does NOT switch on click. Cycle it with Shift+Tab
+// (default → acceptEdits → plan) or change any mode in Settings. bypass is shown danger-styled so
+// "tools run unattended" is never silent. The mode is the global active-provider setting.
+function PermModeHint({ mode }: { mode: string }) {
   const d = PERM_DISPLAY[mode] ?? { icon: '🔒', label: mode };
   return (
-    <button
-      type="button"
+    <div
       className={`perm-hint nodrag nopan${mode === 'bypassPermissions' ? ' perm-hint--danger' : ''}`}
-      title="Permission mode — click or Shift+Tab to cycle (default → acceptEdits → plan)"
-      onClick={onCycle}
+      title="Permission mode — Shift+Tab to cycle (default → acceptEdits → plan); change any mode in Settings"
     >
       <span className="perm-hint__ic">{d.icon}</span>
       <span className="perm-hint__mode">{d.label}</span>
       <kbd>⇧⇥</kbd>
-    </button>
+    </div>
   );
 }
 // Effort levels low→max, in order. '' = default (inherit the model default; nothing sent).
@@ -3568,9 +3567,9 @@ function App() {
           cursor (React Flow pinch-zoom). pointer-events:none so it never blocks canvas interaction.
           Hidden whenever a panel/ChatView/backdrop is up (they all sit at a higher z-index). */}
       <div className="zoom-hint" aria-hidden="true"><kbd>Ctrl</kbd> + scroll to zoom</div>
-      {/* Always-visible permission-mode chip (twin of the zoom hint): shows the active mode + cycles it
-          on click / Shift+Tab. Hidden until config loads. */}
-      {config && <PermModeHint mode={config.permissionMode} onCycle={() => setConfigField({ permissionMode: nextPermMode(config.permissionMode) })} />}
+      {/* Always-visible permission-mode chip (twin of the zoom hint): read-only display of the active
+          mode. Cycle with Shift+Tab (global keydown handler) or change in Settings. Hidden until config loads. */}
+      {config && <PermModeHint mode={config.permissionMode} />}
 
       <div className="toolbar">
         <button className="btn primary" onClick={() => newConversation()} title="New conversation">+</button>
