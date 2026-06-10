@@ -1464,7 +1464,8 @@ function ChatView({
   const leafIsBranch = !!branches[leafId];
   // Scroll anchoring on ENTRY-node change. Two distinct cases:
   //  • Opening focus (first entry): jump instantly to the START of the entered node's turn so reading
-  //    begins where you navigated.
+  //    begins where you navigated — UNLESS the leaf is actively generating, in which case land at the
+  //    BOTTOM so the streaming output is in view (and stays followed via pinnedRef).
   //  • Branch switch (goBranch while mounted): do NOT jump. The fork's chips sit in the unchanged region
   //    above the animated branch, so leaving the scroll put keeps them in place while the chosen branch
   //    fades+slides in below (a reveal scroll only kicks in if it lands off-screen — see next effect).
@@ -1486,6 +1487,11 @@ function ChatView({
       const idx = rendered.findIndex((b) => b.id === entryId);
       const ids = idx >= 0 ? rendered.slice(idx).map((b) => b.id) : [entryId];
       setBranchAnim((p) => ({ ids, tick: (p?.tick ?? 0) + 1 }));
+    } else if (leafStatus === 'streaming') {
+      // Opening focus while the leaf is generating: jump to the bottom so the live output is on
+      // screen, and keep pinnedRef true so the auto-follow ResizeObserver tails it as it grows.
+      pinnedRef.current = true;
+      bottomRef.current?.scrollIntoView({ behavior: 'auto' });
     } else {
       const anchor = entryId ?? leafId;
       const el = scrollRef.current?.querySelector<HTMLElement>(`.turn[data-board-id="${anchor}"]`);

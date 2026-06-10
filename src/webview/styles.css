@@ -247,7 +247,7 @@ body {
 .branch-signpost {
   max-width: 380px;
   font-size: 12px; font-weight: 700; line-height: 1.3; letter-spacing: .01em;
-  color: var(--accent);
+  color: #b3aea4; /* quiet warm grey — an annotation, not an alert (the accent/red read too loud) */
   background: none; border: none; box-shadow: none; border-radius: 0; padding: 0 2px;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .9), 0 0 2px rgba(0, 0, 0, .95);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
