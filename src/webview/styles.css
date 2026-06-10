@@ -105,6 +105,25 @@ body {
      from the unread dot, so "still working" never reads as "unread" and vice-versa. */
 .board.streaming { border-color: var(--accent); }
 
+/* Async continuation (异步续接): a board held open for background tasks / a scheduled wakeup. A calm blue —
+   distinct from the streaming accent (orange) and the needs-ask amber — so "waiting on background work"
+   reads unambiguously as in-flight-but-not-generating. */
+.board.waiting { border-color: #5aa0d8; box-shadow: 0 0 0 2px rgba(90,160,216,.28); }
+.board__awaiting {
+  flex: none; margin-top: 1px; font-size: 12px; line-height: 1; color: #5aa0d8;
+  animation: awaiting-pulse 1.6s ease-in-out infinite;
+}
+@keyframes awaiting-pulse { 0%,100% { opacity: .5; } 50% { opacity: 1; } }
+.async-chips { display: flex; flex-wrap: wrap; gap: 5px; padding: 6px 11px 0; }
+.async-chip {
+  flex: none; font-size: 11px; border-radius: 5px; padding: 1px 7px; line-height: 1.6; white-space: nowrap;
+  max-width: 240px; overflow: hidden; text-overflow: ellipsis;
+  border: 1px solid rgba(90,160,216,.45); color: #aacdec; background: rgba(90,160,216,.12);
+}
+.async-chip--cron { border-color: rgba(180,140,220,.45); color: #cdb4e6; background: rgba(180,140,220,.12); }
+.async-chip--done { opacity: .6; text-decoration: line-through; }
+.composer__hint--waiting { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: #aacdec; }
+
 .board.needs-ask { border-color: var(--fork); box-shadow: 0 0 0 3px rgba(210,153,34,.45); animation: needs-ask-pulse 1.4s ease-in-out infinite; }
 @keyframes needs-ask-pulse {
   0%,100% { box-shadow: 0 0 0 3px rgba(210,153,34,.42); }
