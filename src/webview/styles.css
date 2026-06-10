@@ -213,9 +213,7 @@ body {
 /* Digest tags: color-coded content-hint chips on TOP of a card (closed TAG_VOCAB → one color rule per
    tag). The strip sits above the head bar; chips are small uppercase pills with a tinted bg + border.
    normalizeTags guarantees the tag ∈ vocab, so a matching .tag--<name> rule always exists. */
-/* position/z-index: when the strip is zoom-floor counter-scaled (transform, see TagChips) it grows down
-   over the head — z-index keeps the (opaque) chips painted above the head bar instead of behind it. */
-.board__tags { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 11px 0; position: relative; z-index: 2; }
+.board__tags { display: flex; flex-wrap: wrap; gap: 5px; padding: 7px 11px 0; }
 .tag {
   flex: none; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
   border-radius: 5px; padding: 1px 6px; line-height: 1.6; white-space: nowrap;

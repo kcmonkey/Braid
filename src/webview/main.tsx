@@ -905,15 +905,6 @@ function ContextBadge({ tokens, window: win }: { tokens?: number; window?: numbe
 // Digest tags: color-coded content-hint chips at the top of a card (closed TAG_VOCAB → one CSS color
 // rule per tag). The SAME data.tags renders at both zoom LODs (far inherits the full set from detail —
 // they're never generated separately), capped at MAX_TAGS upstream.
-//
-// Zoom floor (user request 2026-06-11): the strip scales DOWN with the canvas like the rest of the card,
-// but never past its on-screen size at TAG_FLOOR_ZOOM. Below that zoom we counter-scale the strip by
-// TAG_FLOOR_ZOOM/zoom so the effective on-screen size holds constant (baseFont · TAG_FLOOR_ZOOM) however
-// far you zoom out, keeping tags readable. Pure `transform` (no reflow) → the card's card-space size is
-// unchanged, so neighbours never move; the strip just overlaps the head gist a little at extreme zoom-out
-// (accepted: when this small, you're scanning by tag). `position:relative; z-index` in CSS keeps the
-// scaled strip painted ABOVE the head.
-const TAG_FLOOR_ZOOM = 0.85;
 // Zoom-driven compression (user request 2026-06-11): below this zoom the on-card text is too small to
 // read anyway, so EVERY board collapses to the compact far gist — even a selected / ancestor detail
 // lineage — reclaiming the vertical space the tall detail cards would otherwise hold, and letting the
@@ -928,15 +919,9 @@ const COMPRESS_ZOOM = 0.55;
 // are already far gists by then). Boolean selector → re-render only on crossing the threshold. Tunable.
 const FARFAR_ZOOM = 0.45;
 function TagChips({ tags }: { tags?: BoardTag[] }) {
-  // Re-renders only when the zoom factor (transform[2]) changes — panning (transform[0]/[1]) is ignored.
-  const zoom = useStore((s) => s.transform[2]);
   if (!tags || !tags.length) return null;
-  const k = zoom < TAG_FLOOR_ZOOM ? TAG_FLOOR_ZOOM / zoom : 1;
   return (
-    <div
-      className="board__tags"
-      style={k > 1 ? { transform: `scale(${k})`, transformOrigin: 'left top' } : undefined}
-    >
+    <div className="board__tags">
       {tags.map((t) => (
         <span key={t} className={`tag tag--${t}`} title={`Topic: ${t}`}>{t}</span>
       ))}
@@ -1138,9 +1123,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           detail↔far switch. Handles stay OUTSIDE it so React Flow's cached handle geometry / edges
           are never disturbed (the classic handle-remount pitfall). */}
       <div className="board__content" key={lod}>
-      {/* Digest tags: content-hint chips (zoom-floored to stay readable at far). Hidden in 'far-far' (the
-          branch map) where only the label shows. Mounted only when present → tagless boards skip the sub. */}
-      {lod !== 'far-far' && data.tags && data.tags.length > 0 && <TagChips tags={data.tags} />}
+      {/* Digest tags: content-hint chips on top of the card. Hidden in 'far-far' (the branch map) where
+          only the branch label shows. */}
+      {lod !== 'far-far' && <TagChips tags={data.tags} />}
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
         {/* Multi-turn board: M11 in-board follow-ups or an M12 fusion — show how many rounds it holds. */}
