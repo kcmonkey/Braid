@@ -1115,12 +1115,6 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
     {/* The board slot sizes to its card in BOTH LODs now (no fixed height): far cards are content-tight
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
-    {/* Branch label floats ABOVE the board, in the 'far-far' map view only. Rendered in node DOM so it
-        SCALES with the board (not a constant-size overlay → no overlap), and IN-FLOW (first slot child) so
-        the layout reserves vertical space for it and rows never collide. (Branch-Signposts) */}
-    {lod === 'far-far' && signpostLabel && (
-      <div className="board__toplabel nodrag nopan" title={signpostLabel}>{signpostLabel}</div>
-    )}
     <div
       className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''}`}
     >
@@ -1139,13 +1133,13 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           <span className="board__fused" title={`${data.turns.length} rounds`}>⛓{data.turns.length}</span>
         )}
         {/* Title text by LOD: detail = the full question; far = the fused gist (clamped via CSS); far-far =
-            nothing in the card (the branch label floats ABOVE the board via .board__toplabel; gist hidden). */}
+            nothing in the head (the branch label is the board BODY below; gist hidden). */}
         <span className="board__title">
           {isDetail
             ? (data.prompt ? data.prompt : data.compact ? 'Compacted context' : 'New board')
             : lod === 'far'
               ? farGist
-              : null /* far-far: gist hidden; the branch label floats above the board */}
+              : null /* far-far: gist hidden; the branch label is the board body */}
         </span>
         {/* Needs-response: the model called AskUserQuestion and is blocked → icon badge prompting to open
             and answer (icon-only per memory ui-icon-only). Unread: finished but not yet viewed → red dot. */}
@@ -1172,9 +1166,12 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
       {/* Async continuation (异步续接): what background work / wakeup is holding this board open (detail LOD). */}
       {data.status === 'waiting' && isDetail && <AsyncChips pending={data.asyncPending} />}
 
-      {/* far / far-far: no body at all — the gist/label lives in the head title, keeping the card compact
-          (and shorter than the detail card, so it never overlaps the detail-baseline layout). */}
-      {!isDetail ? null : compacting ? (
+      {/* Body by LOD: far-far shows the branch label as the board BODY (main content; it scales with the
+          board and stays inside the card → no overlap). far has no body (gist lives in the head). detail =
+          the full body below. */}
+      {lod === 'far-far' ? (
+        signpostLabel ? <div className="board__farfarbody nodrag nopan" title={signpostLabel}>{signpostLabel}</div> : null
+      ) : !isDetail ? null : compacting ? (
         <div className="board__summary board__compacting"><span className="board__dot" /> 🗜 Compacting…</div>
       ) : data.compact && !data.prompt ? (
         // Compacted-boundary node: a context checkpoint, NOT an input board. Show the compacted summary
