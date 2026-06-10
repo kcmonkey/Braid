@@ -112,6 +112,36 @@ export class ClaudeAdapter implements Engine {
           },
         ],
       },
+      // Native permission "ask" path. Fires only for tools the SDK decides need approval (non-bypass
+      // modes); dormant under bypassPermissions, so wiring it unconditionally is safe. AskUserQuestion is
+      // handled by the PreToolUse deny above, which short-circuits canUseTool (sdk.d.ts:3748) → never here.
+      canUseTool: async (toolName: string, toolInput: Record<string, unknown>, opts: any) => {
+        const verdict = await pre.onPermissionRequest(boardId, state.turnIndex, {
+          toolUseId: opts?.toolUseID,
+          toolName,
+          input: toolInput ?? {},
+          title: opts?.title,
+          description: opts?.description,
+          displayName: opts?.displayName,
+          canAlways: Array.isArray(opts?.suggestions) && opts.suggestions.length > 0,
+        }, opts?.signal);
+        if ('deny' in verdict) {
+          return { behavior: 'deny', message: verdict.message || 'The user declined to run this tool.' };
+        }
+        // allow — MUST echo `updatedInput` back as a record or the SDK ZodErrors (runtime validation is
+        // stricter than the .d.ts, which marks it optional). Echoing the input UNCHANGED = approve as-is.
+        // This is also exactly why ExitPlanMode showed an `err` before the fix. (knowledge.md)
+        const result: Record<string, unknown> = { behavior: 'allow', updatedInput: toolInput ?? {} };
+        const updates: any[] = [];
+        // "Always allow" → persist the SDK's suggested rules to the project's local settings file.
+        if (verdict.always && Array.isArray(opts?.suggestions) && opts.suggestions.length) {
+          updates.push(...opts.suggestions.map((s: any) => ({ ...s, destination: 'localSettings' })));
+        }
+        // ExitPlanMode approval → leave plan mode into the chosen execution mode.
+        if (verdict.mode) updates.push({ type: 'setMode', mode: verdict.mode, destination: 'session' });
+        if (updates.length) result.updatedPermissions = updates;
+        return result;
+      },
     };
     // Attach → SDK options. fresh → none; resume → resume; fork → resume + forkSession (+resumeSessionAt).
     if (req.attach.kind === 'resume') {
@@ -129,14 +159,22 @@ export class ClaudeAdapter implements Engine {
     let closed = false;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let outstanding = 1; // the first user message; gates close-on-settle (bug fix 2026-06-10)
+    // A turn is currently being generated → the gate is closed. A queued follow-up written to the CLI's
+    // stdin mid-turn (e.g. while it's running tools) is DROPPED by the CLI: the generator has already
+    // yielded it and goes back to awaiting, so after the turn's `result` the CLI gets no further input and
+    // the follow-up turn never runs (board hangs in 'streaming'). So we hold queued messages until the
+    // current turn settles, then release the next one as its OWN turn. (probe-followup-fix, 2026-06-11)
+    let turnInFlight = true; // the first user message starts turn 1
     const FOLLOWUP_GRACE_MS = 1000;
     const wakeUp = () => { if (wake) { const w = wake; wake = null; w(); } };
     const cancelIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = undefined; } };
     async function* input() {
-      yield userMessage(req.prompt, req.images);
+      yield userMessage(req.prompt, req.images); // turn 1 — turnInFlight already true
       while (!closed) {
-        if (queue.length === 0) { await new Promise<void>((r) => { wake = r; }); if (closed) break; }
-        while (queue.length && !closed) yield queue.shift();
+        // Release a queued follow-up only BETWEEN turns (gate open = the prior turn's `result` arrived).
+        if (turnInFlight || queue.length === 0) { await new Promise<void>((r) => { wake = r; }); if (closed) break; continue; }
+        turnInFlight = true;
+        yield queue.shift();
       }
     }
 
@@ -172,10 +210,14 @@ export class ClaudeAdapter implements Engine {
               // real failure → settle done, keep partial. (knowledge.md)
               settle(e.isError && !interrupted);
               outstanding--;
+              // Turn boundary: the CLI is ready for new input. Open the gate so input() hands the next
+              // queued follow-up over as its OWN turn (held until now to avoid the mid-turn-drop above).
+              turnInFlight = false;
               if (outstanding <= 0 && queue.length === 0) {
                 cancelIdle();
                 idleTimer = setTimeout(() => { closed = true; wakeUp(); }, FOLLOWUP_GRACE_MS);
               }
+              wakeUp(); // release a held follow-up now, or let the generator re-await / observe `closed`
               break;
           }
         }

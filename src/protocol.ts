@@ -185,6 +185,12 @@ export type WebviewMessage =
   // tool_use id, canvas comes from panel routing) → `reason` becomes the model's same-turn
   // tool_result. `canceled` → the host injects a "user canceled" reason instead.
   | { type: 'askUserAnswer'; toolUseId: string; reason: string; canceled?: boolean }
+  // Permission approval: the user answered a native permission prompt (canUseTool). The host resolves the
+  // blocked canUseTool callback by `toolUseId`. `decision`: 'allow' (once) / 'always' (allow + persist a
+  // rule to .claude/settings.local.json) / 'deny'. `mode` = for ExitPlanMode approval, which permission
+  // mode to continue in after the plan is approved. `message` = a deny reason / ExitPlanMode "keep
+  // planning" feedback fed back to the model as the same-turn tool_result.
+  | { type: 'permissionResponse'; toolUseId: string; decision: 'allow' | 'always' | 'deny'; mode?: 'default' | 'acceptEdits'; message?: string }
   // Editor-tab status icon: the webview reports THIS canvas's two tab-icon signals. `pending` = any board
   // needs attention (an unread completion or a pending question — the same per-board states it renders +
   // lists in the in-canvas notification panel). `busy` = any board is streaming (a task executing). The
@@ -244,6 +250,13 @@ export type HostMessage =
   // offset ties between tool cards and thinking pills by true chronological order. (see ToolStep.seq)
   | { type: 'toolUse'; boardId: string; turnIndex: number; id: string; name: string; input: Record<string, unknown>; parentId?: string; textOffset?: number; seq?: number }
   | { type: 'toolResult'; boardId: string; turnIndex: number; toolUseId: string; content: string; isError: boolean }
+  // Permission approval (canUseTool): the engine wants to run a tool that needs the user's OK. The webview
+  // attaches this to the matching tool step (by `toolUseId`) and renders an inline approve/deny prompt
+  // (on the board card AND in ChatView), driving the attention/notification SSOT. `input` is the tool's
+  // args verbatim — for `ExitPlanMode` it carries `input.plan` (Markdown) + `input.planFilePath`, rendered
+  // as the plan-confirmation card. `title`/`description`/`displayName` = the bridge's pre-rendered prompt
+  // text (may be absent). `canAlways` = the SDK offered an "always allow" option. Answered via permissionResponse.
+  | { type: 'permissionRequest'; boardId: string; turnIndex: number; toolUseId: string; toolName: string; input: Record<string, unknown>; title?: string; description?: string; displayName?: string; canAlways: boolean }
   // M7 gap3: the active/last-focused file editor's context (or null if none available).
   | { type: 'editorContext'; context: EditorContext | null }
   // Composer autofill: this provider's slash-command list (from the active engine; cached host-side, also

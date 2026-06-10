@@ -53,7 +53,7 @@ function harness(opts: { loadSdk?: () => Promise<any> } = {}) {
   return { adapter, fake, captured };
 }
 
-const noopPre: PreToolInterceptor = { onPreToolUse: async () => ({ proceed: true }) };
+const noopPre: PreToolInterceptor = { onPreToolUse: async () => ({ proceed: true }), onPermissionRequest: async () => ({ allow: true }) };
 const req = (attach: Attach, extra: Partial<TurnRequest> = {}): TurnRequest => ({ boardId: 'b1', attach, prompt: 'hi', cwd: '/w', ...extra });
 const init = { type: 'system', subtype: 'init', session_id: 's1', model: 'claude-opus-4-8' };
 
@@ -165,6 +165,62 @@ describe('ClaudeAdapter.runTurn — streaming + settle', () => {
     const done = calls.find((c) => c.t === 'done');
     expect(done.d).toMatchObject({ isError: false, text: 'half' });
   });
+
+  // Regression (2026-06-11): a follow-up queued mid-turn must NOT be written to the CLI's stdin until the
+  // current turn settles. The real CLI DROPS a user message sent mid-turn (e.g. during tool use) → the
+  // follow-up turn never runs and the board hangs in 'streaming' ("Generating…" forever). This fake
+  // CONSUMES the input prompt (the default fake ignores it) so we can assert the gate timing.
+  it('holds a queued follow-up until the current turn settles, then releases it as its own turn', async () => {
+    const pulledInput: any[] = [];   // input messages actually handed to the SDK, in order
+    const out: any[] = [];
+    let outWake: (() => void) | null = null;
+    let outDone = false;
+    let promptIterable: AsyncIterable<any> | null = null;
+    const emit = (m: any) => { out.push(m); if (outWake) { const w = outWake; outWake = null; w(); } };
+    const finish = () => { outDone = true; if (outWake) { const w = outWake; outWake = null; w(); } };
+    const q: any = {
+      async *[Symbol.asyncIterator]() {
+        // Drain the input prompt in the background, logging each message the generator yields to us.
+        (async () => { try { for await (const msg of promptIterable as AsyncIterable<any>) pulledInput.push(msg); } catch { /* generator closed */ } })();
+        while (true) {
+          while (out.length) yield out.shift();
+          if (outDone) return;
+          await new Promise<void>((r) => { outWake = r; });
+        }
+      },
+      interrupt: async () => {},
+    };
+    const sdk = { query: (args: any) => { promptIterable = args.prompt; return q; } };
+    const adapter = new ClaudeAdapter({ loadSdk: async () => sdk, readProviderConfig: () => cfg });
+    const { sink, calls } = recordingSink();
+    let handle: TurnHandle | undefined;
+    const p = adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } });
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+
+    await tick();
+    expect(pulledInput.length).toBe(1); // the initial prompt was handed over (turn 1)
+
+    // Queue a follow-up WHILE turn 1 is in flight (no result yet) — must be held, not written mid-turn.
+    handle!.push('follow-up', undefined);
+    await tick();
+    expect(pulledInput.length).toBe(1); // HELD at the gate
+
+    // Turn 1 settles → gate opens → the follow-up is released as turn 2.
+    emit(init);
+    emit({ type: 'result', is_error: false, session_id: 's1' });
+    await tick();
+    expect(pulledInput.length).toBe(2); // released exactly at the turn boundary
+
+    // Turn 2 settles.
+    emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    emit({ type: 'result', is_error: false });
+    await tick();
+    finish();
+    await p;
+
+    // Both turns settled, on turnIndex 0 then 1 (each init advanced the round).
+    expect(calls.filter((c) => c.t === 'done').map((d) => d.ti)).toEqual([0, 1]);
+  });
 });
 
 describe('ClaudeAdapter.runTurn — loadSdk failure', () => {
@@ -187,7 +243,7 @@ describe('ClaudeAdapter — PreToolUse hook wiring', () => {
   }
   let lastPreArgs: any;
   function captureRefPre(): PreToolInterceptor {
-    return { onPreToolUse: async (...args): Promise<PreToolDecision> => { lastPreArgs = args; return preReply; } };
+    return { onPreToolUse: async (...args): Promise<PreToolDecision> => { lastPreArgs = args; return preReply; }, onPermissionRequest: async () => ({ allow: true }) };
   }
   let preReply: PreToolDecision = { proceed: true };
 

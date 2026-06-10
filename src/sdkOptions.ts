@@ -46,7 +46,10 @@ export const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
   model: '',
   effort: 'xhigh',
   thinking: 'adaptive',
-  permissionMode: 'bypassPermissions',
+  // 'default' = the SDK prompts before risky tools (Bash/PowerShell/edits/etc.) and read-only/safe ops
+  // run directly — surfaced through the in-canvas approval UI (canUseTool). Was 'bypassPermissions'
+  // (no prompts); flipped now that the approval UI exists. (Permission-Approval plan / knowledge.md)
+  permissionMode: 'default',
   maxTurns: 0,
   appendSystemPrompt: '',
   allowedTools: [],

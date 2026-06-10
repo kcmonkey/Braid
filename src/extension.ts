@@ -10,7 +10,7 @@ import type { BraidSettings } from './engine/host';
 import { EngineHost } from './engine/host';
 import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry, resolveClaudeBinaryFromEntry } from './runtime/sdk-provision';
 import { ensureSdkInstalled } from './runtime/sdk-download';
-import type { EventSink, PreToolInterceptor, PreToolDecision, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
+import type { EventSink, PreToolInterceptor, PreToolDecision, PermissionVerdict, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
 
 // ---- Multi-canvas model (M5) ----
 // Each Canvas = its own editor-area webview panel + its own persisted graph. The Activity Bar
@@ -64,6 +64,11 @@ const liveQueries = new Map<string, TurnHandle>();
 // resolver, called with the deny-reason text that becomes the same-turn tool_result.
 const pendingAsks = new Map<string, (reason: string) => void>();
 const ASK_CANCEL_REASON = '[The user canceled the question without making a selection]';
+
+// Permission approval (canUseTool): one pending resolver per in-flight permission prompt, keyed
+// `${canvasId}::${toolUseId}` (same compound-key discipline as pendingAsks/aborters). The webview's
+// `permissionResponse` resolves it with the user's verdict; a board abort resolves it to deny.
+const pendingPermissions = new Map<string, (v: PermissionVerdict) => void>();
 
 // MCP manager (M8): one lazily-created MCP control session per canvas (see McpControl). Created on
 // `mcpOpen`, disposed on `mcpClose` / panel dispose — so docker MCP gateway etc. never idle-run.
@@ -534,6 +539,18 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       resolve?.(msg.canceled ? ASK_CANCEL_REASON : msg.reason);
       break;
     }
+    case 'permissionResponse': {
+      // User answered a native permission prompt (canUseTool) → unblock the waiting onPermissionRequest.
+      // 'deny' → refuse (message = reason / ExitPlanMode "keep planning" feedback); 'allow'/'always' →
+      // approve (always = also persist a project-local allow rule; mode = ExitPlanMode continue-mode).
+      const resolve = pendingPermissions.get(`${canvasId}::${msg.toolUseId}`);
+      if (resolve) {
+        resolve(msg.decision === 'deny'
+          ? { deny: true, message: msg.message }
+          : { allow: true, always: msg.decision === 'always', mode: msg.mode });
+      }
+      break;
+    }
     case 'attention': {
       // Swap this canvas's editor-tab icon (panel.iconPath). Notification wins: any board needing
       // attention (unread completion / pending question) shows the red dot even while another board is
@@ -957,6 +974,29 @@ function makePreToolInterceptor(canvasId: string, boardId: string, boardSignal: 
       });
       pendingAsks.delete(pk);
       return { deny: true, reason };
+    },
+    // Native permission ask (canUseTool): forward the prompt to the webview (it renders the approve/deny
+    // UI on the board card + ChatView and joins the attention/notification SSOT), then block until the
+    // user answers. A board stop/delete (boardSignal) or the engine's own abort (ctxSignal) resolves to
+    // deny so the turn never hangs. The adapter maps the verdict to the Claude PermissionResult.
+    onPermissionRequest: async (_bId, turnIndex, ask, ctxSignal): Promise<PermissionVerdict> => {
+      const pk = `${canvasId}::${ask.toolUseId}`;
+      postTo(canvasId, {
+        type: 'permissionRequest', boardId, turnIndex,
+        toolUseId: ask.toolUseId, toolName: ask.toolName, input: ask.input,
+        title: ask.title, description: ask.description, displayName: ask.displayName, canAlways: ask.canAlways,
+      });
+      const verdict = await new Promise<PermissionVerdict>((resolve) => {
+        pendingPermissions.set(pk, resolve);
+        const onAbort = () => resolve({ deny: true, message: 'Canceled — the board was stopped.' });
+        if (boardSignal.aborted || ctxSignal?.aborted) onAbort();
+        else {
+          boardSignal.addEventListener('abort', onAbort, { once: true });
+          ctxSignal?.addEventListener('abort', onAbort, { once: true });
+        }
+      });
+      pendingPermissions.delete(pk);
+      return verdict;
     },
   };
 }

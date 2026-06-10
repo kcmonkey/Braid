@@ -77,10 +77,39 @@ export interface EventSink {
  * PreToolUse hook; the host's impl does BOTH file-snapshot capture (Edit/Write/NotebookEdit) AND
  * blocking for AskUserQuestion (returns deny+reason = the same-turn tool_result). Default: proceed. */
 export type PreToolDecision = { proceed: true } | { deny: true; reason: string };
+
+/** A native permission prompt (the SDK's `canUseTool` "ask" path), forwarded to the host so it can render
+ * the in-canvas approval UI and block on the user. `input` carries the tool's args verbatim — for
+ * `ExitPlanMode` it also holds the plan (`input.plan` Markdown + `input.planFilePath`), so the plan card
+ * needs no extra fetch. `title`/`description`/`displayName` are the bridge's pre-rendered prompt text (may
+ * be absent). `canAlways` = the SDK offered `suggestions` → the UI can show an "always allow" choice. */
+export interface PermissionAsk {
+  toolUseId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  title?: string;
+  description?: string;
+  displayName?: string;
+  canAlways: boolean;
+}
+
+/** The host's verdict on a PermissionAsk. `allow` → run it (`always` = also persist a rule project-side;
+ * `mode` = for ExitPlanMode, which permission mode to continue in after approving the plan). `deny` →
+ * refuse with an optional message (for ExitPlanMode this is the "keep planning" feedback). The adapter
+ * maps this to a Claude `PermissionResult` — allow MUST echo `updatedInput` back as a record or the SDK
+ * ZodErrors (knowledge.md), and the adapter owns the `localSettings` / `setMode` PermissionUpdate shapes. */
+export type PermissionVerdict =
+  | { allow: true; always?: boolean; mode?: 'default' | 'acceptEdits' }
+  | { deny: true; message?: string };
+
 export interface PreToolInterceptor {
   onPreToolUse(
     boardId: string, toolUseId: string, toolName: string, input: any, signal: AbortSignal,
   ): Promise<PreToolDecision>;
+  /** Native permission ask (canUseTool). Blocks until the user answers (or the turn aborts → deny). */
+  onPermissionRequest(
+    boardId: string, turnIndex: number, ask: PermissionAsk, signal: AbortSignal,
+  ): Promise<PermissionVerdict>;
 }
 
 /** Live handle to an in-flight turn burst (multi-turn streaming-input). */

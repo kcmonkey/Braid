@@ -44,7 +44,17 @@ const first = MODE === 't1' ? PROMPT_T1 : PROMPT_T2;
 
 const q = sdk.query({
   prompt: input(first),
-  options: { cwd: process.cwd(), permissionMode: 'bypassPermissions', includePartialMessages: false },
+  options: {
+    cwd: process.cwd(), permissionMode: 'bypassPermissions', includePartialMessages: false,
+    hooks: {
+      // The load-bearing gate signal: does Stop fire per-turn in streaming-input mode and report
+      // in-flight background_tasks / session_crons (full while pending, empty once settled)?
+      Stop: [{ hooks: [async (inp) => {
+        log('HOOK/Stop', JSON.stringify({ bg: inp?.background_tasks, crons: inp?.session_crons }));
+        return {};
+      }] }],
+    },
+  },
 });
 
 let firstResultAt = null;
