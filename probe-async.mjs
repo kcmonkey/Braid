@@ -39,7 +39,7 @@ const PROMPT_T2 =
   'Use the ScheduleWakeup tool to schedule a wakeup 60 seconds from now (delaySeconds: 60), reason "probe", and a short ' +
   'prompt asking yourself to say PROBE_WOKE. Then immediately end your turn. Do not do anything else.';
 
-const observeMs = MODE === 't1' ? 18000 : 85000;
+const observeMs = MODE === 't1' ? 18000 : 150000;
 const first = MODE === 't1' ? PROMPT_T1 : PROMPT_T2;
 
 const q = sdk.query({
