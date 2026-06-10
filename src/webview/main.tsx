@@ -2355,6 +2355,12 @@ function App() {
   // Effective merge leaves: a selected ancestor is subsumed by its descendant. Fewer than 2 → the
   // merge is a no-op (e.g. parent+child are already one continuous context).
   const mLeaves = useMemo(() => mergeLeaves(selectedIds, edges), [selectedIds, edges]);
+  // AD8 (异步续接): a selected board that's still streaming OR waiting on async work isn't terminal — its
+  // content is incomplete / a moving target → block merge until it settles (or the user Stops the wait).
+  const selectionBusy = useMemo(
+    () => selectedIds.some((id) => { const s = byId[id]?.data.status; return s === 'streaming' || s === 'waiting'; }),
+    [selectedIds, byId],
+  );
 
   // Fisheye LOD set: the selected board(s) render at DETAIL, PLUS — when `expandAncestorsOnSelect` is on
   // (the default, a toggleable setting) — their FULL ancestor lineage. Every other board stays a compact
@@ -3594,6 +3600,11 @@ function App() {
       {selectedIds.length >= 2 && (
         <div className="mergebar">
           {mLeaves.length >= 2 ? (
+            selectionBusy ? (
+              <span className="mergebar__count mergebar__warn">
+                A selected board is still working (generating or waiting on background work). Let it finish — or Stop its wait — before merging.
+              </span>
+            ) : (
             <>
               <span className="mergebar__count">
                 {selectedIds.length} boards selected
@@ -3602,6 +3613,7 @@ function App() {
               </span>
               <button className="btn merge" onClick={doMerge}>⚡ Merge context → new conversation</button>
             </>
+            )
           ) : (
             <span className="mergebar__count mergebar__warn">
               The selected boards are parent/child (already one context) — merging is a no-op. Pick boards from different branches.
