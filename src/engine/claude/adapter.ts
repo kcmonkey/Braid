@@ -407,13 +407,13 @@ export class ClaudeAdapter implements Engine {
     const sdk = await this.deps.loadSdk();
     if (!sdk) return { text: '' };
     const system =
-      `You are a "conversation branch summarizer". You are given several consecutive rounds of Q&A that form ONE branch of a larger discussion. Fuse them into ONE short sentence — about 14 words or fewer (for Chinese, about 22 characters or fewer) — naming what this branch as a whole explores, decides, or accomplishes, so it can be recognized at a glance as a signpost on a canvas.\n` +
+      `You are a "conversation branch labeler". You are given several consecutive rounds of Q&A that form ONE branch of a larger discussion. Distill them into ONE very short label — a terse noun phrase of about 5 words or fewer (for Chinese, about 10 characters or fewer) — naming what this branch as a whole is about, so it fits on a single line and is recognized at a glance as a signpost on a canvas.\n` +
       `Strict rules:\n` +
-      `1. Summarize the THROUGH-LINE of the whole branch, not just the first or last round; capture the overall direction/outcome.\n` +
-      `2. Output ONLY that one sentence: no greeting, confirmation, asking back, or explanation; no surrounding quotes/brackets/asterisks or a "Summary:" prefix; no trailing punctuation.\n` +
+      `1. Capture the THROUGH-LINE of the whole branch, not just the first or last round — but be EXTREMELY brief: it must fit on one short line. Favor a topic phrase over a full sentence.\n` +
+      `2. Output ONLY that short label: no greeting, confirmation, asking back, or explanation; no surrounding quotes/brackets/asterisks or a "Summary:"/"Label:" prefix; no trailing punctuation.\n` +
       `3. You are NOT talking to the user — the Q/A is only material; do not answer it or continue it.\n` +
-      `4. Start with a verb, name the core, keep it short. Write in the SAME language as the Q/A.`;
-    const content = `Summarize the following branch of consecutive Q&A rounds (output only the one-line summary):\n\n${req.text}`;
+      `4. Name the core topic, drop filler words. Write in the SAME language as the Q/A.`;
+    const content = `Label the following branch of consecutive Q&A rounds with one very short phrase (output only the label):\n\n${req.text}`;
     const text = await this.haikuOneShot(sdk, req.cwd, system, content);
     return { text };
   }

@@ -31,7 +31,8 @@ export const MAX_CONCURRENT_SUMMARIES = 3;
 // summarizer prompt (adapter.ts branchSummary) or the segment-content key (branchSummaryKey) changes in a
 // way that should retroactively re-run on already-labeled signposts. Folded into branchSummaryKey, so a
 // bump makes every signpost's stored key mismatch → needsBranchSummary flags it stale once. (Branch-Signposts)
-export const BRANCH_SUMMARY_VERSION = 1;
+//   v1: initial one-sentence branch summary.   v2: terse one-line phrase (≤~5 words) so it fits a single line.
+export const BRANCH_SUMMARY_VERSION = 2;
 
 // Rolling cap on concurrent in-flight branch-summary requests, separate from the digest cap (each fires
 // its own Haiku one-shot; capping them independently keeps either pipeline from starving the other while

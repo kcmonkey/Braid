@@ -243,13 +243,13 @@ body {
    even when the card itself shrinks to a far gist). A compact, readable pill — NOT an uppercase tag chip —
    with a terracotta accent edge; a 2-line clamp keeps long branches tidy (full text in the title tooltip). */
 .branch-signpost {
-  max-width: 260px;
-  font-size: 12px; font-weight: 600; line-height: 1.35; letter-spacing: .01em;
+  max-width: 300px;
+  font-size: 12px; font-weight: 600; line-height: 1.4; letter-spacing: .01em;
   color: var(--text-2); background: var(--panel);
   border: 1px solid var(--border-sub); border-left: 3px solid var(--accent);
-  border-radius: 7px; padding: 5px 10px;
+  border-radius: 7px; padding: 4px 10px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, .35);
-  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   cursor: default; user-select: none;
 }
 /* M12: transient hint shown when a board is dropped on a non-fusable neighbor. */
