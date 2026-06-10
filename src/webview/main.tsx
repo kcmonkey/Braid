@@ -911,7 +911,7 @@ function ContextBadge({ tokens, window: win }: { tokens?: number; window?: numbe
 // plate-less branch labels carry the map. BoardNode selects the BOOLEAN (zoom < this), so it re-renders
 // only when crossing the threshold, not on every zoom delta; the LOD-height change then flows through the
 // existing measured-size → relayoutAnchored repack (same path as selection-driven detail↔far). Tunable.
-const COMPRESS_ZOOM = 0.55;
+const COMPRESS_ZOOM = 0.6;
 // "Far-far" LOD: below this zoom the canvas becomes a branch MAP. Every node hides its digest/gist AND its
 // tags, and a signpost node shows ONLY its branch label — rendered INSIDE the card (replacing the gist) so
 // it SCALES with the board like all node content, instead of a constant-size floating overlay that
