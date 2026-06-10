@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Editor-tab "task running" spinner frame 5/12 (open ring rotated 150deg). VS Code tab
+       icons cannot animate SVG, so extension.ts cycles panel.iconPath through these frames on a timer to
+       fake rotation. Claude terracotta; shape-distinct from the solid red attention dot. -->
+  <g transform="rotate(150 8 8)">
+    <path d="M8 3 A5 5 0 1 1 3 8" fill="none" stroke="#d97757" stroke-width="2" stroke-linecap="round" />
+  </g>
+</svg>

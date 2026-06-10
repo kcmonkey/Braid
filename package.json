@@ -1,0 +1,355 @@
+{
+  "name": "braid",
+  "displayName": "Braid",
+  "description": "Node-based canvas for Claude Code conversations: boards, branching, dedupe-merge, collapsed summaries, and compaction.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kcmonkey/Braid.git"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Braid",
+      "properties": {
+        "braid.model": {
+          "type": "string",
+          "default": "",
+          "enum": [
+            "",
+            "opus",
+            "sonnet",
+            "haiku"
+          ],
+          "enumDescriptions": [
+            "Inherit (unset; defer to the CLI/.claude default)",
+            "Claude Opus (most capable)",
+            "Claude Sonnet (balanced)",
+            "Claude Haiku (fastest)"
+          ],
+          "markdownDescription": "Model used for the main conversation. Empty = inherit the CLI/`.claude` default. (Does not affect collapsed summaries — those always use Haiku to save cost.)"
+        },
+        "braid.effort": {
+          "type": "string",
+          "default": "",
+          "enum": [
+            "",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "enumDescriptions": [
+            "Inherit (unset; defer to the default)",
+            "low: least thinking, fastest",
+            "medium: moderate thinking",
+            "high: deep reasoning (default for most models)",
+            "xhigh: deeper",
+            "max: highest (only some models, e.g. Opus 4.6/4.7, Sonnet 4.6)"
+          ],
+          "markdownDescription": "Thinking effort: controls how much reasoning Claude invests. Works with adaptive thinking. **Only takes effect on models that support it**; others silently downgrade/ignore it. Empty = inherit the default."
+        },
+        "braid.thinking": {
+          "type": "string",
+          "default": "inherit",
+          "enum": [
+            "inherit",
+            "adaptive",
+            "disabled"
+          ],
+          "enumDescriptions": [
+            "Inherit (unset; defer to the model/.claude default)",
+            "On: adaptive thinking (Claude decides when and how much to think)",
+            "Off: no extended thinking"
+          ],
+          "markdownDescription": "Extended-thinking switch. `adaptive` = enable adaptive thinking; `disabled` = off. **Adaptive only takes effect on supported models.** Inherit defers to the default. Works with Effort: under adaptive thinking, effort guides the depth."
+        },
+        "braid.permissionMode": {
+          "type": "string",
+          "default": "bypassPermissions",
+          "enum": [
+            "inherit",
+            "default",
+            "acceptEdits",
+            "plan",
+            "bypassPermissions"
+          ],
+          "enumDescriptions": [
+            "Inherit (unset; defer to the `.claude`/SDK default)",
+            "default: prompt for approval before risky actions",
+            "acceptEdits: auto-accept file edits",
+            "plan: planning mode, no actual tool execution",
+            "bypassPermissions: skip all permission checks"
+          ],
+          "markdownDescription": "Tool permission mode. ⚠️ **This extension has no permission-approval UI yet**: with modes that require approval (`default`/`plan`, etc.), tools needing approval are denied or hang. Default `bypassPermissions` (auto-skips approval, same as before). `inherit` defers to `permissions.defaultMode` in `.claude/settings.json`."
+        },
+        "braid.maxTurns": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "Max agentic turns per conversation round. `0` = unlimited."
+        },
+        "braid.appendSystemPrompt": {
+          "type": "string",
+          "default": "",
+          "editPresentation": "multilineText",
+          "markdownDescription": "Extra instructions appended after Claude Code's default system prompt. Empty = none."
+        },
+        "braid.allowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Allowlist of tools (e.g. `Read`, `Bash`). Empty = unrestricted."
+        },
+        "braid.disallowedTools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Denylist of tools (e.g. `Bash`, `Write`). Empty = none."
+        },
+        "braid.env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "markdownDescription": "Extra environment variables passed to the Claude Code subprocess. ⚠️ Do NOT set `ANTHROPIC_API_KEY` here — that switches the SDK to metered API billing instead of your subscription."
+        },
+        "braid.autoCompactEnabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Match the official auto-compact: when a turn ends and the chain's context usage crosses the threshold, automatically compress that lineage into a compact node (reusing the \"🗜 Compact here\" mechanism). The threshold is high and rarely hit in normal use; turn off to only show the usage percentage and compact manually via 🗜."
+        },
+        "braid.autoCompactThreshold": {
+          "type": "number",
+          "default": 95,
+          "minimum": 1,
+          "maximum": 100,
+          "markdownDescription": "auto-compact trigger threshold (percent of the model's context window). Default `95` (≈ the official level). Only applies when `autoCompactEnabled` is on. The mechanism reads the model's real window size, so it adapts to both 200K and 1M windows."
+        },
+        "braid.expandAncestorsOnSelect": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "When you select a board, also expand its whole parent lineage (ancestors) to the full detail card — a fisheye that shows the conversation you're on. Turn off to expand only the selected board itself (its ancestors stay compact). Idle compose boards always render in detail regardless."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "braid.open",
+        "title": "Braid: Open"
+      },
+      {
+        "command": "braid.newCanvas",
+        "title": "Braid: New Canvas",
+        "icon": "$(add)"
+      },
+      {
+        "command": "braid.openCanvas",
+        "title": "Open Canvas"
+      },
+      {
+        "command": "braid.renameCanvas",
+        "title": "Rename",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "braid.deleteCanvas",
+        "title": "Delete",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "braid.openWalkthrough",
+        "title": "Braid: Open Getting Started",
+        "icon": "$(rocket)"
+      },
+      {
+        "command": "braid.checkEnvironment",
+        "title": "Braid: Check Environment (subscription auth)",
+        "icon": "$(plug)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "braid",
+          "title": "Braid",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "braid": [
+        {
+          "id": "braidList",
+          "name": "Canvases",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "braid.openCanvas",
+          "when": "false"
+        },
+        {
+          "command": "braid.renameCanvas",
+          "when": "false"
+        },
+        {
+          "command": "braid.deleteCanvas",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "braid.newCanvas",
+          "when": "view == braidList",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "braid.renameCanvas",
+          "when": "view == braidList && viewItem == canvas",
+          "group": "inline@1"
+        },
+        {
+          "command": "braid.deleteCanvas",
+          "when": "view == braidList && viewItem == canvas",
+          "group": "inline@2"
+        }
+      ]
+    },
+    "walkthroughs": [
+      {
+        "id": "braidGettingStarted",
+        "title": "Getting Started with Braid",
+        "description": "A node-based Claude Code canvas. Get set up in three steps, then tour the core features: branch, dedupe-merge, summaries, and compaction.",
+        "steps": [
+          {
+            "id": "what",
+            "title": "Welcome to Braid",
+            "description": "**Braid** turns your Claude Code conversations from a linear log into a **node canvas**: each Q&A round = one board, which you can branch to explore, multi-select to merge & dedupe, and collapse to see a summary.\nThree steps to start: ① confirm subscription auth → ② one-click self-check → ③ open a canvas.",
+            "media": {
+              "image": "media/walkthrough/hero.svg",
+              "altText": "Braid node canvas illustration: a root conversation branches into several branches, then dedupe-merges"
+            }
+          },
+          {
+            "id": "auth",
+            "title": "Confirm subscription auth",
+            "description": "Just reuse the Claude subscription credentials already signed in on your machine — no key to enter in the extension.\n**Important**: do not set `ANTHROPIC_API_KEY`, or billing switches from your subscription to the metered API.",
+            "media": {
+              "markdown": "media/walkthrough/auth.md"
+            }
+          },
+          {
+            "id": "check",
+            "title": "Environment check / test connection",
+            "description": "Click the button below to run a self-check and confirm the subscription-auth path works.\n[Run environment check](command:braid.checkEnvironment)",
+            "media": {
+              "markdown": "media/walkthrough/check.md"
+            },
+            "completionEvents": [
+              "onCommand:braid.checkEnvironment"
+            ]
+          },
+          {
+            "id": "open",
+            "title": "Open your first canvas",
+            "description": "All set! Open a canvas and start your first round.\n[Open canvas](command:braid.open)",
+            "media": {
+              "markdown": "media/walkthrough/open.md"
+            },
+            "completionEvents": [
+              "onCommand:braid.open"
+            ]
+          },
+          {
+            "id": "ask-branch",
+            "title": "Ask & branch (⑂)",
+            "description": "Type a question in a board's input box — the answer streams in live.\nWhen it finishes, click **⑂ Branch** to spin off a child conversation. The original board is untouched, and the branch inherits its full context (`resume` + fork session).",
+            "media": {
+              "image": "media/walkthrough/feat-branch.svg",
+              "altText": "A board with a question and streaming answer, branching into a child board via the Branch button"
+            }
+          },
+          {
+            "id": "merge",
+            "title": "Merge & dedupe — the moat",
+            "description": "Box-select two or more boards, then **⚡ Merge → new conversation**.\nBraid walks each branch's ancestors, **sends the shared context only once**, and seeds a fresh chat with the deduped union — no copy-pasting, no confused model.",
+            "media": {
+              "image": "media/walkthrough/feat-merge.svg",
+              "altText": "A root chat branching into Branch A and Branch B, both selected, merging into a new deduped chat"
+            }
+          },
+          {
+            "id": "summaries",
+            "title": "Summaries, zoom & compact (🗜)",
+            "description": "**Collapse** a board to read an auto-generated structured summary; **zoom out** and it shrinks to a one-line mini summary.\nEach board's badge shows the chain's **context-window %**, and **🗜** compacts a long chain into a single node. Select a board and press **Delete** to remove it.",
+            "media": {
+              "image": "media/walkthrough/feat-lod.svg",
+              "altText": "The same board shown expanded with a context badge, collapsed as a structured summary, zoomed out as a mini, and as a compacted node"
+            }
+          },
+          {
+            "id": "workflow",
+            "title": "Cheat sheet",
+            "description": "All of Braid's core capabilities — ask, branch, dedupe-merge, summaries, context compaction, delete — in one quick reference on the right.",
+            "media": {
+              "markdown": "media/walkthrough/workflow.md"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "package": "npx --yes @vscode/vsce package --allow-missing-repository",
+    "deploy": "npm run package && code --install-extension braid-0.0.1.vsix --force",
+    "vscode:prepublish": "node esbuild.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.170"
+  },
+  "devDependencies": {
+    "@dagrejs/dagre": "^3.0.0",
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@types/vscode": "^1.90.0",
+    "@xyflow/react": "^12.3.0",
+    "esbuild": "^0.23.0",
+    "highlight.js": "^11.11.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1",
+    "typescript": "^5.5.0",
+    "vitest": "^4.1.8"
+  }
+}

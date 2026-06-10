@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <!-- Editor-tab attention dot: shown as a canvas panel's tab icon when that canvas has an unread
+       completion or a pending question; cleared when the user has caught up. Solid red reads on both
+       light and dark themes (a single icon, no light/dark variant needed). -->
+  <circle cx="8" cy="8" r="5" fill="#e5645d" />
+</svg>

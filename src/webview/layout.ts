@@ -1,0 +1,121 @@
+// DAG auto-layout via dagre. Pure: computes positions, returns new nodes — no React/DOM.
+import dagre from '@dagrejs/dagre';
+import type { Edge } from '@xyflow/react';
+import type { BoardNodeT } from './merge';
+
+const NODE_W = 320; // fallback width (matches .board) for not-yet-measured nodes
+const NODE_H = 200; // fallback height for not-yet-measured nodes
+// Gutter between distinct conversation trees (weakly-connected components). Kept just above the
+// within-tree nodesep (60) so separate conversations still read as distinct bands, but tight enough
+// that single-board trees don't drown in whitespace (220 was too sparse — hurt reading efficiency).
+const COMPONENT_GAP = 96;
+
+// React Flow v12 stores the real rendered size on node.measured after layout.
+// Using it (not a fixed nominal height) is what keeps tall expanded nodes from
+// overlapping their children.
+const sizeOf = (n: BoardNodeT) => ({
+  width: n.measured?.width ?? NODE_W,
+  height: n.measured?.height ?? NODE_H,
+});
+
+/** dagre flow direction: 'TB' = vertical (parent above children), 'LR' = horizontal (parent left of children). */
+export type LayoutDir = 'TB' | 'LR';
+
+/**
+ * Group nodes into weakly-connected components (edges treated as undirected). Each component is one
+ * conversation tree/forest. Ordered by smallest `seq` so older trees stay first (stable as graph grows).
+ */
+function components(nodes: BoardNodeT[], edges: Edge[]): BoardNodeT[][] {
+  const present = new Set(nodes.map((n) => n.id));
+  const adj = new Map<string, string[]>();
+  for (const n of nodes) adj.set(n.id, []);
+  for (const e of edges) {
+    if (present.has(e.source) && present.has(e.target)) {
+      adj.get(e.source)!.push(e.target);
+      adj.get(e.target)!.push(e.source);
+    }
+  }
+  const byId = new Map(nodes.map((n) => [n.id, n]));
+  const seen = new Set<string>();
+  const comps: BoardNodeT[][] = [];
+  for (const start of nodes) {
+    if (seen.has(start.id)) continue;
+    const comp: BoardNodeT[] = [];
+    const stack = [start.id];
+    seen.add(start.id);
+    while (stack.length) {
+      const id = stack.pop()!;
+      comp.push(byId.get(id)!);
+      for (const m of adj.get(id) ?? []) if (!seen.has(m)) { seen.add(m); stack.push(m); }
+    }
+    comps.push(comp);
+  }
+  const minSeq = (c: BoardNodeT[]) => Math.min(...c.map((n) => n.data.seq ?? 0));
+  comps.sort((a, b) => minSeq(a) - minSeq(b));
+  return comps;
+}
+
+/** Run dagre on one component; return top-left positions (relative, normalized so the component's min corner is at 0,0). */
+function layoutComponent(comp: BoardNodeT[], edges: Edge[], dir: LayoutDir): Map<string, { x: number; y: number }> {
+  const g = new dagre.graphlib.Graph();
+  g.setGraph({ rankdir: dir, nodesep: 60, ranksep: 90 });
+  g.setDefaultEdgeLabel(() => ({}));
+  const ids = new Set(comp.map((n) => n.id));
+  for (const n of comp) {
+    const { width, height } = sizeOf(n);
+    g.setNode(n.id, { width, height });
+  }
+  for (const e of edges) {
+    if (ids.has(e.source) && ids.has(e.target)) g.setEdge(e.source, e.target);
+  }
+  dagre.layout(g);
+
+  // dagre returns node centers; convert to top-left, then normalize so the component's min corner is (0,0).
+  let minX = Infinity, minY = Infinity;
+  const tl = new Map<string, { x: number; y: number }>();
+  for (const n of comp) {
+    const p = g.node(n.id);
+    const { width, height } = sizeOf(n);
+    const x = p.x - width / 2, y = p.y - height / 2;
+    tl.set(n.id, { x, y });
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+  }
+  for (const [id, p] of tl) tl.set(id, { x: p.x - minX, y: p.y - minY });
+  return tl;
+}
+
+/**
+ * Lay nodes out as a DAG and return position-updated copies.
+ * `dir` picks flow direction: 'TB' (vertical) by default, 'LR' (horizontal) for wide viewports.
+ *
+ * Each weakly-connected component (= one conversation tree) is laid out independently, then packed into
+ * its own band along the cross-axis (perpendicular to flow) with all roots aligned to a common baseline.
+ * This stops separate conversations from sharing a rank-axis, so inheritance relationships stay legible.
+ */
+export function layoutGraph(nodes: BoardNodeT[], edges: Edge[], dir: LayoutDir = 'TB'): BoardNodeT[] {
+  if (!nodes.length) return nodes;
+
+  // cross-axis = the axis perpendicular to flow. TB flows down → separate trees side by side (x).
+  // LR flows right → separate trees stacked (y). Components advance along the cross-axis.
+  const crossX = dir === 'TB';
+  const placed = new Map<string, { x: number; y: number }>();
+  let cursor = 0;
+
+  for (const comp of components(nodes, edges)) {
+    const local = layoutComponent(comp, edges, dir);
+    let crossExtent = 0;
+    for (const n of comp) {
+      const p = local.get(n.id)!;
+      placed.set(n.id, crossX ? { x: p.x + cursor, y: p.y } : { x: p.x, y: p.y + cursor });
+      const { width, height } = sizeOf(n);
+      crossExtent = Math.max(crossExtent, crossX ? p.x + width : p.y + height);
+    }
+    cursor += crossExtent + COMPONENT_GAP;
+  }
+
+  return nodes.map((n) => {
+    const p = placed.get(n.id);
+    return p ? { ...n, position: p } : n;
+  });
+}

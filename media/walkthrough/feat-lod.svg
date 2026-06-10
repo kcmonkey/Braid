@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="330" viewBox="0 0 760 330" fill="none" font-family="-apple-system, 'Segoe UI', sans-serif">
+  <rect width="760" height="330" rx="16" fill="#16161a"/>
+  <rect x="0.5" y="0.5" width="759" height="329" rx="15.5" stroke="#2c2c34"/>
+
+  <text x="40" y="40" fill="#f2f2f5" font-size="20" font-weight="700">Collapse, zoom, and compact</text>
+
+  <!-- Expanded board (full text) with context badge -->
+  <g>
+    <rect x="40" y="68" width="230" height="190" rx="12" fill="#1f1f26" stroke="#3a3a44"/>
+    <text x="58" y="92" fill="#c9c9d4" font-size="12" font-weight="600">Full answer</text>
+    <!-- context % badge -->
+    <rect x="200" y="78" width="54" height="20" rx="10" fill="#243524" stroke="#3f5e3f"/>
+    <text x="227" y="92" fill="#7fbf7f" font-size="11" font-weight="700" text-anchor="middle">42%</text>
+    <rect x="58" y="108" width="194" height="7" rx="3.5" fill="#34343e"/>
+    <rect x="58" y="122" width="170" height="7" rx="3.5" fill="#2c2c34"/>
+    <rect x="58" y="136" width="186" height="7" rx="3.5" fill="#2c2c34"/>
+    <rect x="58" y="150" width="150" height="7" rx="3.5" fill="#2c2c34"/>
+    <rect x="58" y="164" width="178" height="7" rx="3.5" fill="#2c2c34"/>
+    <rect x="58" y="178" width="120" height="7" rx="3.5" fill="#2c2c34"/>
+    <rect x="58" y="192" width="160" height="7" rx="3.5" fill="#2c2c34"/>
+    <text x="58" y="240" fill="#9a9aa6" font-size="11">Expanded · full text + context %</text>
+  </g>
+
+  <!-- Collapsed (structured summary) -->
+  <g>
+    <rect x="300" y="92" width="200" height="130" rx="12" fill="#1f1f26" stroke="#3a3a44"/>
+    <text x="316" y="116" fill="#c9c9d4" font-size="12" font-weight="700">▤ Summary</text>
+    <circle cx="320" cy="134" r="2.5" fill="#9a9aa6"/>
+    <rect x="330" y="131" width="150" height="7" rx="3.5" fill="#34343e"/>
+    <circle cx="320" cy="150" r="2.5" fill="#9a9aa6"/>
+    <rect x="330" y="147" width="128" height="7" rx="3.5" fill="#2c2c34"/>
+    <circle cx="320" cy="166" r="2.5" fill="#9a9aa6"/>
+    <rect x="330" y="163" width="140" height="7" rx="3.5" fill="#2c2c34"/>
+    <text x="300" y="244" fill="#9a9aa6" font-size="11">Collapsed · structured summary</text>
+  </g>
+
+  <!-- Mini (far zoom) -->
+  <g>
+    <rect x="540" y="92" width="180" height="48" rx="10" fill="#1f1f26" stroke="#3a3a44"/>
+    <rect x="556" y="112" width="148" height="8" rx="4" fill="#34343e"/>
+    <text x="540" y="160" fill="#9a9aa6" font-size="11">Zoomed out · mini summary</text>
+  </g>
+
+  <!-- Compact node -->
+  <g>
+    <rect x="540" y="184" width="180" height="74" rx="12" fill="#1f1f26" stroke="#4f7a4f" stroke-width="2"/>
+    <circle cx="558" cy="206" r="5" fill="#7fbf7f"/>
+    <text x="572" y="211" fill="#7fbf7f" font-size="12" font-weight="600">Compacted</text>
+    <rect x="556" y="224" width="148" height="7" rx="3.5" fill="#34343e"/>
+    <rect x="556" y="238" width="120" height="7" rx="3.5" fill="#2c2c34"/>
+  </g>
+
+  <text x="40" y="306" fill="#9a9aa6" font-size="12.5">A collapsed board shows an auto summary; zoom out for a mini. The badge shows context-window %, and 🗜 compacts a long chain into one node.</text>
+</svg>

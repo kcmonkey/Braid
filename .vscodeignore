@@ -1,0 +1,23 @@
+# Source & build inputs (only compiled out/ ships)
+src/**
+esbuild.mjs
+tsconfig.json
+**/*.ts
+**/*.tsx
+**/*.map
+
+# Repo / agent infra — not part of the runtime
+.claude/**
+scripts/**
+media/demo/STORYBOARD.md
+CLAUDE.md
+.git/**
+.gitignore
+.vscode/**
+.vscode-test/**
+
+# Misc
+*.vsix
+**/.DS_Store
+**/*.log
+**/*vitest_out.txt

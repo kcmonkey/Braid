@@ -1,0 +1,9 @@
+node_modules/
+out/
+*.vsix
+.DS_Store
+*vitest_out.txt
+
+# Claude / agent infrastructure — not uploaded
+.claude/
+CLAUDE.md
