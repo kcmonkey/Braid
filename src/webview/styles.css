@@ -508,6 +508,37 @@ body {
 }
 .ctxmenu__item:hover { background: var(--accent-2); color: #fff; }
 
+/* ---- Composer autofill menu (/ commands + @ files) ----
+   Portal-rendered with position:fixed (set inline from the textarea rect), so it escapes the card's
+   overflow:hidden and renders at readable size regardless of canvas zoom. */
+.autofill {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 5px;
+  box-shadow: 0 12px 36px rgba(0,0,0,.55);
+  max-height: 300px; overflow-y: auto;
+  font-size: 12px; color: var(--text-2);
+}
+.autofill__title {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted-2);
+  padding: 4px 8px 6px;
+}
+.autofill__empty { padding: 8px 10px; color: var(--muted); }
+.autofill__item { padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.autofill__item.is-active { background: var(--accent-2); color: #fff; }
+.autofill__row { display: flex; align-items: baseline; gap: 8px; }
+.autofill__name { font-weight: 600; white-space: nowrap; }
+.autofill__hint { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.autofill__dir {
+  color: var(--muted-2); font-size: 11px; margin-left: auto;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+}
+.autofill__desc {
+  color: var(--muted); font-size: 11px; margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.autofill__item.is-active .autofill__hint,
+.autofill__item.is-active .autofill__dir,
+.autofill__item.is-active .autofill__desc { color: rgba(255,255,255,.82); }
+
 /* ---- Merge preview drawer ---- */
 .drawer {
   position: fixed; top: 0; right: 0; height: 100%; width: 440px; z-index: 20;

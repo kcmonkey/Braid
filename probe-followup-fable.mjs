@@ -3,6 +3,11 @@
 // Does each user message still map to exactly one init→result, or does Fable drift the count?
 import { query } from '@anthropic-ai/claude-agent-sdk';
 
+const log = (s) => process.stdout.write(s + '\n');
+// Hard safety net: never hang. Print what we have and exit.
+let initCount = 0, resultCount = 0;
+setTimeout(() => { log(`\n[SAFETY EXIT 90s] init=${initCount} result=${resultCount}`); process.exit(0); }, 90_000).unref();
+
 const queue = [];
 let wake = null;
 let closed = false;
@@ -21,28 +26,26 @@ const q = query({
   options: { model: 'claude-fable-5', permissionMode: 'bypassPermissions', includePartialMessages: true, cwd: process.cwd() },
 });
 
-let initCount = 0, resultCount = 0, pushed = false;
-const seq = [];
+let pushed = false;
 
 setTimeout(() => {
   queue.push({ type: 'user', message: { role: 'user', content: 'Now reply with exactly one word: pong' }, parent_tool_use_id: null });
   wakeUp(); pushed = true;
-  seq.push('>>> PUSHED follow-up mid-stream');
+  log('>>> PUSHED follow-up mid-stream');
 }, 700);
 
 for await (const m of q) {
-  if (m.type === 'system' && m.subtype === 'init') { initCount++; seq.push(`system/init (#${initCount}) model=${m.model}`); }
-  else if (m.type === 'system' && m.subtype === 'model_refusal_fallback') seq.push(`system/model_refusal_fallback dir=${m.direction} trigger=${m.trigger}`);
+  if (m.type === 'system' && m.subtype === 'init') { initCount++; log(`system/init (#${initCount}) model=${m.model}`); }
+  else if (m.type === 'system' && m.subtype === 'model_refusal_fallback') log(`system/model_refusal_fallback dir=${m.direction} trigger=${m.trigger}`);
   else if (m.type === 'result') {
-    resultCount++; seq.push(`result (#${resultCount}) is_error=${m.is_error} num_turns=${m.num_turns}`);
+    resultCount++; log(`result (#${resultCount}) is_error=${m.is_error} num_turns=${m.num_turns}`);
     if (resultCount >= 2 && pushed) { closed = true; wakeUp(); }
   }
   else if (m.type === 'assistant') {
     const txt = (m.message?.content ?? []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-    seq.push(`assistant "${txt.slice(0, 30).replace(/\n/g, ' ')}"`);
+    log(`assistant "${txt.slice(0, 30).replace(/\n/g, ' ')}"`);
   }
 }
 
-console.log('\n===== SEQUENCE (Fable 5, mid-stream queue) =====');
-seq.forEach((s, i) => console.log(`${String(i).padStart(2)}  ${s}`));
-console.log(`\ninit=${initCount}  result=${resultCount}  => ${initCount === resultCount ? 'balanced' : 'DRIFT (init != result)'}`);
+log(`\nVERDICT init=${initCount} result=${resultCount} => ${initCount === resultCount ? 'balanced' : 'DRIFT (init != result)'}`);
+process.exit(0);
