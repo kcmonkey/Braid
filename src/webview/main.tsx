@@ -1123,9 +1123,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           detail↔far switch. Handles stay OUTSIDE it so React Flow's cached handle geometry / edges
           are never disturbed (the classic handle-remount pitfall). */}
       <div className="board__content" key={lod}>
-      {/* Digest tags: content-hint chips on the card. Shown at every LOD (incl. far-far) — they scale with
-          the board, so they read as the node's color hint on the branch map. */}
-      <TagChips tags={data.tags} />
+      {/* Digest tags: at the TOP for detail/far. In 'far-far' they move to the BOTTOM (below the summary
+          label) — see the far-far body branch — so the card reads summary-on-top, tags-below. */}
+      {lod !== 'far-far' && <TagChips tags={data.tags} />}
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
         {/* Multi-turn board: M11 in-board follow-ups or an M12 fusion — show how many rounds it holds. */}
@@ -1170,7 +1170,10 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           board and stays inside the card → no overlap). far has no body (gist lives in the head). detail =
           the full body below. */}
       {lod === 'far-far' ? (
-        signpostLabel ? <div className="board__farfarbody nodrag nopan" title={signpostLabel}>{signpostLabel}</div> : null
+        <>
+          {signpostLabel && <div className="board__farfarbody nodrag nopan" title={signpostLabel}>{signpostLabel}</div>}
+          <TagChips tags={data.tags} /> {/* tags at the BOTTOM in far-far (summary-on-top, tags-below) */}
+        </>
       ) : !isDetail ? null : compacting ? (
         <div className="board__summary board__compacting"><span className="board__dot" /> 🗜 Compacting…</div>
       ) : data.compact && !data.prompt ? (
