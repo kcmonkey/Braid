@@ -132,6 +132,7 @@ export function activate(context: vscode.ExtensionContext) {
   if (isFileEditor(vscode.window.activeTextEditor)) lastFileEditor = vscode.window.activeTextEditor;
   context.subscriptions.push(
     vscode.window.onDidChangeActiveTextEditor((e) => { if (isFileEditor(e)) lastFileEditor = e; }),
+    registerCanvasSerializer(context), // revive canvas tabs after a window reload / VS Code restart
     vscode.window.registerTreeDataProvider('braidList', treeProvider),
     vscode.commands.registerCommand('braid.open', () => openDefault(context)),
     vscode.commands.registerCommand('braid.newCanvas', () => newCanvas(context)),
@@ -285,20 +286,18 @@ async function ensureCanvases(ctx: vscode.ExtensionContext): Promise<Canvas[]> {
 }
 
 // ---- Panels ----
-function openCanvas(context: vscode.ExtensionContext, id: string) {
-  const existing = panels.get(id);
-  if (existing) { existing.reveal(vscode.ViewColumn.Active); return; }
-  const name = getCanvases(context).find((c) => c.id === id)?.name ?? 'Braid';
-  const panel = vscode.window.createWebviewPanel(
-    'braid', name, vscode.ViewColumn.Active,
-    {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'out')],
-    },
-  );
+const VIEW_TYPE = 'braid'; // webview panel viewType — must match registerWebviewPanelSerializer + the onWebviewPanel:* activation event
+
+/** The WebviewOptions reused when creating a panel AND when reviving one (deserialize comes back without them). */
+const webviewOptions = (context: vscode.ExtensionContext): vscode.WebviewOptions => ({
+  enableScripts: true,
+  localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'out')],
+});
+
+/** Wire a (freshly created OR revived) panel to canvas `id`: html, dispose cleanup, and message handler. */
+function wireCanvasPanel(context: vscode.ExtensionContext, id: string, panel: vscode.WebviewPanel) {
   panels.set(id, panel);
-  panel.webview.html = getHtml(panel.webview, context.extensionUri);
+  panel.webview.html = getHtml(panel.webview, context.extensionUri, id);
   panel.onDidDispose(() => {
     stopTabSpinner(id); // stop any tab-spinner animation timer for this canvas
     for (const [k, a] of aborters) if (k.startsWith(id + '::')) { a.abort(); aborters.delete(k); }
@@ -308,6 +307,40 @@ function openCanvas(context: vscode.ExtensionContext, id: string) {
     panels.delete(id);
   });
   panel.webview.onDidReceiveMessage((msg) => handleMessage(msg as WebviewMessage, context, id));
+}
+
+function openCanvas(context: vscode.ExtensionContext, id: string) {
+  const existing = panels.get(id);
+  if (existing) { existing.reveal(vscode.ViewColumn.Active); return; }
+  const name = getCanvases(context).find((c) => c.id === id)?.name ?? 'Braid';
+  const panel = vscode.window.createWebviewPanel(
+    VIEW_TYPE, name, vscode.ViewColumn.Active,
+    { ...webviewOptions(context), retainContextWhenHidden: true },
+  );
+  wireCanvasPanel(context, id, panel);
+}
+
+/**
+ * Restore canvas tabs across a window reload / VS Code restart. VS Code does NOT auto-revive webview
+ * panels the way it restores text-editor tabs — the extension must register a serializer for the
+ * viewType. The webview persists its canvas id via setState (the host embeds it in #root); on restart
+ * VS Code re-creates the panel in its original tab group/position and hands it back here with that
+ * state, so we map the id to a still-live canvas and re-wire the revived panel in place. Panels whose
+ * canvas was deleted (or that carry no id) are dropped. The graph itself was never lost — it lives in
+ * workspaceState; this only restores which tabs were open.
+ */
+function registerCanvasSerializer(context: vscode.ExtensionContext): vscode.Disposable {
+  return vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
+    async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown) {
+      const id = (state as { canvasId?: unknown } | null)?.canvasId;
+      const canvases = await ensureCanvases(context);
+      const canvas = typeof id === 'string' ? canvases.find((c) => c.id === id) : undefined;
+      if (!canvas || panels.has(canvas.id)) { panel.dispose(); return; } // unmappable or already open → drop
+      panel.title = canvas.name;
+      panel.webview.options = webviewOptions(context); // revived panels can come back with scripts disabled
+      wireCanvasPanel(context, canvas.id, panel);
+    },
+  });
 }
 
 async function openDefault(context: vscode.ExtensionContext) {
@@ -898,7 +931,7 @@ function getNonce() {
   return s;
 }
 
-function getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+function getHtml(webview: vscode.Webview, extensionUri: vscode.Uri, canvasId: string): string {
   const jsUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'out', 'webview.js'));
   const cssUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'out', 'webview.css'));
   const nonce = getNonce();
@@ -920,7 +953,7 @@ function getHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   <title>Braid</title>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root" data-canvas-id="${canvasId}"></div>
   <script nonce="${nonce}" src="${jsUri}"></script>
 </body>
 </html>`;

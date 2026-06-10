@@ -24,9 +24,19 @@ import { layoutGraph, type LayoutDir } from './layout';
 import type { HostMessage, WebviewMessage, McpServerInfo, BoardTag } from '../protocol';
 import type { BraidConfig } from '../sdkOptions';
 
-declare function acquireVsCodeApi(): { postMessage: (m: unknown) => void };
+declare function acquireVsCodeApi(): {
+  postMessage: (m: unknown) => void;
+  getState: () => unknown;
+  setState: (s: unknown) => void;
+};
 const vscode = acquireVsCodeApi();
 const post = (m: WebviewMessage) => vscode.postMessage(m); // typed channel to the extension host
+
+// Persist this panel's canvas id into the webview's VS Code state so the host's WebviewPanelSerializer
+// can revive the right canvas after a window reload / VS Code restart. The host embeds the id on #root;
+// setState writes it to the per-webview state VS Code hands back to deserializeWebviewPanel. (extension.ts)
+const restoreCanvasId = document.getElementById('root')?.getAttribute('data-canvas-id');
+if (restoreCanvasId) vscode.setState({ canvasId: restoreCanvasId });
 
 // MiniMap node tint — mirror the board accent colors (see styles.css :root) so the overview
 // is glanceable: compact=green, merge=blue, error=red, streaming=terracotta, idle/done=neutral.
