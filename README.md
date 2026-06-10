@@ -3,20 +3,10 @@
 A **VS Code extension** that turns your Claude Code conversations from a linear timeline into a **node-based canvas (DAG)**.
 
 <!--
-  ════════════════ DEMO GIFs ════════════════
-  Each <img> in this README renders automatically once its file exists in media/demo/.
-  Until you add a file, GitHub shows a broken-image icon there — that is expected.
-
-  Files to produce (shot list / beats: media/demo/STORYBOARD.md):
-    • media/demo/demo.gif    — full ~35s hero loop (all three moats)
-    • media/demo/merge.gif   — box-select two branches, dedupe-merge preview, confirm
-
-  How to produce one:
-    1) Record with ScreenToGif (exports a GIF directly) or OBS / Xbox Game Bar (-> MP4).
-    2) If you recorded MP4, convert with the bundled script (needs ffmpeg on PATH):
-         ./scripts/make-gif.ps1 -Source .\raw.mp4 -Out .\media\demo\demo.gif
-    3) Keep each GIF under ~10 MB (GitHub's inline limit). If too big: lower -Fps / -Width.
-  ════════════════════════════════════════════
+  Hero demo GIF: media/demo/demo.gif (renders automatically once the file exists).
+  Shot list / beats: media/demo/STORYBOARD.md. Keep under ~10 MB (GitHub inline limit).
+  To regenerate from a recording (needs ffmpeg on PATH):
+    ./scripts/make-gif.ps1 -Source .\raw.mp4 -Out .\media\demo\demo.gif
 -->
 <p align="center">
   <img src="media/demo/demo.gif" alt="Braid — branch, dedupe-merge, and collapse Claude Code conversations on a canvas" width="840">
@@ -39,11 +29,6 @@ Braid solves this with three ideas:
 - **Canvas + DAG** — every fork is a visible node, so the shape of the discussion is the shape of the graph.
 - **Dedupe-merge** — select branches and start a new conversation seeded with their *unique* combined context (shared ancestors are sent only once).
 - **Collapsed summaries** — zoom out to read one-line gists; zoom in to read full transcripts.
-
-<!-- merge.gif — record: box-select two branches; merge preview drawer (dedup stats); confirm; merged board streams. -->
-<p align="center">
-  <img src="media/demo/merge.gif" alt="Box-selecting two branches and dedupe-merging their combined context" width="820">
-</p>
 
 ---
 
