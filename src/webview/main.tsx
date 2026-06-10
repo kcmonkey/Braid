@@ -926,6 +926,12 @@ const COMPRESS_ZOOM = 0.55;
 // earns its place in the zoomed-out "map" view (zoom < this AND the board isn't itself in detail). Must be
 // > COMPRESS_ZOOM so there's a visible band. Same boolean-selector pattern → re-render only on crossing. Tunable.
 const LABEL_HIDE_ZOOM = 0.9;
+// Below this zoom the on-card gist text is too small to read AND it's what the zoom-floored tag strip
+// balloons over (the "accepted" tag↔gist overlap — now rejected). So a far board HIDES its gist text,
+// collapsing to a clean chip (type badge + tags) and letting the constant-size floating label carry the
+// meaning; the card shrinks → the existing measured-size → relayout repacks tighter. Must be < COMPRESS_ZOOM
+// (boards are already far gists by then). Boolean selector → re-render only on crossing. Tunable.
+const HIDE_BOARD_TEXT_ZOOM = 0.45;
 function TagChips({ tags }: { tags?: BoardTag[] }) {
   // Re-renders only when the zoom factor (transform[2]) changes — panning (transform[0]/[1]) is ignored.
   const zoom = useStore((s) => s.transform[2]);
@@ -1061,6 +1067,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // card already shows the full content) OR when zoomed in past LABEL_HIDE_ZOOM (cards are readable, label
   // is redundant). Boolean selector → re-render only when crossing the threshold, not every zoom delta.
   const zoomReadable = useStore((s) => s.transform[2] >= LABEL_HIDE_ZOOM);
+  // Hide the far card's gist text once it's too small to read (HIDE_BOARD_TEXT_ZOOM) — the board becomes a
+  // clean badge+tags chip and the floating label carries the meaning. Only relevant at far LOD.
+  const hideBoardText = useStore((s) => s.transform[2] < HIDE_BOARD_TEXT_ZOOM);
   // A just-triggered compact node, still running /compact (no prompt yet) → show the compacting spinner.
   // Once the user asks a question in it, prompt is set and it renders as a normal streaming turn.
   const compacting = !!data.compact && data.status === 'streaming' && !data.prompt;
@@ -1158,7 +1167,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
             instead (clamped by CSS .board.lod-far .board__title), so a long question doesn't dominate. */}
         <span className="board__title">
           {lod === 'far'
-            ? farGist
+            ? (hideBoardText ? null : farGist) /* far-far zoom: drop the unreadable gist → clean badge+tags chip */
             : (data.prompt ? data.prompt : data.compact ? 'Compacted context' : 'New board')}
         </span>
         {/* Needs-response: the model called AskUserQuestion and is blocked → icon badge prompting to open
