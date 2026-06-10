@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSta
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import {
-  ReactFlow, ReactFlowProvider, Background, MiniMap, Handle, Position, NodeToolbar,
+  ReactFlow, ReactFlowProvider, Background, MiniMap, Handle, Position,
   applyNodeChanges, useUpdateNodeInternals, useStore, type Edge, type NodeChange, type Node,
   type ReactFlowInstance, type Viewport,
 } from '@xyflow/react';
@@ -639,7 +639,7 @@ const DirCtx = React.createContext<LayoutDir>('TB');
 //   far    = the fused gist (mini summary) at a bigger font, NO body. Every OTHER board. Far cards size
 //            to their gist content and the layout reflows to those real (mixed) heights → the canvas
 //            stays compact, and selecting a board re-packs the graph around its expanded lineage.
-type Lod = 'detail' | 'far';
+type Lod = 'detail' | 'far' | 'far-far';
 // Ids of boards to render at full DETAIL: the selected board(s) + their ancestor lineage. Provided by
 // App; each BoardNode derives its own LOD from membership. (decisions.md 2026-06-09)
 const DetailIdsCtx = React.createContext<Set<string>>(new Set());
@@ -653,9 +653,9 @@ const MergeCtxHL = React.createContext<Set<string>>(new Set());
 // matching BoardNode shows a transient pulse ring (`.board.revealed`) until App clears it after a beat.
 const RevealCtx = React.createContext<string | null>(null);
 
-// Branch-Signposts: signpost id → its floating branch-label text. Only signposts (root / branch head /
-// merge / compact) with a non-empty label are present. Provided by App (memoized over the graph); each
-// BoardNode renders a NodeToolbar above the card iff its id is present. (Branch-Signposts plan)
+// Branch-Signposts: signpost id → its branch-label text. Only signposts (root / branch head / merge /
+// compact) with a non-empty label are present. Provided by App (memoized over the graph); in 'far-far' LOD
+// each BoardNode shows this as its in-card title (scales with the board). (Branch-Signposts plan)
 const SignpostCtx = React.createContext<Map<string, string>>(new Map());
 
 // M12 drag-fusion: the board currently hovered as a VALID fuse drop-target during an active drag (or
@@ -921,17 +921,12 @@ const TAG_FLOOR_ZOOM = 0.85;
 // only when crossing the threshold, not on every zoom delta; the LOD-height change then flows through the
 // existing measured-size → relayoutAnchored repack (same path as selection-driven detail↔far). Tunable.
 const COMPRESS_ZOOM = 0.55;
-// At/above this zoom the signpost label is HIDDEN: you're zoomed in close enough to read the cards
-// directly (or focused a detail lineage), so the floating branch label is redundant clutter. It only
-// earns its place in the zoomed-out "map" view (zoom < this AND the board isn't itself in detail). Must be
-// > COMPRESS_ZOOM so there's a visible band. Same boolean-selector pattern → re-render only on crossing. Tunable.
-const LABEL_HIDE_ZOOM = 0.9;
-// Below this zoom the on-card gist text is too small to read AND it's what the zoom-floored tag strip
-// balloons over (the "accepted" tag↔gist overlap — now rejected). So a far board HIDES its gist text,
-// collapsing to a clean chip (type badge + tags) and letting the constant-size floating label carry the
-// meaning; the card shrinks → the existing measured-size → relayout repacks tighter. Must be < COMPRESS_ZOOM
-// (boards are already far gists by then). Boolean selector → re-render only on crossing. Tunable.
-const HIDE_BOARD_TEXT_ZOOM = 0.45;
+// "Far-far" LOD: below this zoom the canvas becomes a branch MAP. Every node hides its digest/gist AND its
+// tags, and a signpost node shows ONLY its branch label — rendered INSIDE the card (replacing the gist) so
+// it SCALES with the board like all node content, instead of a constant-size floating overlay that
+// overlapped neighbours. Non-signpost nodes collapse to a bare badge chip. Must be < COMPRESS_ZOOM (boards
+// are already far gists by then). Boolean selector → re-render only on crossing the threshold. Tunable.
+const FARFAR_ZOOM = 0.45;
 function TagChips({ tags }: { tags?: BoardTag[] }) {
   // Re-renders only when the zoom factor (transform[2]) changes — panning (transform[0]/[1]) is ignored.
   const zoom = useStore((s) => s.transform[2]);
@@ -1043,8 +1038,8 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const isFuseTarget = React.useContext(FuseTargetCtx) === id;
   // Just jumped here from a completion notification → transient pulse ring (cleared by App).
   const revealed = React.useContext(RevealCtx) === id;
-  // Branch-Signposts: this board's floating branch-label text (present only for signpost nodes with a
-  // non-empty label). Rendered via NodeToolbar so it stays readable at every zoom (it doesn't scale).
+  // Branch-Signposts: this board's branch-label text (present only for signpost nodes with a non-empty
+  // label). Shown as the in-card title in 'far-far' LOD (the branch map), where it replaces the gist.
   const signpostLabel = React.useContext(SignpostCtx).get(id);
   // This board has an AskUserQuestion awaiting an answer → prominent pending-answer ring/badge (open to answer).
   const needsAsk = hasPendingAsk(data);
@@ -1059,17 +1054,15 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // Per-node LOD (fisheye): this board renders DETAIL when it's the selected board / an ancestor of it,
   // OR it's an idle compose board (always usable so you can type even when nothing is selected).
   // Otherwise it's a compact FAR gist. The graph reflows to these mixed heights (see App.autoLayout).
-  // Zoom-driven compression (COMPRESS_ZOOM): too far out → force FAR for every board (text is unreadable
-  // at that scale), so even the detail lineage collapses + the graph repacks tighter around the labels.
+  // Three-band zoom LOD (both boolean selectors → re-render only when crossing a threshold, not per frame):
+  //  • zoom < FARFAR_ZOOM      → 'far-far': branch MAP. Digest + tags hidden; a signpost shows only its
+  //                              label (in-card, so it scales with the board — no overlap).
+  //  • FARFAR ≤ zoom < COMPRESS → 'far' for every board (the detail lineage collapses too): compact gist.
+  //  • zoom ≥ COMPRESS_ZOOM     → 'detail' for the selected/ancestor/fresh boards, else 'far'.
+  const zoomFarFar = useStore((s) => s.transform[2] < FARFAR_ZOOM);
   const zoomCompressed = useStore((s) => s.transform[2] < COMPRESS_ZOOM);
-  const lod: Lod = !zoomCompressed && (detailSet.has(id) || isFresh) ? 'detail' : 'far';
-  // Signpost label visibility: only in the zoomed-out map view. Hidden when this board is in DETAIL (its
-  // card already shows the full content) OR when zoomed in past LABEL_HIDE_ZOOM (cards are readable, label
-  // is redundant). Boolean selector → re-render only when crossing the threshold, not every zoom delta.
-  const zoomReadable = useStore((s) => s.transform[2] >= LABEL_HIDE_ZOOM);
-  // Hide the far card's gist text once it's too small to read (HIDE_BOARD_TEXT_ZOOM) — the board becomes a
-  // clean badge+tags chip and the floating label carries the meaning. Only relevant at far LOD.
-  const hideBoardText = useStore((s) => s.transform[2] < HIDE_BOARD_TEXT_ZOOM);
+  const lod: Lod = zoomFarFar ? 'far-far' : (!zoomCompressed && (detailSet.has(id) || isFresh) ? 'detail' : 'far');
+  const isDetail = lod === 'detail';
   // A just-triggered compact node, still running /compact (no prompt yet) → show the compacting spinner.
   // Once the user asks a question in it, prompt is set and it renders as a normal streaming turn.
   const compacting = !!data.compact && data.status === 'streaming' && !data.prompt;
@@ -1134,15 +1127,6 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
 
   return (
     <>
-    {/* Branch-Signposts: floating "this branch explores X" label above structural nodes. NodeToolbar is
-        portal-rendered and does NOT scale with the viewport, so it stays readable even when the card shrinks
-        to a far-LOD gist. Shown only in the zoomed-out map view: a non-empty label, the board NOT in detail
-        (its card already shows full content), and not zoomed in past LABEL_HIDE_ZOOM (cards are readable). */}
-    {signpostLabel && lod !== 'detail' && !zoomReadable && (
-      <NodeToolbar position={Position.Top} isVisible offset={6} align="center">
-        <div className="branch-signpost nodrag nopan" title={signpostLabel}>{signpostLabel}</div>
-      </NodeToolbar>
-    )}
     {/* The board slot sizes to its card in BOTH LODs now (no fixed height): far cards are content-tight
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
@@ -1154,21 +1138,24 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           detail↔far switch. Handles stay OUTSIDE it so React Flow's cached handle geometry / edges
           are never disturbed (the classic handle-remount pitfall). */}
       <div className="board__content" key={lod}>
-      {/* Digest tags: content-hint chips on top of the card (full set at both LODs; zoom-floored so they
-          stay readable far out). Mounted only when present so tagless boards skip the zoom subscription. */}
-      {data.tags && data.tags.length > 0 && <TagChips tags={data.tags} />}
+      {/* Digest tags: content-hint chips (zoom-floored to stay readable at far). Hidden in 'far-far' (the
+          branch map) where only the label shows. Mounted only when present → tagless boards skip the sub. */}
+      {lod !== 'far-far' && data.tags && data.tags.length > 0 && <TagChips tags={data.tags} />}
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
         {/* Multi-turn board: M11 in-board follow-ups or an M12 fusion — show how many rounds it holds. */}
         {data.turns && data.turns.length > 1 && (
           <span className="board__fused" title={`${data.turns.length} rounds`}>⛓{data.turns.length}</span>
         )}
-        {/* detail: the full question (multi-line clamp via CSS, no 40-char slice). far: the fused gist
-            instead (clamped by CSS .board.lod-far .board__title), so a long question doesn't dominate. */}
+        {/* Title text by LOD: detail = the full question; far = the fused gist (clamped via CSS); far-far =
+            ONLY the branch label (signposts) — it replaces the gist and SCALES with the card, so it never
+            overlaps; a non-signpost node shows nothing (a bare badge chip). */}
         <span className="board__title">
-          {lod === 'far'
-            ? (hideBoardText ? null : farGist) /* far-far zoom: drop the unreadable gist → clean badge+tags chip */
-            : (data.prompt ? data.prompt : data.compact ? 'Compacted context' : 'New board')}
+          {isDetail
+            ? (data.prompt ? data.prompt : data.compact ? 'Compacted context' : 'New board')
+            : lod === 'far'
+              ? farGist
+              : (signpostLabel ?? null) /* far-far: branch label only */}
         </span>
         {/* Needs-response: the model called AskUserQuestion and is blocked → icon badge prompting to open
             and answer (icon-only per memory ui-icon-only). Unread: finished but not yet viewed → red dot. */}
@@ -1181,8 +1168,8 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         {/* Async continuation (异步续接): held open for background work / a scheduled wakeup — a distinct
             indicator (not the streaming spinner) so the board reads as "waiting", not stuck/done. */}
         {data.status === 'waiting' && <span className="board__awaiting" title={`Waiting — ${describeAsyncPending(data.asyncPending) || 'background work'} (will continue automatically; Stop to end)`}>⏱</span>}
-        {/* M11: context-usage badge (omitted at far zoom where the card is just a gist line). */}
-        {lod !== 'far' && <ContextBadge tokens={data.contextTokens} window={data.contextWindow} />}
+        {/* M11: context-usage badge (detail only — omitted at far/far-far where the card is just a gist/label). */}
+        {isDetail && <ContextBadge tokens={data.contextTokens} window={data.contextWindow} />}
         {data.autoCompacted && <span className="board__autocompact" title="The engine auto-compacted context this turn">🗜</span>}
         {compactBtn}
         {stopBtn}
@@ -1190,14 +1177,14 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
 
       {/* Pending permission approval → a compact approve/deny control on the card itself, so the user can
           answer without opening the conversation (twin of the ChatView PermissionCard). Detail LOD only. */}
-      {needsPerm && lod !== 'far' && <PermissionBanner data={data} />}
+      {needsPerm && isDetail && <PermissionBanner data={data} />}
 
       {/* Async continuation (异步续接): what background work / wakeup is holding this board open (detail LOD). */}
-      {data.status === 'waiting' && lod !== 'far' && <AsyncChips pending={data.asyncPending} />}
+      {data.status === 'waiting' && isDetail && <AsyncChips pending={data.asyncPending} />}
 
-      {/* far: no body at all — the fused gist lives in the head title, keeping the card compact (and
-          shorter than the detail card, so it never overlaps the detail-baseline layout). */}
-      {lod === 'far' ? null : compacting ? (
+      {/* far / far-far: no body at all — the gist/label lives in the head title, keeping the card compact
+          (and shorter than the detail card, so it never overlaps the detail-baseline layout). */}
+      {!isDetail ? null : compacting ? (
         <div className="board__summary board__compacting"><span className="board__dot" /> 🗜 Compacting…</div>
       ) : data.compact && !data.prompt ? (
         // Compacted-boundary node: a context checkpoint, NOT an input board. Show the compacted summary
@@ -2576,7 +2563,14 @@ function App() {
     }
     const mid = `b${idRef.current++}`;
     const merged: BoardNodeT = {
-      id: mid, type: 'board', position: { x: 0, y: 0 }, selected: false, // layoutGraph assigns the real spot
+      // Select the merge node (not the old boards). Two payoffs, both fixing the post-merge viewport drift:
+      // (1) with expandAncestorsOnSelect on (default), detailIds = {mid} ∪ ancestors(mid) = the merge node
+      //     PLUS exactly the source boards/lineage the user had selected to merge (already detail) — so they
+      //     STAY detail instead of collapsing to far. No collapse → no measured-height churn → no rearrange.
+      // (2) it makes the merge node the relayoutAnchored pin (sizeSig effect reads the selected id), so any
+      //     residual repack keeps the merge node fixed under the viewport fitView framed — no fly-out.
+      // Only 1 node selected → the merge bar (≥2) stays hidden. (position: layoutGraph assigns the real spot)
+      id: mid, type: 'board', position: { x: 0, y: 0 }, selected: true,
       data: {
         prompt: '', answer: '', status: 'idle', merged: true,
         // base set → onSend does resume+fork from the LCA session AND prepends mergeContext (zero onSend

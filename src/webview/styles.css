@@ -238,20 +238,14 @@ body {
 .board.lod-far .board__tags { padding: 6px 9px 0; }
 .board.lod-far .tag { font-size: 11px; }
 
-/* Branch-Signposts: floating "this branch explores X" label above a structural node (root / branch head /
-   merge / compact). Rendered inside a NodeToolbar (portal + constant screen size → readable at any zoom,
-   even when the card itself shrinks to a far gist). A compact, readable pill — NOT an uppercase tag chip —
-   with a terracotta accent edge; a 2-line clamp keeps long branches tidy (full text in the title tooltip). */
-/* Plate-less: the signpost label is plain text (no box/border/shadow plate) so it reads as a quiet
-   annotation, not a competing card. A strong text-shadow keeps it legible directly over the canvas/cards. */
-.branch-signpost {
-  max-width: 380px;
-  font-size: 12px; font-weight: 700; line-height: 1.3; letter-spacing: .01em;
-  color: #b3aea4; /* quiet warm grey — an annotation, not an alert (the accent/red read too loud) */
-  background: none; border: none; box-shadow: none; border-radius: 0; padding: 0 2px;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, .9), 0 0 2px rgba(0, 0, 0, .95);
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  cursor: default; user-select: none;
+/* Far-far LOD (branch map): a signpost node shows ONLY its branch label, IN the card — so it SCALES with
+   the board (never a constant-size overlay → no overlap). Digest gist + tags are hidden. A large font makes
+   the label the card's dominant content and keeps it as legible as scaling allows; a non-signpost node has
+   an empty title (a bare badge chip). Quiet warm grey, per the user's "not red" preference. */
+.board.lod-far-far .board__head { border-bottom: none; align-items: center; }
+.board.lod-far-far .board__title {
+  font-size: 26px; font-weight: 700; line-height: 1.25; letter-spacing: .01em;
+  color: #b3aea4; -webkit-line-clamp: 3; word-break: normal; overflow-wrap: break-word;
 }
 /* M12: transient hint shown when a board is dropped on a non-fusable neighbor. */
 .fuse-hint {
