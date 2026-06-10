@@ -1116,10 +1116,14 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
     {/* far-far map: the branch summary floats ABOVE the thin board, transparent (plain text, no plate).
-        Rendered in node DOM → it scales with the board; in-flow (first slot child) → the layout reserves
-        its space so rows don't collide. */}
-    {lod === 'far-far' && signpostLabel && (
-      <div className="board__toplabel nodrag nopan" title={signpostLabel}>{signpostLabel}</div>
+        Rendered in node DOM → scales with the board; in-flow (first slot child) → the layout reserves its
+        space so rows don't collide. The label box has a FIXED height (filled for signposts, empty for
+        others), so every far-far node's box is the same height → all the bars sit at the same level and
+        connected bars line up horizontally. The text is bottom-anchored so it hugs the bar. */}
+    {lod === 'far-far' && (
+      <div className="board__toplabel nodrag nopan" title={signpostLabel || undefined}>
+        <span className="board__toplabel-text">{signpostLabel ?? ''}</span>
+      </div>
     )}
     <div
       className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''}`}
