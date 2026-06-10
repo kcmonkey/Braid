@@ -20,6 +20,7 @@ function recordingSink() {
     done: (b, ti, d) => calls.push({ t: 'done', b, ti, d }),
     error: (b, ti, m) => calls.push({ t: 'error', b, ti, m }),
     rateLimit: (snapshot) => calls.push({ t: 'rateLimit', snapshot }),
+    commands: (commands) => calls.push({ t: 'commands', commands }),
   };
   return { sink, calls };
 }

@@ -153,3 +153,28 @@ describe('reduceClaudeMessage — passive rate_limit_event', () => {
     expect(events.some((e) => e.t === 'rateLimit')).toBe(false);
   });
 });
+
+describe('reduceClaudeMessage — commands_changed (live slash-command refresh)', () => {
+  it('folds commands_changed into a commands event with mapped specs (defensive fields)', () => {
+    const msg = {
+      type: 'system', subtype: 'commands_changed', commands: [
+        { name: 'compact', description: 'Compact the conversation', argumentHint: '', aliases: ['summary'] },
+        { name: 'debug', description: 'Diagnose', argumentHint: '[issue]' },
+        { name: '', description: 'dropped — no name' },
+        null,
+      ],
+    };
+    const { events } = run([init(), msg]);
+    const cmd = events.find((e) => e.t === 'commands') as any;
+    expect(cmd.commands).toEqual([
+      { name: 'compact', description: 'Compact the conversation', argumentHint: undefined, aliases: ['summary'] },
+      { name: 'debug', description: 'Diagnose', argumentHint: '[issue]', aliases: undefined },
+    ]);
+  });
+
+  it('commands_changed with no commands array emits an empty commands event', () => {
+    const { events } = run([init(), { type: 'system', subtype: 'commands_changed' }]);
+    const cmd = events.find((e) => e.t === 'commands') as any;
+    expect(cmd).toEqual({ t: 'commands', commands: [] });
+  });
+});

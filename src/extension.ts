@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
-import type { WebviewMessage, HostMessage, McpServerInfo } from './protocol';
+import type { WebviewMessage, HostMessage, McpServerInfo, SlashCommandSpec } from './protocol';
 import type { SerializedGraph, EditorContext } from './webview/merge';
 import { EDITOR_CONTEXT_CAP } from './webview/merge';
 import type { BraidConfig, ProviderConfig, CanvasConfig, LegacyFlatProviderConfig } from './sdkOptions';
@@ -72,6 +72,11 @@ const mcpControls = new Map<string, McpController>();
 // Accounts panel: one lazily-created account/usage control session per canvas (twin of mcpControls).
 // Created on `accountOpen`, disposed on `accountClose` / panel dispose — so it never idle-runs.
 const accountControls = new Map<string, AccountController>();
+
+// Composer autofill: the active provider's slash commands, cached for the workspace (cwd is fixed =
+// workspaceFolders[0]). Fetched lazily on the first `getSlashCommands`; replaced on a live `commands_changed`
+// (see makeSink.commands). null = not yet fetched. (Phase 1/2)
+let slashCommandsCache: SlashCommandSpec[] | null = null;
 
 // Where a runtime-provisioned SDK lives (globalStorage/sdk). Set in activate() once we have the
 // extension context; read lazily by the engine's SDK loader. Undefined until activate → dev/F5 falls
@@ -488,6 +493,14 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // User clicked a tool card's file path → reveal that file in a VS Code editor.
       await openFile(msg.path, msg.line);
       break;
+    case 'getSlashCommands':
+      // Composer `/` autofill mounted → serve the active provider's command list (cached per workspace).
+      await serveSlashCommands(canvasId);
+      break;
+    case 'searchFiles':
+      // Composer `@`-file autofill → return workspace files matching the query (echoing the query).
+      await searchWorkspaceFiles(canvasId, msg.query);
+      break;
     case 'mcpOpen':
       // MCP panel opened → lazily spin up the control session and poll status to it.
       await openMcp(canvasId);
@@ -601,6 +614,38 @@ async function openFile(filePath: string, line?: number) {
   } catch {
     vscode.window.showWarningMessage(`Braid: could not open file ${filePath}`);
   }
+}
+
+/** Serve the composer `/` autofill list: fetch once via the active engine, cache for the workspace, post.
+ * cwd is fixed (workspaceFolders[0]), so one cache serves every canvas. Live `commands_changed` refreshes
+ * replace the cache via makeSink.commands. Never throws (engine returns [] on failure). */
+async function serveSlashCommands(canvasId: string) {
+  if (!slashCommandsCache) {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    try { slashCommandsCache = await engineHost.getActive().listSlashCommands(cwd); }
+    catch (e: any) { console.error('[Braid] listSlashCommands failed:', e?.message ?? e); slashCommandsCache = []; }
+  }
+  postTo(canvasId, { type: 'slashCommands', commands: slashCommandsCache });
+}
+
+const MAX_FILE_RESULTS = 30;
+/** Serve the composer `@`-file autofill: workspace files matching `query`, up to N, as workspace-relative
+ * forward-slash paths, echoing `query` so the webview drops stale responses. A `*` doesn't cross `/`, so the
+ * include glob matches by basename (or a `dir/partial` path fragment). `undefined` exclude = honor the
+ * user's files.exclude / search.exclude (node_modules, .git, …). Always posts (even []) — no silent swallow. */
+async function searchWorkspaceFiles(canvasId: string, query: string) {
+  let files: string[] = [];
+  try {
+    const q = query.trim().replace(/\\/g, '/').replace(/[{}]/g, '');
+    const include = q ? `**/*${q}*` : '**/*';
+    const uris = await vscode.workspace.findFiles(include, undefined, MAX_FILE_RESULTS);
+    files = uris
+      .map((u) => vscode.workspace.asRelativePath(u, false).replace(/\\/g, '/'))
+      .sort((a, b) => a.length - b.length); // shorter (closer-to-root) paths first
+  } catch (e: any) {
+    console.error('[Braid] searchFiles failed:', e?.message ?? e);
+  }
+  postTo(canvasId, { type: 'fileResults', query, files });
 }
 
 /** Resolve a tool's file_path against the workspace root (relative) or use it as-is (absolute). */
@@ -880,6 +925,9 @@ function makeSink(canvasId: string): EventSink {
     done: (boardId, turnIndex, d) => postTo(canvasId, { type: 'done', boardId, turnIndex, sessionId: d.sessionId, messageUuid: d.messageUuid, isError: d.isError, text: d.text, thinking: d.thinking, thinks: d.thinks, contextTokens: d.contextTokens, contextWindow: d.contextWindow, autoCompacted: d.autoCompacted }),
     error: (boardId, turnIndex, message) => postTo(canvasId, { type: 'error', boardId, turnIndex, message }),
     rateLimit: (snapshot) => postTo(canvasId, { type: 'rateLimit', snapshot }),
+    // Live slash-command refresh (commands_changed) → update the host cache + push to this canvas. The
+    // cold-start list is served by the getSlashCommands handler (Phase 2).
+    commands: (commands) => { slashCommandsCache = commands; postTo(canvasId, { type: 'slashCommands', commands }); },
   };
 }
 
