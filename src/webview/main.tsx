@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   ReactFlow, ReactFlowProvider, Background, MiniMap, Handle, Position,
@@ -22,6 +22,7 @@ import {
 } from './merge';
 import { layoutGraph, type LayoutDir } from './layout';
 import type { HostMessage, WebviewMessage, McpServerInfo, BoardTag } from '../protocol';
+import { PROVIDER_CATALOG } from '../protocol';
 import type { BraidConfig } from '../sdkOptions';
 
 declare function acquireVsCodeApi(): {
@@ -1011,10 +1012,11 @@ function ChatView({
   // from the latest output (mirrors pinnedRef's threshold). Hidden when at/near the bottom.
   const [atBottom, setAtBottom] = useState(true);
   // Branch-switch motion: clicking a sibling branch chip changes entryId to a new fork child while focus
-  // stays open. Instead of the new branch snapping in, the below-fork region fades+slides into place.
-  // `entry` marks where the chosen branch begins (so only that region animates — shared ancestors above
-  // the fork stay put); `tick` retriggers the one-shot wrapper animation on each successive switch.
-  const [branchAnim, setBranchAnim] = useState<{ entry: string; tick: number } | null>(null);
+  // stays open. Instead of the chosen branch snapping in, its boards fade+slide into place. `ids` = the
+  // exact board ids of that branch captured at switch time (so the animation tags ONLY them — not the
+  // shared ancestors above the fork, nor any follow-up boards forked later); `tick` re-arms the reveal
+  // effect on each successive switch.
+  const [branchAnim, setBranchAnim] = useState<{ ids: string[]; tick: number } | null>(null);
   // Auto-follow streaming output only while the user is pinned at (or near) the bottom. Once they
   // scroll up to read earlier turns, stop yanking the view down on every delta; scrolling back to
   // the bottom re-pins. Tracked in a ref (read inside the scroll effect, no re-render needed).
@@ -1079,14 +1081,11 @@ function ChatView({
   const last = boards[boards.length - 1];
   const tail = last ? last.data.answer : '';
   const rendered = boards.filter((b) => b.data.prompt || b.data.answer);
-  // Where the switched-to branch begins in the chain — boards from here down belong to the chosen branch.
-  // <0 when not switching (focus-open) or the entry left the chain.
-  const branchSplit = branchAnim ? rendered.findIndex((b) => b.id === branchAnim.entry) : -1;
   // One chain board's turn(s) + its trailing branch switcher, wrapped in a stable per-board div (keyed by
   // board id) — SSOT for a thread entry's markup. The wrapper structure NEVER changes shape across renders,
   // so the shared ancestors keep their DOM identity on a branch switch (no remount → scroll position holds).
-  // `animate` tags only the freshly-mounted branch boards (id differs from the old branch) with `branchenter`,
-  // so the CSS fade+slide plays on mount for exactly the chosen branch and never for the unchanged ancestors.
+  // `animate` tags only the chosen branch's boards (branchAnim.ids) with `branchenter`, so the CSS fade+slide
+  // plays for exactly that branch and never for the unchanged ancestors above the fork.
   // A fused board (M12) holds multiple rounds in `turns`; a normal board renders its single round.
   const renderBoard = (b: BoardNodeT, animate: boolean) => (
     <div className={`chainboard${animate ? ' branchenter' : ''}`} key={b.id}>
@@ -1121,13 +1120,20 @@ function ChatView({
   //    above the animated branch, so leaving the scroll put keeps them in place while the chosen branch
   //    fades+slides in below (a reveal scroll only kicks in if it lands off-screen — see next effect).
   // While the entry is unchanged (same view, streaming deltas), smoothly follow the bottom if pinned.
+  // useLayoutEffect (pre-paint) so a branch switch's animation class is present on the chosen branch's
+  // FIRST paint — a post-paint useEffect would flash the branch at full opacity for one frame before the
+  // fade restarts it from 0.
   const scrolledEntryRef = useRef<string | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (scrolledEntryRef.current !== entryId) {
       const isSwitch = scrolledEntryRef.current !== null;
       scrolledEntryRef.current = entryId;
       if (isSwitch && entryId) {
-        setBranchAnim((p) => ({ entry: entryId, tick: (p?.tick ?? 0) + 1 }));
+        // Capture the chosen branch = the entry board and everything below it in the chain. Only these
+        // boards get tagged for the fade+slide; ancestors above the fork stay put and don't animate.
+        const idx = rendered.findIndex((b) => b.id === entryId);
+        const ids = idx >= 0 ? rendered.slice(idx).map((b) => b.id) : [entryId];
+        setBranchAnim((p) => ({ ids, tick: (p?.tick ?? 0) + 1 }));
       } else {
         const anchor = entryId ?? leafId;
         const el = scrollRef.current?.querySelector<HTMLElement>(`.turn[data-board-id="${anchor}"]`);
@@ -1195,10 +1201,10 @@ function ChatView({
       <div className="chatview__scroll" ref={scrollRef} onScroll={onScroll}>
         {/* The thread, root → leaf. A fork node (branches[b.id]) gets a BranchSwitcher after its turn(s):
             mid-chain it shows which branch is followed (switchable); at the view leaf it's the picker.
-            On a branch switch the chosen branch (from branchSplit down) mounts fresh and fades+slides in
-            (the `animate` flag), while the shared ancestors above keep their DOM identity and stay still —
-            so the scroll position holds and only the new branch moves. */}
-        {rendered.map((b, i) => renderBoard(b, branchSplit >= 0 && i >= branchSplit))}
+            On a branch switch the chosen branch's boards (branchAnim.ids) fade+slide in, while the shared
+            ancestors above keep their DOM identity and stay still — so the scroll position holds and only
+            the new branch moves. */}
+        {rendered.map((b) => renderBoard(b, branchAnim?.ids.includes(b.id) ?? false))}
         <div ref={bottomRef} />
       </div>
       {!atBottom && (
@@ -1272,15 +1278,11 @@ function ChatView({
   );
 }
 
-const MODEL_OPTS: { value: string; label: string }[] = [
-  { value: '', label: 'Default model' },
-  // Fable 5 (most capable). Passed as the full id; needs SDK ≥0.3.170 / binary ≥2.1.170 (older binaries
-  // resolve the id but the API blocks generation as a ToS/usage-policy error — see knowledge.md). Window 1M.
-  { value: 'claude-fable-5', label: 'Fable 5' },
-  { value: 'opus', label: 'Opus' },
-  { value: 'sonnet', label: 'Sonnet' },
-  { value: 'haiku', label: 'Haiku' },
-];
+// The Claude model dropdown options. SSOT = PROVIDER_CATALOG (protocol.ts) — sourced from the active
+// provider's `models` so there is no duplicate list. (Fable 5 needs SDK ≥0.3.170 / binary ≥2.1.170;
+// older binaries resolve the id but the API blocks generation as a ToS/usage-policy error — knowledge.md.)
+const MODEL_OPTS: { value: string; label: string }[] =
+  PROVIDER_CATALOG.find((p) => p.id === 'claude')?.models ?? [];
 const PERM_OPTS: { value: string; label: string }[] = [
   { value: 'inherit', label: 'Inherit .claude' },
   { value: 'default', label: 'default · prompt for approval' },

@@ -4,11 +4,13 @@ import * as fs from 'fs';
 import type { WebviewMessage, HostMessage, McpServerInfo } from './protocol';
 import type { SerializedGraph, EditorContext } from './webview/merge';
 import { EDITOR_CONTEXT_CAP } from './webview/merge';
-import type { BraidConfig } from './sdkOptions';
+import type { BraidConfig, ProviderConfig, CanvasConfig, LegacyFlatProviderConfig } from './sdkOptions';
+import { DEFAULT_PROVIDER_CONFIG, DEFAULT_CANVAS_CONFIG, migrateLegacyConfig } from './sdkOptions';
+import type { BraidSettings } from './engine/host';
 import { EngineHost } from './engine/host';
 import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry } from './runtime/sdk-provision';
 import { ensureSdkInstalled } from './runtime/sdk-download';
-import type { EventSink, PreToolInterceptor, PreToolDecision, TurnRequest, Attach, TurnHandle, McpController, CompactResult } from './engine/types';
+import type { EventSink, PreToolInterceptor, PreToolDecision, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
 
 // ---- Multi-canvas model (M5) ----
 // Each Canvas = its own editor-area webview panel + its own persisted graph. The Activity Bar
@@ -67,6 +69,10 @@ const ASK_CANCEL_REASON = '[The user canceled the question without making a sele
 // `mcpOpen`, disposed on `mcpClose` / panel dispose — so docker MCP gateway etc. never idle-run.
 const mcpControls = new Map<string, McpController>();
 
+// Accounts panel: one lazily-created account/usage control session per canvas (twin of mcpControls).
+// Created on `accountOpen`, disposed on `accountClose` / panel dispose — so it never idle-runs.
+const accountControls = new Map<string, AccountController>();
+
 // Where a runtime-provisioned SDK lives (globalStorage/sdk). Set in activate() once we have the
 // extension context; read lazily by the engine's SDK loader. Undefined until activate → dev/F5 falls
 // back to the bundled bare import. (plans/Distributable Shape 2)
@@ -77,7 +83,7 @@ let provisioningPromise: Promise<boolean> | null = null; // single in-flight dow
 
 // The engine middle layer (only ClaudeAdapter registered). The host routes all SDK-backed work —
 // turns / compact / summary / MCP control / auth probe — through it. (plans/Engine-Abstraction)
-const engineHost = new EngineHost({ readConfig, getSdkInstallDir: () => provisionedSdkDir });
+const engineHost = new EngineHost({ readSettings, getSdkInstallDir: () => provisionedSdkDir });
 
 // Notifications are entirely webview-side now: an in-canvas notification panel derived from each board's
 // unread / pending-ask state (which self-clears when the user opens the board). The host keeps no
@@ -108,6 +114,8 @@ const rbKey = (boardIds: string[]) => [...boardIds].sort().join('|');
 const MCP_POLL_TRIES = 8;             // status poll attempts before giving up
 const MCP_POLL_INTERVAL_MS = 2000;    // ms between MCP status polls (server startup is async ~2.5s)
 const MCP_EMPTY_GIVEUP_TRY = 2;       // after this many tries with zero servers, stop polling
+const ACCOUNT_POLL_TRIES = 4;         // account/usage poll attempts (plan-limit usage can lag while warming)
+const ACCOUNT_POLL_INTERVAL_MS = 2000; // ms between account usage polls
 const FOLLOWUP_GRACE_MS = 1000;       // M11: keep a streaming-input query open this long after a turn
                                       // settles (queue empty) so an in-flight `followup` isn't dropped
 
@@ -145,7 +153,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Keep every open canvas's settings UI in sync — also fires for edits made in the native Settings page.
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('braid')) return;
-      const config = readConfig();
+      const config = readConfigView();
       for (const id of panels.keys()) postTo(id, { type: 'config', config });
     }),
   );
@@ -226,7 +234,7 @@ async function checkEnvironment() {
       const timer = setTimeout(() => ctrl.abort(), ENV_CHECK_TIMEOUT_MS);
       token.onCancellationRequested(() => ctrl.abort());
       const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-      const r = await engineHost.get().checkAuth(cwd, ctrl);
+      const r = await engineHost.getActive().checkAuth(cwd, ctrl);
       clearTimeout(timer);
 
       if (r.sdkFailed) {
@@ -259,6 +267,8 @@ export function deactivate() {
   aborters.clear();
   for (const c of mcpControls.values()) c.dispose();
   mcpControls.clear();
+  for (const c of accountControls.values()) c.dispose();
+  accountControls.clear();
 }
 
 // ---- Canvas registry ----
@@ -304,6 +314,7 @@ function wireCanvasPanel(context: vscode.ExtensionContext, id: string, panel: vs
     for (const k of [...fileSnapshots.keys()]) if (k.startsWith(id + '::')) fileSnapshots.delete(k); // Node-Delete: free file snapshots
     for (const k of [...rollbackUndoLog.keys()]) if (k.startsWith(id + '|')) rollbackUndoLog.delete(k); // and rollback undo logs
     closeMcp(id); // dispose any MCP control session for this canvas (also covers deleteCanvas)
+    closeAccount(id); // and any account/usage control session
     panels.delete(id);
   });
   panel.webview.onDidReceiveMessage((msg) => handleMessage(msg as WebviewMessage, context, id));
@@ -452,8 +463,8 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       break;
     }
     case 'getConfig':
-      // In-canvas settings UI mounted → hand it the current braid.* values.
-      postTo(canvasId, { type: 'config', config: readConfig() });
+      // In-canvas settings UI mounted → hand it the active provider's flat config view.
+      postTo(canvasId, { type: 'config', config: readConfigView() });
       break;
     case 'setConfig':
       // UI changed a setting → write back to global VS Code settings (SSOT). The
@@ -479,6 +490,20 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
     case 'mcpReconnect':
       // Reconnect / Authenticate a server by name.
       await reconnectMcp(canvasId, msg.name);
+      break;
+    case 'accountOpen':
+      // Accounts panel opened → lazily spin up the account control session and push identity + usage.
+      await openAccount(canvasId);
+      break;
+    case 'accountClose':
+      // Accounts panel closed → tear down the control session (no idle subprocess).
+      closeAccount(canvasId);
+      break;
+    case 'accountSignIn':
+      await accountAuth(canvasId, 'in');
+      break;
+    case 'accountSignOut':
+      await accountAuth(canvasId, 'out');
       break;
     case 'askUserAnswer': {
       // M10: user answered an AskUserQuestion card → unblock the waiting PreToolUse hook with the
@@ -651,30 +676,78 @@ function restoreRolledBackFiles(canvasId: string, boardIds: string[]) {
   rollbackUndoLog.delete(key);
 }
 
-/** Read the live `braid.*` settings into a plain config (re-read per query → no reload needed). */
-function readConfig(): BraidConfig {
-  const c = vscode.workspace.getConfiguration('braid');
+// The provider-NEUTRAL canvas keys (kept as flat `braid.*` settings, outside the provider hierarchy).
+const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'expandAncestorsOnSelect'];
+
+/** Read the legacy flat `braid.*` provider keys (pre-multi-provider). Fallbacks reproduce the OLD package.json
+ * per-key defaults (effort 'xhigh', thinking 'adaptive', …) so an unconfigured install migrates to identical
+ * behavior. A user's set value is returned as-is (lossless). */
+function readLegacyFlatProviderConfig(c: vscode.WorkspaceConfiguration): LegacyFlatProviderConfig {
   return {
-    model: c.get<string>('model', ''),
-    effort: c.get<string>('effort', ''),
-    thinking: c.get<string>('thinking', 'inherit'),
-    permissionMode: c.get<string>('permissionMode', 'bypassPermissions'),
-    maxTurns: c.get<number>('maxTurns', 0),
-    appendSystemPrompt: c.get<string>('appendSystemPrompt', ''),
-    allowedTools: c.get<string[]>('allowedTools', []),
-    disallowedTools: c.get<string[]>('disallowedTools', []),
-    env: c.get<Record<string, string>>('env', {}),
-    autoCompactEnabled: c.get<boolean>('autoCompactEnabled', true),
-    autoCompactThreshold: c.get<number>('autoCompactThreshold', 95),
-    expandAncestorsOnSelect: c.get<boolean>('expandAncestorsOnSelect', true),
+    model: c.get<string>('model', DEFAULT_PROVIDER_CONFIG.model),
+    effort: c.get<string>('effort', DEFAULT_PROVIDER_CONFIG.effort),
+    thinking: c.get<string>('thinking', DEFAULT_PROVIDER_CONFIG.thinking),
+    permissionMode: c.get<string>('permissionMode', DEFAULT_PROVIDER_CONFIG.permissionMode),
+    maxTurns: c.get<number>('maxTurns', DEFAULT_PROVIDER_CONFIG.maxTurns),
+    appendSystemPrompt: c.get<string>('appendSystemPrompt', DEFAULT_PROVIDER_CONFIG.appendSystemPrompt),
+    allowedTools: c.get<string[]>('allowedTools', DEFAULT_PROVIDER_CONFIG.allowedTools),
+    disallowedTools: c.get<string[]>('disallowedTools', DEFAULT_PROVIDER_CONFIG.disallowedTools),
+    env: c.get<Record<string, string>>('env', DEFAULT_PROVIDER_CONFIG.env),
   };
 }
 
-/** Write a partial settings change back to global VS Code settings (in-canvas UI is just an editor). */
+/** Resolve one provider's config from the stored `braid.providers` object, falling back to a transparent
+ * migration of the legacy flat keys when that provider has no stored entry (so reads are always correct,
+ * even before a setConfig persists the migration). */
+function readProviderConfig(c: vscode.WorkspaceConfiguration, id: string): ProviderConfig {
+  const providers = c.get<Record<string, Partial<ProviderConfig>>>('providers', {});
+  const stored = providers?.[id];
+  if (stored && Object.keys(stored).length) return { ...DEFAULT_PROVIDER_CONFIG, ...stored };
+  // No stored slice → migrate from legacy flat keys (claude only; other providers default).
+  if (id === 'claude') return migrateLegacyConfig(readLegacyFlatProviderConfig(c));
+  return { ...DEFAULT_PROVIDER_CONFIG };
+}
+
+/** Read the live `braid.*` settings into the nested SSOT (re-read per query → no reload needed). */
+function readSettings(): BraidSettings {
+  const c = vscode.workspace.getConfiguration('braid');
+  const activeProvider = c.get<BraidSettings['activeProvider']>('activeProvider', 'claude');
+  const canvas: CanvasConfig = {
+    autoCompactEnabled: c.get<boolean>('autoCompactEnabled', DEFAULT_CANVAS_CONFIG.autoCompactEnabled),
+    autoCompactThreshold: c.get<number>('autoCompactThreshold', DEFAULT_CANVAS_CONFIG.autoCompactThreshold),
+    expandAncestorsOnSelect: c.get<boolean>('expandAncestorsOnSelect', DEFAULT_CANVAS_CONFIG.expandAncestorsOnSelect),
+  };
+  return { activeProvider, providers: { claude: readProviderConfig(c, 'claude') }, canvas };
+}
+
+/** Flat webview-facing view = the active provider's slice ∪ the canvas config (field set unchanged). */
+function readConfigView(): BraidConfig {
+  const s = readSettings();
+  return { ...(s.providers[s.activeProvider] ?? DEFAULT_PROVIDER_CONFIG), ...s.canvas };
+}
+
+/** Write a partial flat-view change back to global VS Code settings (the in-canvas UI is just an editor).
+ * Canvas keys go to their flat `braid.*` settings; provider keys merge into the active provider's slice in
+ * `braid.providers` (which also persists the legacy migration on first edit). */
 async function applyConfig(patch: Partial<BraidConfig>) {
   const c = vscode.workspace.getConfiguration('braid');
+  const canvasKeys = new Set<string>(CANVAS_KEYS as string[]);
+  const providerPatch: Partial<ProviderConfig> = {};
+  let touchedProvider = false;
   for (const [key, value] of Object.entries(patch)) {
-    await c.update(key, value, vscode.ConfigurationTarget.Global);
+    if (canvasKeys.has(key)) {
+      await c.update(key, value, vscode.ConfigurationTarget.Global);
+    } else {
+      (providerPatch as Record<string, unknown>)[key] = value;
+      touchedProvider = true;
+    }
+  }
+  if (touchedProvider) {
+    const active = c.get<string>('activeProvider', 'claude');
+    const current = readProviderConfig(c, active); // migrated baseline → legacy values preserved
+    const providers = c.get<Record<string, ProviderConfig>>('providers', {});
+    const next = { ...providers, [active]: { ...current, ...providerPatch } };
+    await c.update('providers', next, vscode.ConfigurationTarget.Global);
   }
 }
 
@@ -682,7 +755,7 @@ async function applyConfig(patch: Partial<BraidConfig>) {
 async function openMcp(canvasId: string) {
   if (!mcpControls.has(canvasId)) {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    const ctrl = await engineHost.get().mcpControl(cwd);
+    const ctrl = await engineHost.getActive().mcpControl(cwd);
     if (!ctrl) { postTo(canvasId, { type: 'mcpServers', servers: [], busy: [] }); return; }
     // The panel may have closed (mcpClose / dispose) during the async create — don't leak.
     if (!panels.has(canvasId)) { ctrl.dispose(); return; }
@@ -731,6 +804,58 @@ function closeMcp(canvasId: string) {
   if (ctrl) { ctrl.dispose(); mcpControls.delete(canvasId); }
 }
 
+/** Accounts panel opened → lazily create the account/usage control session, then push identity + usage. */
+async function openAccount(canvasId: string) {
+  if (!accountControls.has(canvasId)) {
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    const ctrl = await engineHost.getActive().accountControl(cwd);
+    if (!ctrl) { postTo(canvasId, { type: 'account', provider: readSettings().activeProvider, account: null, usage: null }); return; }
+    // The panel may have closed (accountClose / dispose) during the async create — don't leak.
+    if (!panels.has(canvasId)) { ctrl.dispose(); return; }
+    accountControls.set(canvasId, ctrl);
+  }
+  await refreshAccount(canvasId);
+}
+
+/** Fetch identity + usage and push to the panel. Polls a few times: account info is immediate, but
+ * plan-limit usage can be empty/pending until the control session warms. */
+async function refreshAccount(canvasId: string) {
+  const ctrl = accountControls.get(canvasId);
+  if (!ctrl) return;
+  const provider = readSettings().activeProvider;
+  for (let i = 0; i < ACCOUNT_POLL_TRIES; i++) {
+    if (accountControls.get(canvasId) !== ctrl) return; // disposed or replaced mid-poll
+    const [account, usage] = await Promise.all([ctrl.info(), ctrl.usage()]);
+    if (accountControls.get(canvasId) !== ctrl) return; // disposed during the await
+    postTo(canvasId, { type: 'account', provider, account, usage, busy: ctrl.busy.size > 0 });
+    if (usage && usage.windows.length > 0) break; // got real usage → stop polling
+    await new Promise((r) => setTimeout(r, ACCOUNT_POLL_INTERVAL_MS));
+  }
+}
+
+/** Sign in / out the active provider's account (browser-OAuth flow; engine side completed in Phase 4). */
+async function accountAuth(canvasId: string, action: 'in' | 'out') {
+  const ctrl = accountControls.get(canvasId);
+  if (!ctrl) return;
+  try {
+    if (action === 'in') {
+      const abort = new AbortController();
+      await ctrl.signIn((url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); }, abort.signal);
+    } else {
+      await ctrl.signOut();
+    }
+  } catch (e: any) {
+    console.error('[Braid] account auth failed:', e?.message ?? e);
+  }
+  if (accountControls.get(canvasId) === ctrl) await refreshAccount(canvasId);
+}
+
+/** Accounts panel closed (or canvas disposed) → tear down the control session. */
+function closeAccount(canvasId: string) {
+  const ctrl = accountControls.get(canvasId);
+  if (ctrl) { ctrl.dispose(); accountControls.delete(canvasId); }
+}
+
 /** Build the canvas-bound EventSink: each neutral output → the matching HostMessage via postTo.
  * 1:1 with the pre-refactor `postTo(canvasId, {...})` calls inside runQuery, so behavior is unchanged. */
 function makeSink(canvasId: string): EventSink {
@@ -743,6 +868,7 @@ function makeSink(canvasId: string): EventSink {
     toolResult: (boardId, turnIndex, ev) => postTo(canvasId, { type: 'toolResult', boardId, turnIndex, toolUseId: ev.toolUseId, content: ev.content, isError: ev.isError }),
     done: (boardId, turnIndex, d) => postTo(canvasId, { type: 'done', boardId, turnIndex, sessionId: d.sessionId, messageUuid: d.messageUuid, isError: d.isError, text: d.text, thinking: d.thinking, thinks: d.thinks, contextTokens: d.contextTokens, contextWindow: d.contextWindow, autoCompacted: d.autoCompacted }),
     error: (boardId, turnIndex, message) => postTo(canvasId, { type: 'error', boardId, turnIndex, message }),
+    rateLimit: (snapshot) => postTo(canvasId, { type: 'rateLimit', snapshot }),
   };
 }
 
@@ -882,7 +1008,7 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
     cwd,
   };
   try {
-    await engineHost.get().runTurn(req, sink, pre, { abort, onLive: (h: TurnHandle) => liveQueries.set(k, h) });
+    await engineHost.getActive().runTurn(req, sink, pre, { abort, onLive: (h: TurnHandle) => liveQueries.set(k, h) });
   } finally {
     liveQueries.delete(k);
     aborters.delete(k);
@@ -896,7 +1022,7 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
 async function runSummaryHost(msg: Extract<WebviewMessage, { type: 'summarize' }>, canvasId: string) {
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   try {
-    const { summary, miniSummary, tags } = await engineHost.get().summarize({ cwd, prompt: msg.prompt, answer: msg.answer });
+    const { summary, miniSummary, tags } = await engineHost.getActive().summarize({ cwd, prompt: msg.prompt, answer: msg.answer });
     postTo(canvasId, { type: 'summary', boardId: msg.boardId, summary, miniSummary, tags });
   } catch (e: any) {
     // summarize() itself threw (e.g. loadSdk rejected) — post an empty summary so the webview clears the
@@ -912,7 +1038,7 @@ async function runSummaryHost(msg: Extract<WebviewMessage, { type: 'summarize' }
  * deleting the node mid-compact stops it. (knowledge.md "native /compact")
  */
 async function runCompactHost(msg: Extract<WebviewMessage, { type: 'compact' }>, canvasId: string) {
-  const engine = engineHost.get();
+  const engine = engineHost.getActive();
   if (engine.compact.mode !== 'native') return; // Claude is native; other engines may not support compact nodes
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   const abort = new AbortController();

@@ -11,6 +11,95 @@ export interface ImageInput {
   data: string;      // base64-encoded bytes
 }
 
+/** Service-provider id. SSOT lives here (shared by both bundles + the engine layer). The registry only
+ * implements a subset (currently just 'claude'); `PROVIDER_CATALOG[i].implemented` marks which. The union
+ * grows as engines are added; an unimplemented id is type+catalog only (UI placeholder, no engine). */
+export type EngineId = 'claude' | 'codex';
+
+/** One selectable model for a provider's model dropdown. */
+export interface ModelOption { value: string; label: string }
+
+/** Static, display-side description of a provider — identity + accent + its model list + whether an engine
+ * is actually registered for it. SSOT for "which providers exist" (vs the engine registry = "which run").
+ * `implemented:false` ⇔ no engine registered (placeholder card / not selectable as a live turn target). */
+export interface ProviderDescriptor {
+  id: EngineId;
+  name: string;
+  vendor: string;
+  accent: string;        // hex; the provider dot/badge color
+  implemented: boolean;
+  models: ModelOption[];
+}
+
+/** The provider catalog. Claude is implemented; Codex is a type+catalog placeholder (no engine yet). The
+ * Claude model list is the SSOT consumed by capabilities (Phase 2) — keep it in sync with what the SDK
+ * binary accepts (see knowledge.md for `claude-fable-5` version gating). */
+export const PROVIDER_CATALOG: ProviderDescriptor[] = [
+  {
+    id: 'claude', name: 'Claude', vendor: 'Anthropic', accent: '#d97757', implemented: true,
+    models: [
+      { value: '', label: 'Default model' },
+      { value: 'claude-fable-5', label: 'Fable 5' },
+      { value: 'opus', label: 'Opus' },
+      { value: 'sonnet', label: 'Sonnet' },
+      { value: 'haiku', label: 'Haiku' },
+    ],
+  },
+  {
+    id: 'codex', name: 'Codex', vendor: 'OpenAI', accent: '#10a37f', implemented: false,
+    models: [
+      { value: 'gpt-5-codex', label: 'GPT-5 Codex' },
+      { value: 'o4', label: 'o4' },
+      { value: 'o4-mini', label: 'o4-mini' },
+    ],
+  },
+];
+
+/** Neutral, webview-facing capabilities of a provider — used (in the follow-up UI plan) to gate controls:
+ * `reasoning` → effort/thinking visible; `compact` → auto-compact available; `models` → the dropdown. The
+ * host derives `compact` from the engine's `compact.mode` (it is NOT a field on the engine). */
+export interface ProviderCapabilitiesView {
+  id: EngineId;
+  reasoning: boolean;
+  compact: boolean;
+  steer: boolean;
+  models: ModelOption[];
+}
+
+/** A provider account's identity (neutral; mapped from the engine's accountInfo). `signedIn:false` ⇒ render
+ * the "sign in" placeholder. `plan` = subscription type ('pro'/'max'/…); `backend` = api provider. */
+export interface ProviderAccount {
+  signedIn: boolean;
+  email?: string;
+  organization?: string;
+  plan?: string;
+  backend?: string;
+}
+
+/** One plan-limit window (5-hour / 7-day / …). `utilizationPct` 0–100 or null when unknown. */
+export interface UsageWindow {
+  id: string;
+  label: string;
+  utilizationPct: number | null;
+  resetsAt?: string | null; // ISO 8601
+}
+
+/** A provider's usage snapshot — plan-limit windows + session cost. Empty `windows` ⇒ plan limits N/A
+ * (API key / 3P provider) or not yet available. */
+export interface ProviderUsage {
+  windows: UsageWindow[];
+  sessionCostUsd?: number;
+}
+
+/** Passive rate-limit snapshot, captured from the `rate_limit_event` that rides every turn stream (no
+ * control session needed). Data source for the always-visible usage chip. `resetsAt` = epoch seconds. */
+export interface RateLimitSnapshot {
+  status: string;            // 'allowed' | 'allowed_warning' | 'rejected' | …
+  windowId?: string;         // 'five_hour' | 'seven_day' | …
+  utilizationPct?: number;
+  resetsAt?: number;
+}
+
 // MCP manager: serializable subset of the SDK's McpServerStatus, pushed to the panel for rendering.
 export interface McpServerInfo {
   name: string;
@@ -67,6 +156,12 @@ export type WebviewMessage =
   | { type: 'mcpOpen' }
   | { type: 'mcpClose' }
   | { type: 'mcpReconnect'; name: string }
+  // Accounts panel: opened (lazily create the per-canvas account control session + refresh identity/usage)
+  // / closed (dispose it). signIn/signOut drive the provider's browser-OAuth flow (Phase 4).
+  | { type: 'accountOpen' }
+  | { type: 'accountClose' }
+  | { type: 'accountSignIn'; provider: EngineId }
+  | { type: 'accountSignOut'; provider: EngineId }
   // M10 AskUserQuestion: the user answered (or canceled) an interactive question card. The webview
   // pre-formats the choice into `reason` (via merge.ts/formatAskUserAnswer) so the extension bundle
   // never pulls in merge.ts. The host resolves the blocked PreToolUse hook by `toolUseId` (= the
@@ -136,6 +231,11 @@ export type HostMessage =
   // MCP manager: current status of all MCP servers (polled from the control session) + the names
   // currently mid-action (reconnecting), so the panel can show per-server busy state.
   | { type: 'mcpServers'; servers: McpServerInfo[]; busy: string[] }
+  // Accounts panel: a provider's identity + usage snapshot (from the account control session). `busy` =
+  // an auth action (sign in/out) is mid-flight. Pushed on accountOpen refresh + after sign in/out.
+  | { type: 'account'; provider: EngineId; account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }
+  // Passive usage chip: latest rate-limit snapshot captured from a turn's stream (canvas-level, no boardId).
+  | { type: 'rateLimit'; snapshot: RateLimitSnapshot }
   // Node-Delete Phase 3: result of a best-effort file rollback on delete — which files were restored vs
   // skipped (with reasons: shared with a surviving board / too large / failed). Drives a transient hint.
   | { type: 'rollbackResult'; rolledBack: string[]; skipped: { path: string; reason: string }[] };

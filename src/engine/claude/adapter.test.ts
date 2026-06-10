@@ -1,12 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { ClaudeAdapter } from './adapter';
-import type { BraidConfig } from '../../sdkOptions';
+import type { ProviderConfig } from '../../sdkOptions';
 import type { EventSink, PreToolInterceptor, PreToolDecision, TurnRequest, TurnHandle, Attach } from '../types';
 
-const cfg: BraidConfig = {
+const cfg: ProviderConfig = {
   model: '', effort: '', thinking: 'inherit', permissionMode: 'bypassPermissions', maxTurns: 0,
   appendSystemPrompt: '', allowedTools: [], disallowedTools: [], env: {},
-  autoCompactEnabled: true, autoCompactThreshold: 95, expandAncestorsOnSelect: true,
 };
 
 function recordingSink() {
@@ -20,6 +19,7 @@ function recordingSink() {
     toolResult: (b, ti, ev) => calls.push({ t: 'toolResult', b, ti, ev }),
     done: (b, ti, d) => calls.push({ t: 'done', b, ti, d }),
     error: (b, ti, m) => calls.push({ t: 'error', b, ti, m }),
+    rateLimit: (snapshot) => calls.push({ t: 'rateLimit', snapshot }),
   };
   return { sink, calls };
 }
@@ -48,7 +48,7 @@ function harness(opts: { loadSdk?: () => Promise<any> } = {}) {
   const captured: { options?: any; prompt?: any } = {};
   const fake = fakeQuery();
   const sdk = { query: (args: any) => { captured.options = args.options; captured.prompt = args.prompt; return fake.q; } };
-  const adapter = new ClaudeAdapter({ loadSdk: opts.loadSdk ?? (async () => sdk), readConfig: () => cfg });
+  const adapter = new ClaudeAdapter({ loadSdk: opts.loadSdk ?? (async () => sdk), readProviderConfig: () => cfg });
   return { adapter, fake, captured };
 }
 

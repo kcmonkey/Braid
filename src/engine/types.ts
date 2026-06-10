@@ -2,9 +2,13 @@
 // Pure types: no vscode, no SDK imports. The host (extension.ts) owns canvas routing / state maps and
 // drives an Engine via these; only `ClaudeAdapter` implements it for now. (plans/Engine-Abstraction)
 import type { ThinkMark } from '../webview/merge';
-import type { ImageInput, McpServerInfo } from '../protocol';
+import type {
+  ImageInput, McpServerInfo, EngineId, ModelOption, ProviderAccount, ProviderUsage, RateLimitSnapshot,
+} from '../protocol';
 
-export type EngineId = 'claude'; // union grows when Codex/Gemini land (Future Milestones)
+// EngineId SSOT moved to protocol.ts (shared by both bundles + the catalog). Re-exported here so existing
+// `import { EngineId } from './types'` engine-side consumers are unaffected. (union: 'claude' | 'codex' …)
+export type { EngineId };
 
 /** Opaque session handle. The host round-trips / persists it; only the owning engine interprets `raw`.
  * Claude: raw = the CLI session id. (Codex would pack threadId/sessionId here — Future.) */
@@ -61,6 +65,8 @@ export interface EventSink {
   toolResult(boardId: string, turnIndex: number, ev: ToolResultEvent): void;
   done(boardId: string, turnIndex: number, done: TurnDone): void;
   error(boardId: string, turnIndex: number | undefined, message: string): void;
+  // Passive plan-limit snapshot captured from the turn stream's `rate_limit_event` (canvas-level, no boardId).
+  rateLimit(snapshot: RateLimitSnapshot): void;
 }
 
 /** Channel 2 — the engine asks the host BEFORE running a tool. The Claude adapter wires this to the
@@ -96,6 +102,23 @@ export interface McpController {
   dispose(): void;
 }
 
+/** Outcome of an interactive auth flow (sign in/out). `canceled` (user closed the browser / panel teardown)
+ * is a non-error termination — the UI shows no error for it. */
+export type AuthOutcome = { ok: true } | { ok: false; error: string; canceled?: boolean };
+
+/** Account/usage/auth control surface (twin of McpController — same long-lived control session + host-owned
+ * lazy create / poll / dispose lifecycle). `info`/`usage` are read-only (Phase 3); `signIn`/`signOut` drive
+ * the browser-OAuth flow (Phase 4) — `openUrl` is the host's `vscode.env.openExternal` bridge, `signal`
+ * aborts a pending sign-in on teardown. */
+export interface AccountController {
+  readonly busy: Set<string>;
+  info(): Promise<ProviderAccount | null>;
+  usage(): Promise<ProviderUsage | null>;
+  signIn(openUrl: (url: string) => void, signal: AbortSignal): Promise<AuthOutcome>;
+  signOut(): Promise<void>;
+  dispose(): void;
+}
+
 /** Capability ⇔ method bound by discriminated union so illegal pairings can't be represented (principle 12). */
 export type CompactCap =
   | { mode: 'native'; compact(req: CompactRequest, abort: AbortController): Promise<CompactResult> }
@@ -112,6 +135,9 @@ export interface EngineCapabilities {
   fork: 'native' | 'replay';
   steer: boolean;
   reasoning: boolean;
+  // The provider's selectable models (SSOT = PROVIDER_CATALOG). Drives the model dropdown; surfaced to the
+  // webview via ProviderCapabilitiesView. ('compact' support is NOT here — it's derived from `compact.mode`.)
+  models: ModelOption[];
 }
 
 export interface SummarizeRequest { cwd: string; prompt: string; answer: string }
@@ -127,5 +153,7 @@ export interface Engine {
   // `tags` = raw digest-tag tokens the cheap model proposed (validated webview-side against TAG_VOCAB).
   summarize(req: SummarizeRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }>;
   mcpControl(cwd: string): Promise<McpController | null>;
+  // Account/usage/auth control session (lazy; host owns lifecycle). null = SDK unavailable.
+  accountControl(cwd: string): Promise<AccountController | null>;
   checkAuth(cwd: string, abort: AbortController): Promise<AuthResult>;
 }

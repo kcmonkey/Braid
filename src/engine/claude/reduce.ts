@@ -6,6 +6,8 @@
 import type { ThinkMark } from '../../webview/merge';
 import { TOOL_RESULT_CAP } from '../../webview/merge';
 import type { ToolUseEvent, ToolResultEvent } from '../types';
+import type { RateLimitSnapshot } from '../../protocol';
+import { toRateLimitSnapshot } from './account';
 
 // ---- pure helpers (moved verbatim from extension.ts) ----
 
@@ -89,6 +91,7 @@ export type NeutralEvent =
   | { t: 'thinking'; turnIndex: number; thinks: ThinkMark[] }
   | { t: 'toolUse'; turnIndex: number; ev: ToolUseEvent }
   | { t: 'toolResult'; turnIndex: number; ev: ToolResultEvent }
+  | { t: 'rateLimit'; snapshot: RateLimitSnapshot }             // passive plan-limit snapshot (canvas-level)
   | { t: 'result'; isError: boolean };                          // turn's result message (adapter settles)
 
 const view = (s: ParseState) => s.answer + s.pending;
@@ -163,6 +166,9 @@ export function reduceClaudeMessage(s: ParseState, m: any, now: number): Neutral
         }
       }
     }
+  } else if (m.type === 'rate_limit_event') {
+    const snapshot = toRateLimitSnapshot(m);
+    if (snapshot) out.push({ t: 'rateLimit', snapshot });
   } else if (m.type === 'result') {
     s.sessionId = m.session_id ?? s.sessionId;
     s.contextWindow = pickContextWindow(m.modelUsage, s.modelId) ?? s.contextWindow;

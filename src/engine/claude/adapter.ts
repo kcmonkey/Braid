@@ -3,14 +3,15 @@
 // extension.ts functions: runQuery → runTurn, runCompact → compact, runSummary/haikuOneShot → summarize,
 // McpControl → mcpControl, checkEnvironment's probe → checkAuth. The host keeps canvas routing / state
 // maps / UI and drives this via the neutral Engine contract. (plans/Engine-Abstraction Phase 1+2)
-import type { BraidConfig } from '../../sdkOptions';
+import type { ProviderConfig } from '../../sdkOptions';
 import { buildSdkOptions } from '../../sdkOptions';
 import type { ImageInput, McpServerInfo } from '../../protocol';
-import { TAG_VOCAB } from '../../protocol';
+import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle,
-  McpController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
+  McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
 } from '../types';
+import { ClaudeAccountControl } from './account';
 import { pathToFileURL } from 'url';
 import {
   reduceClaudeMessage, buildTurnDone, initParseState, turnView, extractText,
@@ -32,7 +33,7 @@ const COMPACT_DIGEST_SYSTEM =
 
 export interface ClaudeAdapterDeps {
   loadSdk(): Promise<any | null>;
-  readConfig(): BraidConfig;
+  readProviderConfig(): ProviderConfig;
 }
 
 /**
@@ -73,7 +74,10 @@ export class ClaudeAdapter implements Engine {
   constructor(private readonly deps: ClaudeAdapterDeps) {}
 
   async capabilities(): Promise<EngineCapabilities> {
-    return { fork: 'native', steer: true, reasoning: true };
+    // Model list is sourced from the catalog (SSOT) — returned by reference so consumers + tests can
+    // assert identity. (compact support is expressed separately via `this.compact.mode`.)
+    const claude = PROVIDER_CATALOG.find((p) => p.id === 'claude');
+    return { fork: 'native', steer: true, reasoning: true, models: claude?.models ?? [] };
   }
 
   // ---- main turn (was runQuery) ----
@@ -84,7 +88,7 @@ export class ClaudeAdapter implements Engine {
     const boardId = req.boardId;
     // Layer order: user config first, then engine-critical keys runTurn owns (these win).
     const options: Record<string, unknown> = {
-      ...buildSdkOptions(this.deps.readConfig()),
+      ...buildSdkOptions(this.deps.readProviderConfig()),
       cwd: req.cwd,
       includePartialMessages: true,
       abortController: ctl.abort,
@@ -159,6 +163,7 @@ export class ClaudeAdapter implements Engine {
             case 'thinking': sink.thinking(boardId, e.turnIndex, e.thinks); break;
             case 'toolUse': sink.toolUse(boardId, e.turnIndex, e.ev); break;
             case 'toolResult': sink.toolResult(boardId, e.turnIndex, e.ev); break;
+            case 'rateLimit': sink.rateLimit(e.snapshot); break;
             case 'result':
               // interrupted turn ends as error_during_execution/is_error — the user's send-now cut, NOT a
               // real failure → settle done, keep partial. (knowledge.md)
@@ -299,6 +304,26 @@ export class ClaudeAdapter implements Engine {
     (async () => {
       try { for await (const _m of ctrl._q as AsyncIterable<any>) { /* drain to pump transport */ } }
       catch (e: any) { if (!ctrl._disposed) console.error('[Braid] MCP control drain ended:', e?.message ?? e); }
+    })();
+    return ctrl;
+  }
+
+  // ---- Account/usage control session (twin of mcpControl) ----
+  async accountControl(cwd: string): Promise<AccountController | null> {
+    const sdk = await this.deps.loadSdk();
+    if (!sdk) return null;
+    const ctrl = new ClaudeAccountControl();
+    const keepAlive = new Promise<void>((r) => { ctrl._release = r; });
+    async function* input() { await keepAlive; } // yields nothing; stays open until dispose()
+    try {
+      ctrl._q = sdk.query({ prompt: input(), options: { cwd, permissionMode: 'bypassPermissions', persistSession: false } });
+    } catch (e: any) {
+      console.error('[Braid] account control session failed to start:', e?.message ?? e);
+      return null;
+    }
+    (async () => {
+      try { for await (const _m of ctrl._q as AsyncIterable<any>) { /* drain to pump transport */ } }
+      catch (e: any) { if (!ctrl._disposed) console.error('[Braid] account control drain ended:', e?.message ?? e); }
     })();
     return ctrl;
   }

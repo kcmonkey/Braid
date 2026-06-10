@@ -25,113 +25,35 @@
     "configuration": {
       "title": "Braid",
       "properties": {
-        "braid.model": {
+        "braid.activeProvider": {
           "type": "string",
-          "default": "",
+          "default": "claude",
           "enum": [
-            "",
-            "opus",
-            "sonnet",
-            "haiku"
+            "claude"
           ],
           "enumDescriptions": [
-            "Inherit (unset; defer to the CLI/.claude default)",
-            "Claude Opus (most capable)",
-            "Claude Sonnet (balanced)",
-            "Claude Haiku (fastest)"
+            "Claude (Anthropic) — the only provider available today"
           ],
-          "markdownDescription": "Model used for the main conversation. Empty = inherit the CLI/`.claude` default. (Does not affect collapsed summaries — those always use Haiku to save cost.)"
+          "markdownDescription": "Which service provider drives new boards. Per-provider model/effort/thinking/permission/tool settings live under `braid.providers`. (More providers land in a future release.)"
         },
-        "braid.effort": {
-          "type": "string",
-          "default": "xhigh",
-          "enum": [
-            "",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-            "max"
-          ],
-          "enumDescriptions": [
-            "Inherit (unset; defer to the default)",
-            "low: least thinking, fastest",
-            "medium: moderate thinking",
-            "high: deep reasoning (default for most models)",
-            "xhigh: deeper",
-            "max: highest (only some models, e.g. Opus 4.6/4.7, Sonnet 4.6)"
-          ],
-          "markdownDescription": "Thinking effort: controls how much reasoning Claude invests. Works with adaptive thinking. **Only takes effect on models that support it**; others silently downgrade/ignore it. Empty = inherit the default."
-        },
-        "braid.thinking": {
-          "type": "string",
-          "default": "adaptive",
-          "enum": [
-            "inherit",
-            "adaptive",
-            "disabled"
-          ],
-          "enumDescriptions": [
-            "Inherit (unset; defer to the model/.claude default)",
-            "On: adaptive thinking (Claude decides when and how much to think)",
-            "Off: no extended thinking"
-          ],
-          "markdownDescription": "Extended-thinking switch. `adaptive` = enable adaptive thinking; `disabled` = off. **Adaptive only takes effect on supported models.** Inherit defers to the default. Works with Effort: under adaptive thinking, effort guides the depth."
-        },
-        "braid.permissionMode": {
-          "type": "string",
-          "default": "bypassPermissions",
-          "enum": [
-            "inherit",
-            "default",
-            "acceptEdits",
-            "plan",
-            "bypassPermissions"
-          ],
-          "enumDescriptions": [
-            "Inherit (unset; defer to the `.claude`/SDK default)",
-            "default: prompt for approval before risky actions",
-            "acceptEdits: auto-accept file edits",
-            "plan: planning mode, no actual tool execution",
-            "bypassPermissions: skip all permission checks"
-          ],
-          "markdownDescription": "Tool permission mode. ⚠️ **This extension has no permission-approval UI yet**: with modes that require approval (`default`/`plan`, etc.), tools needing approval are denied or hang. Default `bypassPermissions` (auto-skips approval, same as before). `inherit` defers to `permissions.defaultMode` in `.claude/settings.json`."
-        },
-        "braid.maxTurns": {
-          "type": "number",
-          "default": 0,
-          "minimum": 0,
-          "markdownDescription": "Max agentic turns per conversation round. `0` = unlimited."
-        },
-        "braid.appendSystemPrompt": {
-          "type": "string",
-          "default": "",
-          "editPresentation": "multilineText",
-          "markdownDescription": "Extra instructions appended after Claude Code's default system prompt. Empty = none."
-        },
-        "braid.allowedTools": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "markdownDescription": "Allowlist of tools (e.g. `Read`, `Bash`). Empty = unrestricted."
-        },
-        "braid.disallowedTools": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "default": [],
-          "markdownDescription": "Denylist of tools (e.g. `Bash`, `Write`). Empty = none."
-        },
-        "braid.env": {
+        "braid.providers": {
           "type": "object",
-          "additionalProperties": {
-            "type": "string"
-          },
           "default": {},
-          "markdownDescription": "Extra environment variables passed to the Claude Code subprocess. ⚠️ Do NOT set `ANTHROPIC_API_KEY` here — that switches the SDK to metered API billing instead of your subscription."
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "model": { "type": "string" },
+              "effort": { "type": "string" },
+              "thinking": { "type": "string" },
+              "permissionMode": { "type": "string" },
+              "maxTurns": { "type": "number" },
+              "appendSystemPrompt": { "type": "string" },
+              "allowedTools": { "type": "array", "items": { "type": "string" } },
+              "disallowedTools": { "type": "array", "items": { "type": "string" } },
+              "env": { "type": "object", "additionalProperties": { "type": "string" } }
+            }
+          },
+          "markdownDescription": "Per-provider engine settings, keyed by provider id (e.g. `claude`). Each holds that provider's model / effort / thinking / permissionMode / maxTurns / appendSystemPrompt / allowedTools / disallowedTools / env. Edit via the in-canvas Settings UI (recommended). ⚠️ Do NOT set `ANTHROPIC_API_KEY` in `env` — that switches the SDK to metered API billing instead of your subscription. (Legacy flat `braid.model`/`braid.effort`/… settings are migrated into `providers.claude` automatically.)"
         },
         "braid.autoCompactEnabled": {
           "type": "boolean",

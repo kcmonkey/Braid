@@ -1,8 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { buildSdkOptions, type BraidConfig } from './sdkOptions';
+import {
+  buildSdkOptions, migrateLegacyConfig, DEFAULT_PROVIDER_CONFIG,
+  type ProviderConfig, type LegacyFlatProviderConfig,
+} from './sdkOptions';
 
-/** Default config = "user configured nothing" (matches package.json defaults, permissionMode = bypass). */
-const base = (extra: Partial<BraidConfig> = {}): BraidConfig => ({
+/** Minimal provider config = "user configured nothing" → buildSdkOptions emits nothing but the bypass mode. */
+const base = (extra: Partial<ProviderConfig> = {}): ProviderConfig => ({
   model: '',
   effort: '',
   thinking: 'inherit',
@@ -12,9 +15,6 @@ const base = (extra: Partial<BraidConfig> = {}): BraidConfig => ({
   allowedTools: [],
   disallowedTools: [],
   env: {},
-  autoCompactEnabled: true,
-  autoCompactThreshold: 95,
-  expandAncestorsOnSelect: true,
   ...extra,
 });
 
@@ -86,5 +86,33 @@ describe('buildSdkOptions', () => {
   it('non-empty env passed, empty omitted', () => {
     expect(buildSdkOptions(base({ env: { FOO: 'bar' } })).env).toEqual({ FOO: 'bar' });
     expect('env' in buildSdkOptions(base())).toBe(false);
+  });
+});
+
+describe('migrateLegacyConfig', () => {
+  const fullLegacy: LegacyFlatProviderConfig = {
+    model: 'opus', effort: 'max', thinking: 'disabled', permissionMode: 'acceptEdits', maxTurns: 7,
+    appendSystemPrompt: 'Be terse.', allowedTools: ['Read'], disallowedTools: ['Bash'], env: { FOO: 'bar' },
+  };
+
+  it('carries every set legacy value over verbatim (lossless)', () => {
+    expect(migrateLegacyConfig(fullLegacy)).toEqual({
+      model: 'opus', effort: 'max', thinking: 'disabled', permissionMode: 'acceptEdits', maxTurns: 7,
+      appendSystemPrompt: 'Be terse.', allowedTools: ['Read'], disallowedTools: ['Bash'], env: { FOO: 'bar' },
+    });
+  });
+
+  it('is idempotent — feeding a ProviderConfig back in yields the same ProviderConfig', () => {
+    const once = migrateLegacyConfig(fullLegacy);
+    expect(migrateLegacyConfig(once)).toEqual(once);
+  });
+
+  it('fills missing fields with DEFAULT_PROVIDER_CONFIG (effective old defaults: effort xhigh, thinking adaptive)', () => {
+    expect(migrateLegacyConfig({})).toEqual(DEFAULT_PROVIDER_CONFIG);
+    const partial = migrateLegacyConfig({ model: 'sonnet' });
+    expect(partial.model).toBe('sonnet');
+    expect(partial.effort).toBe('xhigh');
+    expect(partial.thinking).toBe('adaptive');
+    expect(partial.permissionMode).toBe('bypassPermissions');
   });
 });
