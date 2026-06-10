@@ -1080,6 +1080,14 @@ body {
 }
 .settings__gear { padding: 5px 9px; line-height: 1; }
 .settings__gear.active { border-color: var(--accent); color: var(--accent); }
+/* Read-only permission-mode indicator in the composer (twin of the canvas PermModeHint chip, which is
+   hidden behind the focus view). Plain muted chip; bypass = red so "tools run unattended" is never silent. */
+.settings__perm {
+  font: inherit; font-size: 11px; font-weight: 600; color: var(--muted);
+  background: var(--bg-deep); border: 1px solid var(--border-sub); border-radius: 6px;
+  padding: 3px 7px; user-select: none; white-space: nowrap;
+}
+.settings__perm--danger { color: var(--red); border-color: var(--red); }
 .settings__backdrop { position: fixed; inset: 0; z-index: 49; }
 .settings--up .settings__panel { top: auto; bottom: calc(100% + 8px); left: 0; right: auto; max-height: 60vh; }
 .settings__panel {

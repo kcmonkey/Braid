@@ -1638,7 +1638,7 @@ function ChatView({
           {af.menu}
           <div className="composer__bar">
             <div className="composer__left">
-              {config && <SettingsControls config={config} onChange={onConfigChange} resolvedModel={resolvedModel} up onOpenMcp={onOpenMcp} />}
+              {config && <SettingsControls config={config} onChange={onConfigChange} resolvedModel={resolvedModel} up onOpenMcp={onOpenMcp} showPerm />}
               <AttachBar boardId={leafId} />
               <ImageBar boardId={leafId} />
             </div>
@@ -1870,12 +1870,13 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp }: 
 // In-canvas settings (M5): a model quick-switch dropdown + the resolved full model name + ⚙ gear.
 // Changes write through to global VS Code settings (host applies; see App.setConfigField).
 // `resolvedModel` is the full id from the last query's init message (e.g. claude-opus-4-8).
-function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp }: {
+function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, showPerm }: {
   config: BraidConfig;
   onChange: (patch: Partial<BraidConfig>) => void;
   resolvedModel: string | null;
   up?: boolean; // open the gear panel upward (when the controls sit at the bottom, e.g. the composer)
   onOpenMcp: () => void; // open the MCP servers manager from inside the gear panel
+  showPerm?: boolean; // show the read-only permission-mode indicator (composer only — the canvas chip is hidden behind the focus view)
 }) {
   const [open, setOpen] = useState(false);
   return (
@@ -1886,6 +1887,14 @@ function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp }: {
       >
         {MODEL_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
+      {/* Read-only permission-mode indicator: the canvas PermModeHint chip is hidden behind the focus
+          view, so surface the active mode here too. Switch via Shift+Tab or the ⚙ panel; bypass = red. */}
+      {showPerm && (
+        <span
+          className={`settings__perm${config.permissionMode === 'bypassPermissions' ? ' settings__perm--danger' : ''}`}
+          title={`Permission mode: ${PERM_DISPLAY[config.permissionMode] ?? config.permissionMode} — Shift+Tab to cycle, or change in the ⚙ panel`}
+        >{PERM_DISPLAY[config.permissionMode] ?? config.permissionMode}</span>
+      )}
       <button
         className={`btn settings__gear ${open ? 'active' : ''}`} title="Settings"
         onClick={() => setOpen((o) => !o)}
