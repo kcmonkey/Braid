@@ -1115,6 +1115,12 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
     {/* The board slot sizes to its card in BOTH LODs now (no fixed height): far cards are content-tight
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
+    {/* Branch label floats ABOVE the board, in the 'far-far' map view only. Rendered in node DOM so it
+        SCALES with the board (not a constant-size overlay → no overlap), and IN-FLOW (first slot child) so
+        the layout reserves vertical space for it and rows never collide. (Branch-Signposts) */}
+    {lod === 'far-far' && signpostLabel && (
+      <div className="board__toplabel nodrag nopan" title={signpostLabel}>{signpostLabel}</div>
+    )}
     <div
       className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''}`}
     >
@@ -1123,9 +1129,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           detail↔far switch. Handles stay OUTSIDE it so React Flow's cached handle geometry / edges
           are never disturbed (the classic handle-remount pitfall). */}
       <div className="board__content" key={lod}>
-      {/* Digest tags: content-hint chips on top of the card. Hidden in 'far-far' (the branch map) where
-          only the branch label shows. */}
-      {lod !== 'far-far' && <TagChips tags={data.tags} />}
+      {/* Digest tags: content-hint chips on the card. Shown at every LOD (incl. far-far) — they scale with
+          the board, so they read as the node's color hint on the branch map. */}
+      <TagChips tags={data.tags} />
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
         {/* Multi-turn board: M11 in-board follow-ups or an M12 fusion — show how many rounds it holds. */}
@@ -1133,14 +1139,13 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           <span className="board__fused" title={`${data.turns.length} rounds`}>⛓{data.turns.length}</span>
         )}
         {/* Title text by LOD: detail = the full question; far = the fused gist (clamped via CSS); far-far =
-            ONLY the branch label (signposts) — it replaces the gist and SCALES with the card, so it never
-            overlaps; a non-signpost node shows nothing (a bare badge chip). */}
+            nothing in the card (the branch label floats ABOVE the board via .board__toplabel; gist hidden). */}
         <span className="board__title">
           {isDetail
             ? (data.prompt ? data.prompt : data.compact ? 'Compacted context' : 'New board')
             : lod === 'far'
               ? farGist
-              : (signpostLabel ?? null) /* far-far: branch label only */}
+              : null /* far-far: gist hidden; the branch label floats above the board */}
         </span>
         {/* Needs-response: the model called AskUserQuestion and is blocked → icon badge prompting to open
             and answer (icon-only per memory ui-icon-only). Unread: finished but not yet viewed → red dot. */}
