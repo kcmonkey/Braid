@@ -1236,6 +1236,18 @@ body {
 .noticerow--error { border-color: var(--red); }
 .noticerow--error .noticerow__icon { color: var(--red); }
 .noticerow--done .noticerow__icon { color: var(--accent); }
+/* On-going section: boards still working (streaming) or held open for background work (waiting). Each row
+   is two lines — gist + a sub-line ("Generating…" / "2 background tasks running · 1 scheduled wakeup"). */
+.notice-panel__section { display: flex; flex-direction: column; gap: 6px; }
+.notice-panel__section + .notice-panel__section { margin-top: 4px; }
+.notice-panel__section-head { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); padding: 2px 4px; }
+.noticerow__col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.noticerow__gist { font-size: 12px; line-height: 1.4; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.noticerow__sub { font-size: 11px; line-height: 1.3; color: var(--muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.noticerow--streaming { border-color: var(--accent); }
+.noticerow--streaming .noticerow__icon { color: var(--accent); }
+.noticerow--waiting { border-color: var(--accent-soft); }
+.noticerow--waiting .noticerow__icon { color: var(--accent); }
 
 /* Last-resort render-error panel (ErrorBoundary): shown instead of a blank webview when a render
    throws. The graph is persisted host-side, so "Reload" re-runs `ready` and recovers it. */

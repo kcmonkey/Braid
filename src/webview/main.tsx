@@ -976,6 +976,11 @@ interface NoticeItem { id: string; gist: string; kind: 'ask' | 'perm' | 'error' 
 const noticeKind = (d: BoardData): NoticeItem['kind'] =>
   hasPendingAsk(d) ? 'ask' : hasPendingPermission(d) ? 'perm' : d.status === 'error' ? 'error' : 'done';
 
+// One row in the notification panel's "On-going" section: a board still working — actively generating
+// (streaming) or held open for background tasks / scheduled wakeups (waiting, 异步续接). Unlike NoticeItem
+// these are informational (no unread to clear) and self-clearing: the row vanishes when the board settles.
+interface OngoingItem { id: string; gist: string; status: 'streaming' | 'waiting'; detail: string }
+
 // One switchable branch option below a fork node in the focused chain (see App.focusBranches).
 interface BranchOpt { id: string; gist: string; followed: boolean; status: BoardData['status'] }
 
@@ -1976,11 +1981,13 @@ function McpPanel({ servers, busy, onReconnect, onClose }: {
 // programmatically cleared). It lists this canvas's boards needing attention, derived live from node
 // state (boardNeedsAttention). Click a row → LOCATE that board on the canvas (select + pulse), not jump
 // into the full-screen ChatView. Mirrors the McpPanel structure (backdrop + floating card).
-function NoticePanel({ notices, onOpen, onClose }: {
+function NoticePanel({ notices, ongoing, onOpen, onClose }: {
   notices: NoticeItem[];
+  ongoing: OngoingItem[];
   onOpen: (id: string) => void;
   onClose: () => void;
 }) {
+  const empty = notices.length === 0 && ongoing.length === 0;
   return (
     <>
       <div className="notice__backdrop" onClick={onClose} />
@@ -1990,22 +1997,51 @@ function NoticePanel({ notices, onOpen, onClose }: {
           <button className="notice-panel__x" title="Close" onClick={onClose}>×</button>
         </div>
         <div className="notice-panel__body">
-          {notices.length === 0 ? (
+          {empty ? (
             <div className="notice-panel__empty">
-              You're all caught up. Finished answers and pending questions show up here; click one to locate its board on the canvas.
+              You're all caught up. Running tasks, finished answers, and pending questions show up here; click one to locate its board on the canvas.
             </div>
           ) : (
-            notices.map((n) => (
-              <button
-                key={n.id}
-                className={`noticerow noticerow--${n.kind}`}
-                onClick={() => onOpen(n.id)}
-                title="Locate this board on the canvas"
-              >
-                <span className="noticerow__icon">{n.kind === 'ask' ? '❓' : n.kind === 'perm' ? '🔐' : n.kind === 'error' ? '⚠' : '✓'}</span>
-                <span className="noticerow__text">{n.gist}</span>
-              </button>
-            ))
+            <>
+              {/* On-going: boards still working — streaming, or held open for background tasks / scheduled
+                  wakeups (waiting). Informational; clicking locates the board, and the rows self-clear when
+                  the board settles. Headed only when there are also Attention items, to keep the split clear. */}
+              {ongoing.length > 0 && (
+                <div className="notice-panel__section">
+                  {notices.length > 0 && <div className="notice-panel__section-head">On-going ({ongoing.length})</div>}
+                  {ongoing.map((o) => (
+                    <button
+                      key={o.id}
+                      className={`noticerow noticerow--${o.status}`}
+                      onClick={() => onOpen(o.id)}
+                      title="Locate this board on the canvas"
+                    >
+                      <span className="noticerow__icon">{o.status === 'waiting' ? '⏱' : <span className="working__dot" />}</span>
+                      <span className="noticerow__col">
+                        <span className="noticerow__gist">{o.gist}</span>
+                        <span className="noticerow__sub">{o.detail}</span>
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {notices.length > 0 && (
+                <div className="notice-panel__section">
+                  {ongoing.length > 0 && <div className="notice-panel__section-head">Attention ({notices.length})</div>}
+                  {notices.map((n) => (
+                    <button
+                      key={n.id}
+                      className={`noticerow noticerow--${n.kind}`}
+                      onClick={() => onOpen(n.id)}
+                      title="Locate this board on the canvas"
+                    >
+                      <span className="noticerow__icon">{n.kind === 'ask' ? '❓' : n.kind === 'perm' ? '🔐' : n.kind === 'error' ? '⚠' : '✓'}</span>
+                      <span className="noticerow__text">{n.gist}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -2812,6 +2848,29 @@ function App() {
       .sort((a, b) => (b.data.seq ?? 0) - (a.data.seq ?? 0))
       .map((n) => ({ id: n.id, gist: boardGist(n.data), kind: noticeKind(n.data) })),
     [nodes]);
+
+  // Boards still working — actively generating (streaming) or held open for background tasks / scheduled
+  // wakeups (waiting, 异步续接), newest first. Surfaced as the notification panel's "On-going" section so
+  // every running task has one findable home. Excludes boards that already need attention (a streaming
+  // board mid canUseTool/AskUserQuestion shows in the Attention list instead) → no board appears twice and
+  // the badge never double-counts. This is a derived view, NOT part of the boardNeedsAttention SSOT, so the
+  // per-board red dot / editor-tab dot stay unaffected by running work.
+  const ongoing = useMemo<OngoingItem[]>(() =>
+    nodes
+      .filter((n) => !boardNeedsAttention(n.data) && (n.data.status === 'streaming' || n.data.status === 'waiting'))
+      .sort((a, b) => (b.data.seq ?? 0) - (a.data.seq ?? 0))
+      .map((n) => ({
+        id: n.id,
+        gist: boardGist(n.data),
+        status: n.data.status as 'streaming' | 'waiting',
+        detail: n.data.status === 'waiting'
+          ? (describeAsyncPending(n.data.asyncPending) || 'Background work running')
+          : 'Generating…',
+      })),
+    [nodes]);
+
+  // Bell badge count = attention items + on-going tasks (user opted to have running work light the bell too).
+  const noticeBadge = notices.length + ongoing.length;
 
   // Click a notification → LOCATE its board on the canvas (NOT the full-screen ChatView): close the
   // panel, select the board (so it expands to a detail card — the answer is readable & a pending
@@ -3623,9 +3682,9 @@ function App() {
         <button
           className={`btn ${noticePanelOpen ? 'active' : ''}`}
           onClick={() => setNoticePanelOpen((v) => !v)}
-          title={notices.length ? `Notifications (${notices.length})` : 'Notifications'}
+          title={noticeBadge ? `Notifications (${noticeBadge})` : 'Notifications'}
         >
-          <span className="tb-ico">🔔</span>{notices.length > 0 && <span className="btn__badge">{notices.length}</span>}
+          <span className="tb-ico">🔔</span>{noticeBadge > 0 && <span className="btn__badge">{noticeBadge}</span>}
         </button>
         <span className="toolbar__sep" />
         {config && <SettingsControls config={config} onChange={setConfigField} resolvedModel={resolvedModel} up onOpenMcp={toggleMcpPanel} />}
@@ -3686,7 +3745,7 @@ function App() {
       )}
 
       {noticePanelOpen && (
-        <NoticePanel notices={notices} onOpen={openNotice} onClose={() => setNoticePanelOpen(false)} />
+        <NoticePanel notices={notices} ongoing={ongoing} onOpen={openNotice} onClose={() => setNoticePanelOpen(false)} />
       )}
 
       {menu && (
