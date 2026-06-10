@@ -241,21 +241,25 @@ body {
    `position: relative` makes the board the offset parent for its handles, so the connection points stay
    centered on the BOARD (not on the whole node, whose center the in-flow label above would otherwise pull up). */
 .board.lod-far-far { position: relative; }
-.board.lod-far-far .board__head { border-bottom: none; padding: 4px 10px; gap: 6px; }
-.board.lod-far-far .board__head .board__tags { padding: 0; margin: 0; }
+.board.lod-far-far .board__head { border-bottom: none; padding: 5px 11px; gap: 8px; }
+.board.lod-far-far .board__head .board__tags { padding: 0; margin: 0; gap: 7px; }
+/* Far-far "labels" = the tag chips + type badge, blown up much LARGER so they're the prominent content of
+   the bar (this is the color-coded branch map; the summary above is a small caption). */
+.board.lod-far-far .tag { font-size: 24px; padding: 2px 11px; border-radius: 8px; letter-spacing: .02em; }
+.board.lod-far-far .board__turn { font-size: 19px; padding: 3px 11px; border-radius: 8px; }
 /* The summary floats above the thin board — TRANSPARENT (plain text, no plate). FIXED height (filled for
    signposts, empty for other nodes) so every far-far node box is the same height → all bars line up at the
    same level and connected bars are horizontal. Width matched to the board keeps the node ~320px wide
    (stable column spacing). The text is bottom-anchored (justify-content:flex-end) so it hugs the bar. */
 .board__toplabel {
-  width: 320px; max-width: 320px; height: 116px; margin-bottom: 8px; padding: 0 4px; box-sizing: border-box;
+  width: 320px; max-width: 320px; height: 64px; margin-bottom: 7px; padding: 0 4px; box-sizing: border-box;
   display: flex; flex-direction: column; justify-content: flex-end; align-items: center;
   background: none; cursor: default; user-select: none;
 }
-/* The label text — LARGE base font stays readable once the board scales down at far-far zoom; a 3-line
-   clamp fits longer branch titles. Quiet warm grey with a shadow for legibility over the canvas. */
+/* The summary text — SMALL caption above the bar (the tags/badge are the prominent label). A 3-line clamp
+   fits longer branch titles. Quiet warm grey with a shadow for legibility over the canvas. */
 .board__toplabel-text {
-  font-size: 30px; font-weight: 700; line-height: 1.22; text-align: center; color: #b3aea4;
+  font-size: 15px; font-weight: 700; line-height: 1.25; text-align: center; color: #b3aea4;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .9), 0 0 2px rgba(0, 0, 0, .95);
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
   overflow: hidden; overflow-wrap: break-word;

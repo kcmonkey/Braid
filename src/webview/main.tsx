@@ -22,7 +22,7 @@ import {
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
-import { layoutGraph, relayoutAnchored, type LayoutDir } from './layout';
+import { relayoutAnchored, type LayoutDir } from './layout';
 import type { HostMessage, WebviewMessage, McpServerInfo, BoardTag, SlashCommandSpec } from '../protocol';
 import { PROVIDER_CATALOG } from '../protocol';
 import { detectTrigger, filterCommands, applyCompletion, type Trigger } from './autofill';
@@ -2155,7 +2155,14 @@ function App() {
   // Layout uses each node's REAL measured height (detail-expanded boards are tall, far gists are short),
   // so the graph packs compactly and reflows whenever the selection (→ which boards are detail) changes.
   const autoLayout = useCallback((ns: BoardNodeT[], es: Edge[]) => {
-    return layoutGraph(ns, es, dirRef.current);
+    // Anchor the repack so the graph keeps its on-screen position instead of snapping back to origin.
+    // layoutGraph normalizes every layout to (0,0); relayoutAnchored's translations accumulate as the
+    // selection-driven fisheye reflows, so the graph's true coords DRIFT far from origin over a session.
+    // A raw layoutGraph here would wipe that drift in one frame while the viewport stays put → the whole
+    // graph jumps back toward origin and leaves the view ("boards pushed out of view"). Anchoring (pin the
+    // selected board, else the bbox top-left — same logic as the sizeSig effect) keeps every structural
+    // mutation (fork/merge/delete/drag/fuse/restore) on-screen; add-paths still reveal the new node after.
+    return relayoutAnchored(ns, es, dirRef.current, ns.find((n) => n.selected)?.id ?? null);
   }, []);
   // When direction flips, each node's handles move (Top/Bottom ↔ Left/Right). React Flow caches handle
   // geometry on mount, so without this the edges keep routing to the OLD handle positions (drawn from
@@ -3194,7 +3201,10 @@ function App() {
       dirRef.current = d;
       setDir(d); // re-render nodes so their handles follow the new direction (DirCtx)
       if (!hydratedRef.current) return;
-      setNodes((ns) => layoutGraph(ns, edgesRef.current, d));
+      // Anchor on flip too (don't snap to origin): a TB↔LR re-layout changes shape, but pinning the
+      // selected board / bbox top-left keeps the graph from flinging off-screen when the viewport is
+      // panned away from origin. (Same fly-out fix as autoLayout / the sizeSig effect.)
+      setNodes((ns) => relayoutAnchored(ns, edgesRef.current, d, ns.find((n) => n.selected)?.id ?? null));
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
