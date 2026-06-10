@@ -237,17 +237,21 @@ body {
 .board.lod-far .tag { font-size: 11px; }
 
 /* Far-far LOD (branch map): the board collapses to a THIN bar — one slim head row holding the type badge +
-   tags inline, no body. The branch summary floats ABOVE the bar (.board__toplabel). */
+   tags inline, no body. The branch summary floats ABOVE the bar (.board__toplabel).
+   `position: relative` makes the board the offset parent for its handles, so the connection points stay
+   centered on the BOARD (not on the whole node, whose center the in-flow label above would otherwise pull up). */
+.board.lod-far-far { position: relative; }
 .board.lod-far-far .board__head { border-bottom: none; padding: 4px 10px; gap: 6px; }
 .board.lod-far-far .board__head .board__tags { padding: 0; margin: 0; }
 /* The summary floats above the thin board — TRANSPARENT (plain text, no plate). Rendered in node DOM so it
    scales with the board; width matched to the board keeps the node ~320px wide (stable column spacing). A
-   2-line clamp keeps long branch titles tidy. Quiet warm grey with a shadow for legibility over the canvas. */
+   LARGE base font keeps it readable once the board scales down at far-far zoom; a 3-line clamp fits longer
+   branch titles. Quiet warm grey with a shadow for legibility over the canvas. */
 .board__toplabel {
-  width: 320px; max-width: 320px; margin-bottom: 6px; padding: 0 4px; box-sizing: border-box;
-  background: none; font-size: 19px; font-weight: 700; line-height: 1.25; text-align: center; color: #b3aea4;
+  width: 320px; max-width: 320px; margin-bottom: 8px; padding: 0 4px; box-sizing: border-box;
+  background: none; font-size: 30px; font-weight: 700; line-height: 1.22; text-align: center; color: #b3aea4;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .9), 0 0 2px rgba(0, 0, 0, .95);
-  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
   overflow: hidden; overflow-wrap: break-word; cursor: default; user-select: none;
 }
 /* M12: transient hint shown when a board is dropped on a non-fusable neighbor. */
