@@ -3,10 +3,20 @@
 A **VS Code extension** that turns your Claude Code conversations from a linear timeline into a **node-based canvas (DAG)**.
 
 <!--
-  Demo GIF. To (re)generate:
-    1) Record the flow scripted in media/demo/STORYBOARD.md (ScreenToGif, or OBS / Game Bar -> MP4).
-    2) Convert:  ./scripts/make-gif.ps1 -Source .\raw-demo.mp4 -Out .\media\demo\demo.gif
-  The image below renders automatically once that file exists.
+  ════════════════ DEMO GIFs ════════════════
+  Each <img> in this README renders automatically once its file exists in media/demo/.
+  Until you add a file, GitHub shows a broken-image icon there — that is expected.
+
+  Files to produce (shot list / beats: media/demo/STORYBOARD.md):
+    • media/demo/demo.gif    — full ~35s hero loop (all three moats)
+    • media/demo/merge.gif   — box-select two branches, dedupe-merge preview, confirm
+
+  How to produce one:
+    1) Record with ScreenToGif (exports a GIF directly) or OBS / Xbox Game Bar (-> MP4).
+    2) If you recorded MP4, convert with the bundled script (needs ffmpeg on PATH):
+         ./scripts/make-gif.ps1 -Source .\raw.mp4 -Out .\media\demo\demo.gif
+    3) Keep each GIF under ~10 MB (GitHub's inline limit). If too big: lower -Fps / -Width.
+  ════════════════════════════════════════════
 -->
 <p align="center">
   <img src="media/demo/demo.gif" alt="Braid — branch, dedupe-merge, and collapse Claude Code conversations on a canvas" width="840">
@@ -29,6 +39,11 @@ Braid solves this with three ideas:
 - **Canvas + DAG** — every fork is a visible node, so the shape of the discussion is the shape of the graph.
 - **Dedupe-merge** — select branches and start a new conversation seeded with their *unique* combined context (shared ancestors are sent only once).
 - **Collapsed summaries** — zoom out to read one-line gists; zoom in to read full transcripts.
+
+<!-- merge.gif — record: box-select two branches; merge preview drawer (dedup stats); confirm; merged board streams. -->
+<p align="center">
+  <img src="media/demo/merge.gif" alt="Box-selecting two branches and dedupe-merging their combined context" width="820">
+</p>
 
 ---
 
@@ -78,10 +93,11 @@ Configure model, thinking effort, permission mode, and more — either through n
 
 ## Requirements
 
-- **Claude Code CLI**, signed in to a **subscription account** (`claude login`). The CLI must be reachable.
+- A **Claude subscription**, signed in once (`claude login` — via the Claude Code CLI or the official extension). The OAuth token lives in `~/.claude`; Braid reuses it.
 - **`ANTHROPIC_API_KEY` must NOT be set** in your environment. If it is, the SDK switches to **metered API billing** instead of your subscription — the single most common pitfall. (See [Authentication & billing](#authentication--billing).)
-- **Node.js 18+** to build.
-- **VS Code 1.90+**.
+- **VS Code 1.90+** (and **Node.js 18+** only if building from source).
+
+Braid does **not** bundle Anthropic's Claude Agent SDK or its CLI binary. On first use it downloads the SDK (incl. the binary for your platform) from Anthropic's **official npm registry** into the extension's storage — a one-time, consented setup, after which it updates itself silently. Nothing Anthropic-licensed is redistributed inside the `.vsix`.
 
 ---
 
@@ -111,7 +127,7 @@ npm run package    # produces braid-0.0.1.vsix
 npm run deploy     # package + install into your VS Code
 ```
 
-> The packaged `.vsix` bundles the platform-specific Claude Code binary, so it is **not cross-platform** — package on the OS you'll install it on.
+> The `.vsix` ships **no** Anthropic code — it's a few MB and **cross-platform**. On first use each install downloads the Claude Agent SDK (and the binary matching that machine's OS/arch) from the official npm registry into the extension's global storage, then keeps it updated silently. The packaging step regenerates `media/sdk-manifest.json` (official tarball URLs + sha512) via `npm run gen-manifest` whenever the pinned SDK version changes.
 
 ---
 
@@ -152,7 +168,7 @@ All settings live under `braid.*`:
 - **TypeScript**, bundled by **esbuild** into two outputs:
   - `extension` — Node / CJS (the VS Code extension host).
   - `webview` — browser / IIFE (the React Flow canvas).
-- The Claude Agent SDK is marked **runtime-external** and imported dynamically from `node_modules`, so the large platform binary isn't bundled.
+- The Claude Agent SDK is **never bundled**: it's provisioned at runtime from the official npm registry into the extension's global storage (versioned dirs + a `current` pointer, so background updates swap in atomically), then dynamically imported from there. In the dev host (F5) it falls back to the repo's `node_modules`.
 - The webview's in-memory graph is the **single source of truth**; the extension host acts as a persistence proxy (VS Code `workspaceState`) and the only component that talks to the SDK.
 
 ### Key files

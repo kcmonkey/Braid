@@ -6,6 +6,8 @@ import type { SerializedGraph, EditorContext } from './webview/merge';
 import { EDITOR_CONTEXT_CAP } from './webview/merge';
 import type { BraidConfig } from './sdkOptions';
 import { EngineHost } from './engine/host';
+import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry } from './runtime/sdk-provision';
+import { ensureSdkInstalled } from './runtime/sdk-download';
 import type { EventSink, PreToolInterceptor, PreToolDecision, TurnRequest, Attach, TurnHandle, McpController, CompactResult } from './engine/types';
 
 // ---- Multi-canvas model (M5) ----
@@ -65,9 +67,17 @@ const ASK_CANCEL_REASON = '[The user canceled the question without making a sele
 // `mcpOpen`, disposed on `mcpClose` / panel dispose — so docker MCP gateway etc. never idle-run.
 const mcpControls = new Map<string, McpController>();
 
+// Where a runtime-provisioned SDK lives (globalStorage/sdk). Set in activate() once we have the
+// extension context; read lazily by the engine's SDK loader. Undefined until activate → dev/F5 falls
+// back to the bundled bare import. (plans/Distributable Shape 2)
+let provisionedSdkDir: string | undefined;
+let extensionPathForSdk: string | undefined; // install dir → where media/sdk-manifest.json ships
+let isDevMode = false;                        // F5/dev host → use bundled SDK, never download
+let provisioningPromise: Promise<boolean> | null = null; // single in-flight download (dedupes activate + first send)
+
 // The engine middle layer (only ClaudeAdapter registered). The host routes all SDK-backed work —
 // turns / compact / summary / MCP control / auth probe — through it. (plans/Engine-Abstraction)
-const engineHost = new EngineHost({ readConfig });
+const engineHost = new EngineHost({ readConfig, getSdkInstallDir: () => provisionedSdkDir });
 
 // Notifications are entirely webview-side now: an in-canvas notification panel derived from each board's
 // unread / pending-ask state (which self-clears when the user opens the board). The host keeps no
@@ -111,6 +121,13 @@ const isFileEditor = (e: vscode.TextEditor | undefined): e is vscode.TextEditor 
   !!e && e.document.uri.scheme === 'file';
 
 export function activate(context: vscode.ExtensionContext) {
+  provisionedSdkDir = sdkInstallDir(context.globalStorageUri.fsPath);
+  extensionPathForSdk = context.extensionPath;
+  isDevMode = context.extensionMode === vscode.ExtensionMode.Development;
+  // Provision the SDK up front (at startup), not lazily on first send: a fresh install downloads now with
+  // a progress notification; an existing (older) install updates silently in the background.
+  if (!sdkPresent()) void ensureSdkReady();
+  else void maybeBackgroundUpdateSdk();
   treeProvider = new CanvasTreeProvider(context);
   if (isFileEditor(vscode.window.activeTextEditor)) lastFileEditor = vscode.window.activeTextEditor;
   context.subscriptions.push(
@@ -177,6 +194,29 @@ async function checkEnvironment() {
   out.appendLine(hasApiKey
     ? '• ANTHROPIC_API_KEY: set ⚠️  Subscription users should clear it — it switches billing from the subscription to the metered API.'
     : '• ANTHROPIC_API_KEY: unset ✓  (using subscription auth)');
+
+  // Claude SDK provisioning (Shape 2): the SDK is downloaded from Anthropic's official npm registry into
+  // this extension's global storage — never bundled. Report where/which version, then make sure it's ready.
+  if (isDevMode) {
+    out.appendLine('• Claude SDK: bundled (development host) ✓');
+  } else if (provisionedSdkDir && extensionPathForSdk) {
+    const manifest = loadManifest(extensionPathForSdk);
+    const target = manifest?.version ?? '(manifest missing)';
+    const current = readCurrentVersion(provisionedSdkDir);
+    if (manifest && isProvisioned(provisionedSdkDir, manifest.version)) {
+      out.appendLine(`• Claude SDK: installed ✓  v${current} at ${provisionedSdkDir}`);
+    } else if (current) {
+      out.appendLine(`• Claude SDK: v${current} installed; will update to v${target} in the background.`);
+    } else {
+      out.appendLine(`• Claude SDK: not installed yet (target v${target}) — fetched from Anthropic's official registry on first use.`);
+    }
+  }
+  const sdkOk = await ensureSdkReady();
+  if (!sdkOk) {
+    out.appendLine('• Claude SDK: setup was declined or failed ✗  Cannot test the connection.');
+    vscode.window.showWarningMessage('Braid: the Claude SDK is not set up yet. Run "Braid: Check Environment" again to download it.');
+    return;
+  }
 
   await vscode.window.withProgress(
     { location: vscode.ProgressLocation.Notification, title: 'Braid: testing connection…', cancellable: true },
@@ -706,12 +746,87 @@ function toAttach(msg: { resume?: string; fork?: boolean; resumeAt?: string }): 
 }
 
 /**
+ * Phase 2 silent update: if a *previously-provisioned* (older) SDK is present, quietly bring it up to the
+ * pinned version in the background — download the new version alongside, smoke-test, flip the pointer.
+ * No progress UI (the existing version keeps working), and failures are swallowed (retried next activate).
+ * A fresh machine with no SDK is NOT handled here — activate kicks ensureSdkReady() instead, which shows a
+ * download progress notification for that first fetch.
+ */
+async function maybeBackgroundUpdateSdk(): Promise<void> {
+  if (isDevMode || !provisionedSdkDir || !extensionPathForSdk) return;
+  const manifest = loadManifest(extensionPathForSdk);
+  if (!manifest) return;
+  if (isProvisioned(provisionedSdkDir, manifest.version)) return;     // already current
+  if (!readCurrentVersion(provisionedSdkDir)) return;                  // nothing installed yet → not an update
+  try {
+    await ensureSdkInstalled(provisionedSdkDir, manifest);            // background: no progress, no consent
+    console.log(`[Braid] SDK silently updated to ${manifest.version}`);
+  } catch (e: any) {
+    console.error('[Braid] background SDK update failed (keeping current):', e?.message ?? e);
+  }
+}
+
+/** Is a usable SDK available right now? (dev host, or some provisioned version resolves.) */
+function sdkPresent(): boolean {
+  return isDevMode || (!!provisionedSdkDir && !!resolveSdkEntry(provisionedSdkDir));
+}
+
+/**
+ * Ensure a usable Claude Agent SDK is present, downloading it from Anthropic's official npm registry if
+ * not. Kicked proactively at activate (startup) and also awaited before the first SDK-backed op — the two
+ * share ONE in-flight download via `provisioningPromise`, so it never downloads twice. The download shows
+ * a non-blocking progress notification (which doubles as the disclosure that we're fetching the SDK).
+ * Returns true once the SDK is ready; false if it couldn't be provisioned. (plans/Distributable P1)
+ */
+function ensureSdkReady(): Promise<boolean> {
+  if (sdkPresent()) return Promise.resolve(true);
+  if (!provisionedSdkDir || !extensionPathForSdk) return Promise.resolve(false);
+  const manifest = loadManifest(extensionPathForSdk);
+  if (!manifest) return Promise.resolve(true); // no manifest (unexpected) → fall back to bare import
+  if (!provisioningPromise) {
+    provisioningPromise = runProvision(manifest).finally(() => { provisioningPromise = null; });
+  }
+  return provisioningPromise;
+}
+
+async function runProvision(manifest: NonNullable<ReturnType<typeof loadManifest>>): Promise<boolean> {
+  try {
+    await vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: 'Braid: downloading the Claude SDK from Anthropic’s official registry…', cancellable: true },
+      async (progress, token) => {
+        const ac = new AbortController();
+        token.onCancellationRequested(() => ac.abort());
+        let last = 0;
+        await ensureSdkInstalled(provisionedSdkDir!, manifest, {
+          signal: ac.signal,
+          onProgress: (message, done, total) => {
+            progress.report({ message, increment: ((done - last) / total) * 100 });
+            last = done;
+          },
+        });
+      },
+    );
+    return true;
+  } catch (e: any) {
+    const retry = await vscode.window.showErrorMessage(
+      `Braid: Claude SDK setup failed — ${String(e?.message ?? e)}`, 'Retry',
+    );
+    return retry === 'Retry' ? runProvision(manifest) : false;
+  }
+}
+
+/**
  * One Board turn (burst) driven through the engine middle layer. The host owns the AbortController +
  * the aborters/liveQueries maps; the ClaudeAdapter owns the SDK loop / streaming-input lifecycle and
  * reports via the canvas-bound sink. `onLive` registers the live handle the instant it's ready (once the
  * engine's query stream is open) — matching the pre-refactor mid-loop liveQueries.set. (plans/Engine-Abstraction)
  */
 async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId: string) {
+  if (!(await ensureSdkReady())) {
+    makeSink(canvasId).error(msg.boardId, msg.turnIndex ?? 0,
+      'Claude SDK is not set up yet. Run “Braid: Check Environment” to download it, then resend.');
+    return;
+  }
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   const abort = new AbortController();
   const k = aKey(canvasId, msg.boardId);

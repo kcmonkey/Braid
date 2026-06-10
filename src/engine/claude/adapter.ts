@@ -10,9 +10,11 @@ import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle,
   McpController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
 } from '../types';
+import { pathToFileURL } from 'url';
 import {
   reduceClaudeMessage, buildTurnDone, initParseState, turnView, extractText,
 } from './reduce';
+import { resolveSdkEntry } from '../../runtime/sdk-provision';
 
 const SUMMARY_MODEL = 'claude-haiku-4-5-20251001'; // M3 collapsed-summary model (cheap + fast)
 
@@ -21,8 +23,22 @@ export interface ClaudeAdapterDeps {
   readConfig(): BraidConfig;
 }
 
-/** Default SDK loader — the ESM SDK dynamically imported into the CJS extension bundle. */
-export async function loadClaudeSdk(): Promise<any | null> {
+/**
+ * Default SDK loader — the ESM SDK dynamically imported into the CJS extension bundle. Dual-path:
+ *  1) a runtime-provisioned install under globalStorage (the packaged distribution — the vsix ships no
+ *     Anthropic code; `opts.installDir` points at it once Phase 1 has fetched the SDK), then
+ *  2) a bare import resolved from the bundle's node_modules (dev / F5 from the repo).
+ * Returns null only if neither resolves (→ host triggers provisioning).
+ */
+export async function loadClaudeSdk(opts?: { installDir?: string }): Promise<any | null> {
+  const entry = resolveSdkEntry(opts?.installDir);
+  if (entry) {
+    try {
+      return await import(pathToFileURL(entry).href);
+    } catch (e: any) {
+      console.error('[Braid] provisioned SDK import failed, falling back to bundled:', e?.message ?? e);
+    }
+  }
   try {
     return await import('@anthropic-ai/claude-agent-sdk');
   } catch (e: any) {

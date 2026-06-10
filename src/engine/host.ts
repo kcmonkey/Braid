@@ -7,8 +7,13 @@ import { ClaudeAdapter, loadClaudeSdk } from './claude/adapter';
 export class EngineHost {
   private readonly engines = new Map<EngineId, Engine>();
 
-  constructor(deps: { readConfig(): BraidConfig }) {
-    this.engines.set('claude', new ClaudeAdapter({ loadSdk: loadClaudeSdk, readConfig: deps.readConfig }));
+  // `getSdkInstallDir` is read lazily on every load (the EngineHost is constructed at module-load,
+  // before activate() knows globalStorage) — so the provisioned SDK location can be set later.
+  constructor(deps: { readConfig(): BraidConfig; getSdkInstallDir?(): string | undefined }) {
+    this.engines.set('claude', new ClaudeAdapter({
+      loadSdk: () => loadClaudeSdk({ installDir: deps.getSdkInstallDir?.() }),
+      readConfig: deps.readConfig,
+    }));
   }
 
   get(id: EngineId = 'claude'): Engine {

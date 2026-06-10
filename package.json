@@ -328,12 +328,14 @@
     "watch": "node esbuild.mjs --watch",
     "test": "vitest run",
     "test:watch": "vitest",
+    "gen-manifest": "node scripts/gen-sdk-manifest.mjs",
     "package": "npx --yes @vscode/vsce package --allow-missing-repository",
     "deploy": "npm run package && code --install-extension braid-0.0.1.vsix --force",
     "vscode:prepublish": "node esbuild.mjs"
   },
   "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.170"
+    "@anthropic-ai/claude-agent-sdk": "^0.3.170",
+    "tar": "^7.5.16"
   },
   "devDependencies": {
     "@dagrejs/dagre": "^3.0.0",

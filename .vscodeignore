@@ -16,6 +16,12 @@ CLAUDE.md
 .vscode/**
 .vscode-test/**
 
+# Anthropic Claude Agent SDK + its platform binaries — © Anthropic, All Rights Reserved (not ours to
+# redistribute). Shape 2: provisioned at runtime from the official npm registry into globalStorage,
+# never shipped in the vsix. (plans/Distributable)
+node_modules/@anthropic-ai/claude-agent-sdk/**
+node_modules/@anthropic-ai/claude-agent-sdk-*/**
+
 # Misc
 *.vsix
 **/.DS_Store
