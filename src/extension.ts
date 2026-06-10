@@ -436,6 +436,9 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
     case 'summarize':
       await runSummaryHost(msg, canvasId);
       break;
+    case 'branchSummarize':
+      await runBranchSummaryHost(msg, canvasId);
+      break;
     case 'compact':
       await runCompactHost(msg, canvasId);
       break;
@@ -450,6 +453,13 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       if (h) { try { await h.interrupt(); } catch { /* fall through to hard abort */ } }
       aborters.get(k)?.abort();
       aborters.delete(k);
+      break;
+    }
+    case 'stopWaiting': {
+      // Async continuation: end a board's waiting hold (Stop-waiting button). Close the held session via the
+      // live handle → stop in-flight background tasks + finalize the board to 'done'. (AD5/AD8, 异步续接)
+      const h = liveQueries.get(aKey(canvasId, msg.boardId));
+      if (h) { try { await h.stopWaiting(); } catch (e: any) { console.error('[Braid] stopWaiting failed:', e?.message ?? e); } }
       break;
     }
     case 'followup': {
@@ -750,7 +760,7 @@ function restoreRolledBackFiles(canvasId: string, boardIds: string[]) {
 }
 
 // The provider-NEUTRAL canvas keys (kept as flat `braid.*` settings, outside the provider hierarchy).
-const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'expandAncestorsOnSelect'];
+const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin'];
 
 /** Read the legacy flat `braid.*` provider keys (pre-multi-provider). Fallbacks reproduce the OLD package.json
  * per-key defaults (effort 'xhigh', thinking 'adaptive', …) so an unconfigured install migrates to identical
@@ -789,6 +799,8 @@ function readSettings(): BraidSettings {
     autoCompactEnabled: c.get<boolean>('autoCompactEnabled', DEFAULT_CANVAS_CONFIG.autoCompactEnabled),
     autoCompactThreshold: c.get<number>('autoCompactThreshold', DEFAULT_CANVAS_CONFIG.autoCompactThreshold),
     expandAncestorsOnSelect: c.get<boolean>('expandAncestorsOnSelect', DEFAULT_CANVAS_CONFIG.expandAncestorsOnSelect),
+    asyncContinuationEnabled: c.get<boolean>('asyncContinuationEnabled', DEFAULT_CANVAS_CONFIG.asyncContinuationEnabled),
+    asyncContinuationIdleCapMin: c.get<number>('asyncContinuationIdleCapMin', DEFAULT_CANVAS_CONFIG.asyncContinuationIdleCapMin),
   };
   return { activeProvider, providers: { claude: readProviderConfig(c, 'claude') }, canvas };
 }
@@ -945,10 +957,10 @@ function makeSink(canvasId: string): EventSink {
     // Live slash-command refresh (commands_changed) → update the host cache + push to this canvas. The
     // cold-start list is served by the getSlashCommands handler (Phase 2).
     commands: (commands) => { slashCommandsCache = commands; postTo(canvasId, { type: 'slashCommands', commands }); },
-    // Async continuation (异步续接). Wired to webview protocol messages in Async-Continuation Phase 1;
-    // engine emits them now (Phase 0). Stubbed as no-ops so the build stays green until Phase 1.
-    waiting: () => { /* Phase 1: postTo(canvasId, { type: 'waiting', boardId, turnIndex, pending }) */ },
-    task: () => { /* Phase 1: postTo(canvasId, { type: 'taskNotification', boardId, turnIndex, ev }) */ },
+    // Async continuation (异步续接): a board held open for background tasks / scheduled wakeups, and the
+    // folded task lifecycle events for chip display. The webview renders the 'waiting' state + chips.
+    waiting: (boardId, turnIndex, pending) => postTo(canvasId, { type: 'waiting', boardId, turnIndex, pending }),
+    task: (boardId, turnIndex, ev) => postTo(canvasId, { type: 'task', boardId, turnIndex, ev }),
   };
 }
 
@@ -1102,6 +1114,7 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
   aborters.set(k, abort);
   const sink = makeSink(canvasId);
   const pre = makePreToolInterceptor(canvasId, msg.boardId, abort.signal);
+  const canvas = readSettings().canvas;
   const req: TurnRequest = {
     boardId: msg.boardId,
     attach: toAttach(msg),
@@ -1109,12 +1122,19 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
     images: msg.images,
     turnIndex: msg.turnIndex,
     cwd,
+    // Async continuation (异步续接): hold the session open for in-flight background tasks / scheduled
+    // wakeups, capped by the configured idle timeout (minutes → ms). (AD5)
+    asyncContinuation: canvas.asyncContinuationEnabled,
+    idleCapMs: Math.max(1, canvas.asyncContinuationIdleCapMin) * 60_000,
   };
   try {
     await engineHost.getActive().runTurn(req, sink, pre, { abort, onLive: (h: TurnHandle) => liveQueries.set(k, h) });
   } finally {
     liveQueries.delete(k);
     aborters.delete(k);
+    // Async continuation: runTurn resolved ⇒ the held session (if any) has fully closed → finalize the
+    // board from 'waiting' back to 'done' (empty pending = clear). No-op if it never entered 'waiting'.
+    postTo(canvasId, { type: 'waiting', boardId: msg.boardId, turnIndex: msg.turnIndex ?? 0, pending: { background: [], crons: [] } });
   }
 }
 
@@ -1132,6 +1152,20 @@ async function runSummaryHost(msg: Extract<WebviewMessage, { type: 'summarize' }
     // stuck spinner and its bounded-retry kicks in, instead of the board hanging on "Summarizing…" forever.
     console.error('[Braid] summarize failed:', e?.message ?? e);
     postTo(canvasId, { type: 'summary', boardId: msg.boardId, summary: '' });
+  }
+}
+
+/** Branch-Signposts: synthesize a signpost node's one-line branch label. Mirrors runSummaryHost — ALWAYS
+ * posts a `branchSummary` reply (even empty / on throw) so the webview clears its in-flight flag and the
+ * bounded retry kicks in, never hanging the label on "…". */
+async function runBranchSummaryHost(msg: Extract<WebviewMessage, { type: 'branchSummarize' }>, canvasId: string) {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  try {
+    const { text } = await engineHost.getActive().branchSummary({ cwd, text: msg.text });
+    postTo(canvasId, { type: 'branchSummary', boardId: msg.boardId, text });
+  } catch (e: any) {
+    console.error('[Braid] branch summarize failed:', e?.message ?? e);
+    postTo(canvasId, { type: 'branchSummary', boardId: msg.boardId, text: '' });
   }
 }
 

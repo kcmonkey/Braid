@@ -32,6 +32,14 @@ export interface CanvasConfig {
   // Fisheye LOD (decisions.md 2026-06-09): when true, selecting a board expands it AND its whole
   // ancestor lineage to detail; when false, only the selected board itself. Webview-only display behavior.
   expandAncestorsOnSelect: boolean;
+  // Async continuation (异步续接): hold a board's session open after a turn settles while the engine reports
+  // in-flight background tasks / scheduled wakeups, so the SDK's in-process re-invocation streams in as a new
+  // round (instead of the board dead-ending at `done`). Off ⇒ today's immediate close. Consumed host-side
+  // → TurnRequest.asyncContinuation.
+  asyncContinuationEnabled: boolean;
+  // Safety cap (minutes): close a held-open (waiting) session after this much inactivity. Mechanism lives in
+  // the adapter; this is the policy knob (principle 14). → TurnRequest.idleCapMs.
+  asyncContinuationIdleCapMin: number;
 }
 
 /** Flat webview-facing config view = the active provider's ProviderConfig ∪ the CanvasConfig.
@@ -62,6 +70,8 @@ export const DEFAULT_CANVAS_CONFIG: CanvasConfig = {
   autoCompactEnabled: true,
   autoCompactThreshold: 95,
   expandAncestorsOnSelect: true,
+  asyncContinuationEnabled: true,
+  asyncContinuationIdleCapMin: 30,
 };
 
 /** The legacy flat provider keys (pre-multi-provider `braid.model`, `braid.effort`, …) as read from config.

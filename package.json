@@ -71,6 +71,18 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "When you select a board, also expand its whole parent lineage (ancestors) to the full detail card — a fisheye that shows the conversation you're on. Turn off to expand only the selected board itself (its ancestors stay compact). Idle compose boards always render in detail regardless."
+        },
+        "braid.asyncContinuationEnabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Async continuation: when a turn ends while a background task is still running (`run_in_background`) or a wakeup is scheduled (`ScheduleWakeup` / `/loop`), keep the board's session open so Claude automatically continues that board when the task finishes or the wakeup fires — instead of the board dead-ending at 'done'. Turn off to close every turn immediately (background work then never reports back). You can always end a wait early with the board's Stop-waiting button."
+        },
+        "braid.asyncContinuationIdleCapMin": {
+          "type": "number",
+          "default": 30,
+          "minimum": 1,
+          "maximum": 1440,
+          "markdownDescription": "Safety cap (minutes): a board left waiting on async work with no activity for this long is closed automatically. Only applies when `asyncContinuationEnabled` is on. Default `30`."
         }
       }
     },

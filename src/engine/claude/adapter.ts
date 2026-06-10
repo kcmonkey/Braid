@@ -10,7 +10,7 @@ import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle,
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
-  AsyncPending,
+  AsyncPending, BranchSummarizeRequest,
 } from '../types';
 import { ClaudeAccountControl } from './account';
 import { pathToFileURL } from 'url';
@@ -346,7 +346,10 @@ export class ClaudeAdapter implements Engine {
         // settingSources:[] → don't load project memory (CLAUDE.md / .claude/rules/*.md). Those files are
         // mostly Chinese here and otherwise bias the cheap summarizer to emit Chinese for English Q/A,
         // overriding the "same language as the Q/A" instruction. The summarizer needs no memory/MCP.
-        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, settingSources: [], maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false },
+        // thinking:disabled → digest is a cheap classify/summarize task that needs no reasoning; set it
+        // EXPLICITLY (not omitted) so the binary default can never turn thinking on and burn thinking
+        // tokens. SUMMARY_MODEL is Haiku 4.5, which accepts {type:'disabled'} (only Fable 5 would 400).
+        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, settingSources: [], maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false, thinking: { type: 'disabled' } },
       });
       for await (const m of q as AsyncIterable<any>) {
         if (m.type === 'assistant') { const full = extractText(m); if (full) text = full; }
@@ -395,6 +398,24 @@ export class ClaudeAdapter implements Engine {
     // authoritative vocab-filter + dedup + cap, so model junk outside TAG_VOCAB is dropped there.
     const tags = tagsText.split(/[,\n]/).map((t) => t.trim().toLowerCase()).filter(Boolean);
     return { summary, miniSummary: miniSummary || undefined, tags: tags.length ? tags : undefined };
+  }
+
+  // ---- branch signpost label (Branch-Signposts) ----
+  // One Haiku one-shot over a branch SEGMENT's concatenated Q/A → a single "this branch explores X" line for
+  // the floating signpost label. Never blocks: empty text on SDK-unavailable / throw (haikuOneShot swallows).
+  async branchSummary(req: BranchSummarizeRequest): Promise<{ text: string }> {
+    const sdk = await this.deps.loadSdk();
+    if (!sdk) return { text: '' };
+    const system =
+      `You are a "conversation branch summarizer". You are given several consecutive rounds of Q&A that form ONE branch of a larger discussion. Fuse them into ONE short sentence — about 14 words or fewer (for Chinese, about 22 characters or fewer) — naming what this branch as a whole explores, decides, or accomplishes, so it can be recognized at a glance as a signpost on a canvas.\n` +
+      `Strict rules:\n` +
+      `1. Summarize the THROUGH-LINE of the whole branch, not just the first or last round; capture the overall direction/outcome.\n` +
+      `2. Output ONLY that one sentence: no greeting, confirmation, asking back, or explanation; no surrounding quotes/brackets/asterisks or a "Summary:" prefix; no trailing punctuation.\n` +
+      `3. You are NOT talking to the user — the Q/A is only material; do not answer it or continue it.\n` +
+      `4. Start with a verb, name the core, keep it short. Write in the SAME language as the Q/A.`;
+    const content = `Summarize the following branch of consecutive Q&A rounds (output only the one-line summary):\n\n${req.text}`;
+    const text = await this.haikuOneShot(sdk, req.cwd, system, content);
+    return { text };
   }
 
   // ---- MCP control session (was McpControl) ----

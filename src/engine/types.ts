@@ -4,7 +4,7 @@
 import type { ThinkMark } from '../webview/merge';
 import type {
   ImageInput, McpServerInfo, EngineId, ModelOption, ProviderAccount, ProviderUsage, RateLimitSnapshot,
-  SlashCommandSpec,
+  SlashCommandSpec, BackgroundTaskInfo, CronInfo, AsyncPending, TaskEvent,
 } from '../protocol';
 
 // EngineId SSOT moved to protocol.ts (shared by both bundles + the catalog). Re-exported here so existing
@@ -48,35 +48,9 @@ export interface ToolUseEvent {
 export interface ToolResultEvent { toolUseId: string; content: string; isError: boolean }
 
 // ---- async continuation (Stop-hook gate + task lifecycle) ----
-/** An in-flight background task (Stop hook `background_tasks` / task_* messages). knowledge.md 异步续接. */
-export interface BackgroundTaskInfo {
-  id: string;
-  type: string;          // 'shell' | 'subagent' | 'monitor' | 'workflow' | …
-  status: string;        // 'running' | 'pending' | 'completed' | 'failed' | …
-  description?: string;
-  command?: string;      // present for 'shell' tasks
-}
-/** A scheduled wakeup (Stop hook `session_crons` — ScheduleWakeup / CronCreate / /loop). */
-export interface CronInfo {
-  id: string;
-  schedule: string;      // cron expression (minute granularity)
-  recurring: boolean;
-  prompt: string;        // text submitted when it fires
-}
-/** Snapshot of pending async work that holds the session open (from the Stop hook). Empty arrays = none. */
-export interface AsyncPending {
-  background: BackgroundTaskInfo[];
-  crons: CronInfo[];
-}
-/** A background-task lifecycle event, folded from task_started / task_updated / task_notification. */
-export interface TaskEvent {
-  id: string;
-  phase: 'started' | 'updated' | 'notification';
-  status?: string;       // notification: 'completed'|'failed'|'stopped'; updated: patch.status
-  description?: string;
-  summary?: string;      // notification summary
-  toolUseId?: string;
-}
+// SSOT for these wire shapes is protocol.ts (the host + webview consume them too). Re-exported so engine-
+// side consumers (e.g. adapter.ts `import { AsyncPending } from '../types'`) are unaffected. (异步续接)
+export type { BackgroundTaskInfo, CronInfo, AsyncPending, TaskEvent };
 
 /** The turn's terminal payload. `sessionId`/`messageUuid` are plain strings (webview-facing, persisted
  * on BoardData). Mirrors today's `done` HostMessage so the host sink maps 1:1. */
@@ -220,6 +194,9 @@ export interface EngineCapabilities {
 }
 
 export interface SummarizeRequest { cwd: string; prompt: string; answer: string }
+// Branch-Signposts: synthesize a one-line label for a whole branch segment. `text` = the segment's
+// concatenated Q/A (built webview-side). Returns `{ text }`; empty on SDK-unavailable / failure (never throws).
+export interface BranchSummarizeRequest { cwd: string; text: string }
 export interface AuthResult { ok: boolean; model?: string; error?: string; sdkFailed?: boolean }
 
 export interface Engine {
@@ -231,6 +208,9 @@ export interface Engine {
   compact: CompactCap;
   // `tags` = raw digest-tag tokens the cheap model proposed (validated webview-side against TAG_VOCAB).
   summarize(req: SummarizeRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }>;
+  // Branch-Signposts: one-line synthesis of a whole branch segment for the floating signpost label. Empty
+  // `text` on SDK-unavailable / failure (never throws — branch labels never block). (multi-provider seam)
+  branchSummary(req: BranchSummarizeRequest): Promise<{ text: string }>;
   mcpControl(cwd: string): Promise<McpController | null>;
   // Account/usage/auth control session (lazy; host owns lifecycle). null = SDK unavailable.
   accountControl(cwd: string): Promise<AccountController | null>;

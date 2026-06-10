@@ -7,6 +7,7 @@ import {
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
+  isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, BRANCH_SUMMARY_VERSION,
 } from './merge';
 
 const noop = () => {};
@@ -267,6 +268,90 @@ describe('continuationChildren / descendToFork (ChatView downward nav)', () => {
   it('descendToFork does not follow a merge edge (merge product is not a continuation)', () => {
     const edges = [forkEdge('a', 'b'), mergeEdge('b', 'm')];
     expect(descendToFork('a', edges)).toBe('b'); // stops at b — its only child is a merge edge
+  });
+});
+
+describe('branch signposts (isSignpost / branchSegment)', () => {
+  // root → a → F, then F forks into c (→ c2) and d. Plus a compact branch root2 → x → K(compact),
+  // and a merge node M(merged) with parents p1,p2 and a fork child z.
+  const nodes = [
+    node('root', 0), node('a', 1), node('F', 2), node('c', 3), node('c2', 4), node('d', 5),
+    node('root2', 6), node('x', 7), node('K', 8, { compact: true }),
+    node('p1', 9), node('p2', 10), node('M', 11, { merged: true }), node('z', 12),
+  ];
+  const edges = [
+    forkEdge('root', 'a'), forkEdge('a', 'F'), forkEdge('F', 'c'), forkEdge('c', 'c2'), forkEdge('F', 'd'),
+    forkEdge('root2', 'x'), compactEdge('x', 'K'),
+    mergeEdge('p1', 'M'), mergeEdge('p2', 'M'), forkEdge('M', 'z'),
+  ];
+
+  it('classifies roots, branch heads, merge & compact nodes as signposts; plain continuation nodes are not', () => {
+    expect(isSignpost('root', nodes, edges)).toBe(true);   // a conversation root
+    expect(isSignpost('a', nodes, edges)).toBe(false);     // parent root has a single continuation child
+    expect(isSignpost('F', nodes, edges)).toBe(false);     // parent a has a single continuation child
+    expect(isSignpost('c', nodes, edges)).toBe(true);      // branch head — parent F forks (c & d)
+    expect(isSignpost('d', nodes, edges)).toBe(true);      // the other branch head
+    expect(isSignpost('c2', nodes, edges)).toBe(false);    // parent c has a single child
+    expect(isSignpost('K', nodes, edges)).toBe(true);      // compact boundary
+    expect(isSignpost('M', nodes, edges)).toBe(true);      // merge node
+    expect(isSignpost('p1', nodes, edges)).toBe(true);     // root (only outgoing merge edge → no continuation parent)
+  });
+
+  it('segments a root down to (and including) its first fork node', () => {
+    expect(branchSegment('root', nodes, edges)).toEqual(['root', 'a', 'F']); // F forks → last member
+  });
+
+  it('segments a branch head down to its leaf', () => {
+    expect(branchSegment('c', nodes, edges)).toEqual(['c', 'c2']);
+    expect(branchSegment('d', nodes, edges)).toEqual(['d']); // leaf branch head → single node
+  });
+
+  it('stops a segment BEFORE a compact-boundary child (it starts its own segment)', () => {
+    expect(branchSegment('root2', nodes, edges)).toEqual(['root2', 'x']); // K excluded
+    expect(branchSegment('K', nodes, edges)).toEqual(['K']);              // compact node = its own signpost
+  });
+
+  it('treats a merge node as its own signpost segment; a merge parent (root) is single-node', () => {
+    expect(branchSegment('M', nodes, edges)).toEqual(['M', 'z']);
+    expect(branchSegment('p1', nodes, edges)).toEqual(['p1']); // its only edge is a merge edge → no continuation
+  });
+});
+
+describe('branchSummaryKey / needsBranchSummary', () => {
+  const mk = () => {
+    const nodes = [node('root', 0), node('a', 1), node('F', 2), node('c', 3), node('d', 4)];
+    const edges = [forkEdge('root', 'a'), forkEdge('a', 'F'), forkEdge('F', 'c'), forkEdge('F', 'd')];
+    return { nodes, edges };
+  };
+
+  it('the key embeds the version and changes when a segment board answer length changes', () => {
+    const { nodes } = mk();
+    const byId = byIdOf(nodes);
+    const k1 = branchSummaryKey(['root', 'a', 'F'], byId);
+    expect(k1.startsWith(`v${BRANCH_SUMMARY_VERSION}|`)).toBe(true);
+    const nodes2 = [node('root', 0, { answer: 'a-root-MUCH-LONGER' }), node('a', 1), node('F', 2)];
+    const k2 = branchSummaryKey(['root', 'a', 'F'], byIdOf(nodes2));
+    expect(k2).not.toBe(k1);
+  });
+
+  it('flags a stale multi-node signpost segment, clears once the matching key is stored', () => {
+    const { nodes, edges } = mk();
+    expect(needsBranchSummary('root', nodes, edges)).toBe(true);            // no stored key yet
+    const stored = branchSummaryKey(branchSegment('root', nodes, edges), byIdOf(nodes));
+    const nodes2 = nodes.map((n) => (n.id === 'root' ? { ...n, data: { ...n.data, branchSummaryKey: stored } } : n));
+    expect(needsBranchSummary('root', nodes2, edges)).toBe(false);         // key matches → fresh
+  });
+
+  it('does not flag a single-node segment (reuses miniSummary) or a mid-stream branch', () => {
+    const { nodes, edges } = mk();
+    expect(needsBranchSummary('c', nodes, edges)).toBe(false);             // c is a single-node leaf branch head
+    const streaming = nodes.map((n) => (n.id === 'F' ? { ...n, data: { ...n.data, status: 'streaming' as const } } : n));
+    expect(needsBranchSummary('root', streaming, edges)).toBe(false);      // a segment board not done → wait
+  });
+
+  it('does not flag a non-signpost node', () => {
+    const { nodes, edges } = mk();
+    expect(needsBranchSummary('a', nodes, edges)).toBe(false);             // 'a' is a plain continuation node
   });
 });
 
