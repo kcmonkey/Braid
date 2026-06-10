@@ -21,6 +21,11 @@ import { resolveSdkEntry } from '../../runtime/sdk-provision';
 
 const SUMMARY_MODEL = 'claude-haiku-4-5-20251001'; // M3 collapsed-summary model (cheap + fast)
 
+// Async continuation: default safety cap for how long a HELD-OPEN (waiting) session may sit idle before we
+// close it. Mechanism here; policy overridable per-turn via TurnRequest.idleCapMs (Phase 1 plumbs the
+// setting). 30 min comfortably covers normal background tasks / minute-granularity wakeups. (AD5, 异步续接)
+const DEFAULT_IDLE_CAP_MS = 30 * 60_000;
+
 // System prompt for condensing a verbose native /compact <analysis> summary into a short, glanceable
 // digest card shown on the compacted board (compacted-context digest). Mirrors the Q/A card summarizer's
 // "headline + bullets, output only the Markdown" discipline, but framed for a whole compacted lineage.
@@ -89,6 +94,10 @@ export class ClaudeAdapter implements Engine {
     if (!sdk) { sink.error(req.boardId, req.turnIndex, 'Failed to load Claude Agent SDK'); return; }
 
     const boardId = req.boardId;
+    // Async continuation gate: the latest Stop-hook snapshot of pending in-flight work. The Stop hook fires
+    // each turn-stop (verified probe-async.mjs) and is the SSOT for "session is done" vs "paused waiting for
+    // background work to wake it". Captured below; read in the `result` case to decide whether to hold open.
+    let latestPending: AsyncPending = { background: [], crons: [] };
     // Layer order: user config first, then engine-critical keys runTurn owns (these win).
     const options: Record<string, unknown> = {
       ...buildSdkOptions(this.deps.readProviderConfig()),
@@ -107,6 +116,26 @@ export class ClaudeAdapter implements Engine {
                     hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: d.reason },
                   };
                 }
+                return {};
+              },
+            ],
+          },
+        ],
+        Stop: [
+          {
+            hooks: [
+              // Read-only async-continuation gate: snapshot in-flight background tasks + scheduled wakeups.
+              // Returns {} (no additionalContext) — the SDK already auto-re-drives on the actual
+              // task_notification / wakeup; we only need to know whether to hold the session open. (异步续接)
+              async (hookInput: any) => {
+                latestPending = {
+                  background: Array.isArray(hookInput?.background_tasks)
+                    ? hookInput.background_tasks.map((t: any) => ({ id: t.id, type: t.type, status: t.status, description: t.description, command: t.command }))
+                    : [],
+                  crons: Array.isArray(hookInput?.session_crons)
+                    ? hookInput.session_crons.map((c: any) => ({ id: c.id, schedule: c.schedule, recurring: !!c.recurring, prompt: c.prompt }))
+                    : [],
+                };
                 return {};
               },
             ],
@@ -169,6 +198,13 @@ export class ClaudeAdapter implements Engine {
     const FOLLOWUP_GRACE_MS = 1000;
     const wakeUp = () => { if (wake) { const w = wake; wake = null; w(); } };
     const cancelIdle = () => { if (idleTimer) { clearTimeout(idleTimer); idleTimer = undefined; } };
+    // Async continuation: when a turn settles with pending background tasks / scheduled wakeups, hold the
+    // session OPEN (don't arm the close) so the SDK re-drives the agent in-process. `armIdleCap` is the
+    // safety net that eventually closes a held session that goes quiet. (AD1/AD5, 异步续接)
+    let waiting = false;
+    const holdEnabled = req.asyncContinuation !== false;
+    const idleCapMs = req.idleCapMs ?? DEFAULT_IDLE_CAP_MS;
+    const armIdleCap = () => { cancelIdle(); idleTimer = setTimeout(() => { closed = true; wakeUp(); }, idleCapMs); };
     async function* input() {
       yield userMessage(req.prompt, req.images); // turn 1 — turnInFlight already true
       while (!closed) {
@@ -192,6 +228,14 @@ export class ClaudeAdapter implements Engine {
       ctl.onLive({
         push: (text, images) => { outstanding++; cancelIdle(); queue.push(userMessage(text, images)); wakeUp(); },
         interrupt: async () => { interrupted = true; try { await q.interrupt(); } catch (e: any) { console.error('[Braid] interrupt failed:', e?.message ?? e); } },
+        // End a waiting hold (UI Stop-waiting / delete): stop in-flight background tasks, then close the
+        // input so the session ends and the board finalizes. Crons are session-scoped → closing drops them.
+        stopWaiting: async () => {
+          for (const t of latestPending.background) {
+            try { await (q as any).stopTask?.(t.id); } catch (e: any) { console.error('[Braid] stopTask failed:', e?.message ?? e); }
+          }
+          closed = true; cancelIdle(); wakeUp();
+        },
       });
       for await (const m of q as AsyncIterable<any>) {
         const events = reduceClaudeMessage(state, m, Date.now());
