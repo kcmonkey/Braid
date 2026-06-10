@@ -46,6 +46,28 @@ describe('reduceClaudeMessage — turn boundary', () => {
   });
 });
 
+describe('reduceClaudeMessage — background-task lifecycle (async continuation)', () => {
+  it('folds task_started / task_updated / task_notification into neutral task events', () => {
+    const { events } = run([
+      init(),
+      { type: 'system', subtype: 'task_started', task_id: 't1', description: 'run probe', tool_use_id: 'tu1' },
+      { type: 'system', subtype: 'task_updated', task_id: 't1', patch: { status: 'running' } },
+      { type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed', summary: 'exit 0', tool_use_id: 'tu1' },
+    ]);
+    expect(events.filter((e) => e.t === 'task')).toEqual([
+      { t: 'task', turnIndex: 0, ev: { id: 't1', phase: 'started', status: undefined, description: 'run probe', summary: undefined, toolUseId: 'tu1' } },
+      { t: 'task', turnIndex: 0, ev: { id: 't1', phase: 'updated', status: 'running', description: undefined, summary: undefined, toolUseId: undefined } },
+      { t: 'task', turnIndex: 0, ev: { id: 't1', phase: 'notification', status: 'completed', description: undefined, summary: 'exit 0', toolUseId: 'tu1' } },
+    ]);
+  });
+
+  it('task messages do not disturb text/answer accumulation', () => {
+    const { s, events } = run([init(), { type: 'system', subtype: 'task_started', task_id: 't1', description: 'x' }, asstText('hi')]);
+    expect(s.answer).toBe('hi');
+    expect(events.filter((e) => e.t === 'task')).toHaveLength(1);
+  });
+});
+
 describe('reduceClaudeMessage — text + tools', () => {
   it('streams text deltas as update with accumulating view', () => {
     const { events } = run([init(), textDelta('Hel'), textDelta('lo')]);

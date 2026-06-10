@@ -238,29 +238,48 @@ export class ClaudeAdapter implements Engine {
         },
       });
       for await (const m of q as AsyncIterable<any>) {
+        if (waiting) armIdleCap(); // any inbound activity during a held-open wait resets the idle cap
         const events = reduceClaudeMessage(state, m, Date.now());
         for (const e of events) {
           switch (e.t) {
-            case 'turn': if (e.reset) { turnSettled = false; interrupted = false; } break;
+            case 'turn':
+              // A fresh init = a new round began. reset ⇒ it's a continuation/follow-up: a turn is now
+              // generating (turnInFlight → hold any queued follow-up), and any waiting hold is over — this
+              // round's own `result` re-decides whether to hold again. (async continuation 异步续接)
+              if (e.reset) { turnSettled = false; interrupted = false; turnInFlight = true; waiting = false; cancelIdle(); }
+              break;
             case 'session': sink.session(boardId, e.sessionId); break;
             case 'model': sink.model(e.model); break;
             case 'update': sink.update(boardId, e.turnIndex, e.text, e.thinking); break;
             case 'thinking': sink.thinking(boardId, e.turnIndex, e.thinks); break;
             case 'toolUse': sink.toolUse(boardId, e.turnIndex, e.ev); break;
             case 'toolResult': sink.toolResult(boardId, e.turnIndex, e.ev); break;
+            case 'task': sink.task(boardId, e.turnIndex, e.ev); break;
             case 'rateLimit': sink.rateLimit(e.snapshot); break;
             case 'commands': sink.commands(e.commands); break;
             case 'result':
               // interrupted turn ends as error_during_execution/is_error — the user's send-now cut, NOT a
               // real failure → settle done, keep partial. (knowledge.md)
               settle(e.isError && !interrupted);
-              outstanding--;
+              outstanding = Math.max(0, outstanding - 1); // continuation rounds have no matching user msg → clamp
               // Turn boundary: the CLI is ready for new input. Open the gate so input() hands the next
               // queued follow-up over as its OWN turn (held until now to avoid the mid-turn-drop above).
               turnInFlight = false;
               if (outstanding <= 0 && queue.length === 0) {
                 cancelIdle();
-                idleTimer = setTimeout(() => { closed = true; wakeUp(); }, FOLLOWUP_GRACE_MS);
+                const hasPending = holdEnabled && (latestPending.background.length > 0 || latestPending.crons.length > 0);
+                if (hasPending) {
+                  // Async continuation: the Stop hook reported in-flight background tasks / scheduled wakeups
+                  // → HOLD the session open (don't arm the close). The SDK re-drives the agent in-process when
+                  // the task settles / the wakeup fires → another round. The host finalizes the board to
+                  // `done` when runTurn resolves (session fully closed). (AD1, 异步续接)
+                  waiting = true;
+                  sink.waiting(boardId, state.turnIndex, latestPending);
+                  armIdleCap();
+                } else {
+                  waiting = false;
+                  idleTimer = setTimeout(() => { closed = true; wakeUp(); }, FOLLOWUP_GRACE_MS);
+                }
               }
               wakeUp(); // release a held follow-up now, or let the generator re-await / observe `closed`
               break;

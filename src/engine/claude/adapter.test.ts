@@ -21,6 +21,8 @@ function recordingSink() {
     error: (b, ti, m) => calls.push({ t: 'error', b, ti, m }),
     rateLimit: (snapshot) => calls.push({ t: 'rateLimit', snapshot }),
     commands: (commands) => calls.push({ t: 'commands', commands }),
+    waiting: (b, ti, pending) => calls.push({ t: 'waiting', b, ti, pending }),
+    task: (b, ti, ev) => calls.push({ t: 'task', b, ti, ev }),
   };
   return { sink, calls };
 }
@@ -319,5 +321,136 @@ describe('ClaudeAdapter — canUseTool (permission) wiring', () => {
     expect(out.behavior).toBe('allow');
     expect(out.updatedInput).toEqual(input);
     expect(out.updatedPermissions).toEqual([{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------------
+// Async continuation (异步续接): hold the streaming-input session OPEN while the Stop hook reports pending
+// background tasks / scheduled wakeups, then continue in-process / close. The Stop hook is invoked manually
+// here to simulate the SDK (which fires it each turn-stop, verified probe-async.mjs). A "coupling" fake
+// models the real CLI: when our input() generator RETURNS (session closed), the fake ends its OUTPUT too.
+// ---------------------------------------------------------------------------------------------------------
+describe('ClaudeAdapter.runTurn — async continuation (hold-open gate)', () => {
+  function couplingFake() {
+    const out: any[] = [];
+    let outWake: (() => void) | null = null;
+    let outDone = false;
+    let promptIterable: AsyncIterable<any> | null = null;
+    let capturedOptions: any = null;
+    let inputClosed = false;
+    const stopTaskCalls: string[] = [];
+    const wake = () => { if (outWake) { const w = outWake; outWake = null; w(); } };
+    const q: any = {
+      async *[Symbol.asyncIterator]() {
+        // Drain our input generator; when it RETURNS (session closed), end the output stream (models the CLI).
+        (async () => { try { for await (const _m of promptIterable as AsyncIterable<any>) { /* consume */ } } finally { inputClosed = true; outDone = true; wake(); } })();
+        while (true) {
+          while (out.length) yield out.shift();
+          if (outDone) return;
+          await new Promise<void>((r) => { outWake = r; });
+        }
+      },
+      interrupt: async () => {},
+      stopTask: async (id: string) => { stopTaskCalls.push(id); },
+    };
+    const sdk = { query: (args: any) => { promptIterable = args.prompt; capturedOptions = args.options; return q; } };
+    return { sdk, emit: (m: any) => { out.push(m); wake(); }, get inputClosed() { return inputClosed; }, get options() { return capturedOptions; }, stopTaskCalls };
+  }
+
+  const tick = () => new Promise((r) => setTimeout(r, 10));
+  const result = (extra: any = {}) => ({ type: 'result', is_error: false, session_id: 's1', ...extra });
+  const bgPending = { background_tasks: [{ id: 't1', type: 'shell', status: 'running', description: 'probe', command: 'node x' }], session_crons: [] };
+  const noPending = { background_tasks: [], session_crons: [] };
+
+  it('holds the session open while the Stop hook reports a pending background task, then continues in-process', async () => {
+    const fake = couplingFake();
+    const adapter = new ClaudeAdapter({ loadSdk: async () => fake.sdk, readProviderConfig: () => cfg });
+    const { sink, calls } = recordingSink();
+    let handle: TurnHandle | undefined;
+    let resolved = false;
+    adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } }).then(() => { resolved = true; });
+    const p = new Promise<void>((r) => { const i = setInterval(() => { if (resolved) { clearInterval(i); r(); } }, 5); });
+    await tick();
+    const stop = fake.options.hooks.Stop[0].hooks[0];
+
+    // Turn 1: a background task is in flight when it settles → HOLD open (do NOT close).
+    fake.emit(init);
+    await stop(bgPending);
+    fake.emit(result());
+    await tick();
+    expect(resolved).toBe(false);                                  // session held open (the bug fix)
+    const waits = calls.filter((c) => c.t === 'waiting');
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toMatchObject({ ti: 0, pending: { background: [{ id: 't1', type: 'shell', status: 'running' }], crons: [] } });
+    expect(calls.filter((c) => c.t === 'done')).toHaveLength(1);   // round 1 settled
+
+    // SDK re-drives in-process: task_notification → continuation init → answer → result, now no pending.
+    fake.emit({ type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed', summary: 'done', tool_use_id: 'tu1' });
+    fake.emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    fake.emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'finished' }] } });
+    await stop(noPending);
+    fake.emit(result());
+    await tick();
+    expect(calls.filter((c) => c.t === 'task')).toHaveLength(1);            // notification folded + surfaced
+    expect(calls.filter((c) => c.t === 'done').map((d) => d.ti)).toEqual([0, 1]); // a second round settled
+
+    await handle!.stopWaiting(); await p;                          // teardown: close the (now no-pending) session
+    expect(resolved).toBe(true);
+  });
+
+  it('closes a held-open session after the idle cap elapses', async () => {
+    const fake = couplingFake();
+    const adapter = new ClaudeAdapter({ loadSdk: async () => fake.sdk, readProviderConfig: () => cfg });
+    const { sink, calls } = recordingSink();
+    let resolved = false;
+    adapter.runTurn(req({ kind: 'fresh' }, { idleCapMs: 30 }), sink, noopPre, { abort: new AbortController(), onLive: () => {} }).then(() => { resolved = true; });
+    await tick();
+    const stop = fake.options.hooks.Stop[0].hooks[0];
+    fake.emit(init);
+    await stop(bgPending);
+    fake.emit(result());
+    await tick();
+    expect(resolved).toBe(false);                       // held open initially
+    await new Promise((r) => setTimeout(r, 80));         // idle cap (30ms) elapses with no further activity
+    expect(resolved).toBe(true);                         // → session closed
+    expect(fake.inputClosed).toBe(true);                 // input generator returned (session torn down)
+    expect(calls.filter((c) => c.t === 'done')).toHaveLength(1); // board settled (round 1)
+  });
+
+  it('stopWaiting() stops in-flight background tasks and closes the held session', async () => {
+    const fake = couplingFake();
+    const adapter = new ClaudeAdapter({ loadSdk: async () => fake.sdk, readProviderConfig: () => cfg });
+    const { sink } = recordingSink();
+    let handle: TurnHandle | undefined;
+    let resolved = false;
+    adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } }).then(() => { resolved = true; });
+    await tick();
+    const stop = fake.options.hooks.Stop[0].hooks[0];
+    fake.emit(init);
+    await stop(bgPending);
+    fake.emit(result());
+    await tick();
+    expect(resolved).toBe(false);
+    await handle!.stopWaiting();
+    await new Promise((r) => setTimeout(r, 20));
+    expect(resolved).toBe(true);
+    expect(fake.stopTaskCalls).toEqual(['t1']);          // the in-flight background task was stopped
+    expect(fake.inputClosed).toBe(true);
+  });
+
+  it('asyncContinuation:false → never holds open, even with pending work', async () => {
+    const fake = couplingFake();
+    const adapter = new ClaudeAdapter({ loadSdk: async () => fake.sdk, readProviderConfig: () => cfg });
+    const { sink, calls } = recordingSink();
+    let resolved = false;
+    adapter.runTurn(req({ kind: 'fresh' }, { asyncContinuation: false }), sink, noopPre, { abort: new AbortController(), onLive: () => {} }).then(() => { resolved = true; });
+    await tick();
+    const stop = fake.options.hooks.Stop[0].hooks[0];
+    fake.emit(init);
+    await stop(bgPending);
+    fake.emit(result());
+    await new Promise((r) => setTimeout(r, 1100));        // grace-close (1s) → input closes → resolves
+    expect(resolved).toBe(true);
+    expect(calls.filter((c) => c.t === 'waiting')).toHaveLength(0); // disabled → no hold
   });
 });

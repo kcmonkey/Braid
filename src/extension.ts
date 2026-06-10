@@ -945,6 +945,10 @@ function makeSink(canvasId: string): EventSink {
     // Live slash-command refresh (commands_changed) → update the host cache + push to this canvas. The
     // cold-start list is served by the getSlashCommands handler (Phase 2).
     commands: (commands) => { slashCommandsCache = commands; postTo(canvasId, { type: 'slashCommands', commands }); },
+    // Async continuation (异步续接). Wired to webview protocol messages in Async-Continuation Phase 1;
+    // engine emits them now (Phase 0). Stubbed as no-ops so the build stays green until Phase 1.
+    waiting: () => { /* Phase 1: postTo(canvasId, { type: 'waiting', boardId, turnIndex, pending }) */ },
+    task: () => { /* Phase 1: postTo(canvasId, { type: 'taskNotification', boardId, turnIndex, ev }) */ },
   };
 }
 
