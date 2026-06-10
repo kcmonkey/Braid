@@ -522,19 +522,21 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       break;
     }
     case 'attention': {
-      // Swap this canvas's editor-tab icon (panel.iconPath). A running task wins: animate the spinner
-      // (frame-cycled iconPath — VS Code can't animate SVG itself) while any board is streaming (busy),
-      // else the red dot while any board needs attention (unread / pending question), else no icon when
-      // idle + caught up.
+      // Swap this canvas's editor-tab icon (panel.iconPath). Notification wins: any board needing
+      // attention (unread completion / pending question) shows the red dot even while another board is
+      // streaming — a notification is more actionable than "a task is running" (user decision 2026-06-10).
+      // Else, while any board is busy, animate the spinner (frame-cycled iconPath — VS Code can't animate
+      // SVG itself). Else no icon when idle + caught up.
       const panel = panels.get(canvasId);
       if (panel) {
-        if (msg.busy) {
+        if (msg.pending) {
+          stopTabSpinner(canvasId); // freeze any rotation, then settle to the attention dot
+          panel.iconPath = vscode.Uri.joinPath(context.extensionUri, 'media', 'tab-dot.svg');
+        } else if (msg.busy) {
           startTabSpinner(context, canvasId);
         } else {
-          stopTabSpinner(canvasId); // freeze rotation, then settle to dot / cleared
-          panel.iconPath = msg.pending
-            ? vscode.Uri.joinPath(context.extensionUri, 'media', 'tab-dot.svg')
-            : undefined;
+          stopTabSpinner(canvasId);
+          panel.iconPath = undefined;
         }
       }
       break;

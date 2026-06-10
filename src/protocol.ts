@@ -19,6 +19,17 @@ export type EngineId = 'claude' | 'codex';
 /** One selectable model for a provider's model dropdown. */
 export interface ModelOption { value: string; label: string }
 
+/** Neutral, display-side descriptor of one slash command for the composer autocomplete menu. SSOT lives
+ * here (shared by both bundles): each engine exposes its own command set via `Engine.listSlashCommands`
+ * (Claude maps the SDK's `SlashCommand`; a future Codex engine supplies its own), and the webview renders
+ * these in the `/` menu. `argumentHint` (e.g. "<file>") is shown only when non-empty. (multi-provider seam) */
+export interface SlashCommandSpec {
+  name: string;          // command name WITHOUT the leading slash (e.g. "compact")
+  description: string;
+  argumentHint?: string; // e.g. "[issue description]" — shown after the name when present
+  aliases?: string[];    // alternate names that resolve to this command
+}
+
 /** Static, display-side description of a provider — identity + accent + its model list + whether an engine
  * is actually registered for it. SSOT for "which providers exist" (vs the engine registry = "which run").
  * `implemented:false` ⇔ no engine registered (placeholder card / not selectable as a live turn target). */
@@ -151,6 +162,12 @@ export type WebviewMessage =
   // `path` is taken verbatim from the tool's file_path input; the host resolves relative paths
   // against the workspace root (the cwd used to spawn queries). `line` = 1-based caret line if known.
   | { type: 'openFile'; path: string; line?: number }
+  // Composer autofill: pull this provider's slash-command list (host fetches via the active engine's
+  // listSlashCommands, caches per cwd, replies with `slashCommands`). Sent once on mount.
+  | { type: 'getSlashCommands' }
+  // Composer `@`-file autofill: ask the host for workspace files matching `query` (host runs
+  // workspace.findFiles, replies with `fileResults` echoing the query so the webview drops stale responses).
+  | { type: 'searchFiles'; query: string }
   // MCP manager: panel opened (lazily create the control session + start polling) / closed (dispose
   // it) / reconnect a server by name (also the Authenticate path for needs-auth servers).
   | { type: 'mcpOpen' }
@@ -171,8 +188,9 @@ export type WebviewMessage =
   // Editor-tab status icon: the webview reports THIS canvas's two tab-icon signals. `pending` = any board
   // needs attention (an unread completion or a pending question — the same per-board states it renders +
   // lists in the in-canvas notification panel). `busy` = any board is streaming (a task executing). The
-  // host swaps the panel's tab icon with `busy` taking priority (a spinner glyph while a task runs), then
-  // falling back to the red attention dot, then to no icon. Pushed only when either flips. (Notifications
+  // host swaps the panel's tab icon with `pending` taking priority (the red attention dot — a notification
+  // outranks a running task), then falling back to the busy spinner glyph, then to no icon. Pushed only
+  // when either flips. (Notifications
   // themselves live entirely in the webview — an in-canvas panel derived from per-board unread/pending-ask
   // state — so there are no VS Code toasts or status-bar bell to duplicate VS Code's own surfaces.)
   | { type: 'attention'; pending: boolean; busy: boolean }
@@ -228,6 +246,12 @@ export type HostMessage =
   | { type: 'toolResult'; boardId: string; turnIndex: number; toolUseId: string; content: string; isError: boolean }
   // M7 gap3: the active/last-focused file editor's context (or null if none available).
   | { type: 'editorContext'; context: EditorContext | null }
+  // Composer autofill: this provider's slash-command list (from the active engine; cached host-side, also
+  // re-pushed when the engine reports a mid-session `commands_changed`). Replaces the webview's cache.
+  | { type: 'slashCommands'; commands: SlashCommandSpec[] }
+  // Composer `@`-file autofill: workspace files matching `query` (workspace-relative, forward-slash paths).
+  // `query` is echoed so the webview can ignore results for a query the user has already moved past.
+  | { type: 'fileResults'; query: string; files: string[] }
   // MCP manager: current status of all MCP servers (polled from the control session) + the names
   // currently mid-action (reconnecting), so the panel can show per-server busy state.
   | { type: 'mcpServers'; servers: McpServerInfo[]; busy: string[] }

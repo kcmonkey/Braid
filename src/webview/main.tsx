@@ -2321,8 +2321,9 @@ function App() {
 
   // Editor-tab status icon: `busy` = any board is streaming (a task executing); `pending` = any board
   // needs attention (boardNeedsAttention, the same predicate as the notification panel above). Report
-  // both to the host only when either flips, so it can swap the panel's tab icon (busy spinner wins over
-  // the red dot). Gated on hydration so the empty pre-restore graph doesn't post a spurious idle state
+  // both to the host only when either flips, so it can swap the panel's tab icon (the red attention dot
+  // wins over the busy spinner — a notification outranks a running task). Gated on hydration so the empty
+  // pre-restore graph doesn't post a spurious idle state
   // before the persisted unread flags load.
   useEffect(() => {
     if (!hydratedRef.current) return;
