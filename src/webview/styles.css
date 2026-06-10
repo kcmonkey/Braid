@@ -252,14 +252,14 @@ body {
    same level and connected bars are horizontal. Width matched to the board keeps the node ~320px wide
    (stable column spacing). The text is bottom-anchored (justify-content:flex-end) so it hugs the bar. */
 .board__toplabel {
-  width: 320px; max-width: 320px; height: 80px; margin-bottom: 7px; padding: 0 4px; box-sizing: border-box;
+  width: 320px; max-width: 320px; height: 96px; margin-bottom: 7px; padding: 0 4px; box-sizing: border-box;
   display: flex; flex-direction: column; justify-content: flex-end; align-items: center;
   background: none; cursor: default; user-select: none;
 }
 /* The summary text — SMALL caption above the bar (the tags/badge are the prominent label). A 3-line clamp
    fits longer branch titles. Quiet warm grey with a shadow for legibility over the canvas. */
 .board__toplabel-text {
-  font-size: 15px; font-weight: 700; line-height: 1.25; text-align: center; color: #b3aea4;
+  font-size: 24px; font-weight: 700; line-height: 1.25; text-align: center; color: #b3aea4;
   text-shadow: 0 1px 3px rgba(0, 0, 0, .9), 0 0 2px rgba(0, 0, 0, .95);
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
   overflow: hidden; overflow-wrap: break-word;
