@@ -3,7 +3,7 @@ import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
-  diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk,
+  diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
@@ -559,6 +559,24 @@ describe('hasPendingAsk (needs-response state)', () => {
   });
 });
 
+describe('hasPendingPermission (needs-approval state)', () => {
+  const perm = (result?: string) => ({ id: 'p1', name: 'Bash', input: { command: 'ls' }, permission: { canAlways: true }, ...(result != null ? { result } : {}) });
+  it('true when a step has a permission prompt and no result yet', () => {
+    expect(hasPendingPermission(node('a', 0, { steps: [perm()] }).data)).toBe(true);
+  });
+  it('false once the tool resolved (allow → real result; deny → is_error result)', () => {
+    expect(hasPendingPermission(node('a', 0, { steps: [perm('ok')] }).data)).toBe(false);
+  });
+  it('false with no steps or only steps without a permission overlay', () => {
+    expect(hasPendingPermission(node('a', 0).data)).toBe(false);
+    expect(hasPendingPermission(node('a', 0, { steps: [{ id: 'r', name: 'Read', input: {} }] }).data)).toBe(false);
+  });
+  it('scans every round of a multi-turn board', () => {
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'a0' }, { prompt: 'q1', answer: '', steps: [perm()] }];
+    expect(hasPendingPermission(node('m', 0, { turns }).data)).toBe(true);
+  });
+});
+
 describe('thinkMarks (positioned thinking)', () => {
   it('prefers the positioned thinks array when present', () => {
     const marks = [{ offset: 0, ms: 400 }, { offset: 120, active: true }];
@@ -595,6 +613,15 @@ describe('serializeGraph', () => {
     ];
     const g = serializeGraph([node('a', 0, { steps })], [], 1, 1);
     expect(g.nodes[0].data.steps).toEqual(steps);
+  });
+
+  it('strips the transient permission overlay from steps (top-level and per-turn)', () => {
+    const steps = [{ id: 'tu1', name: 'Bash', input: { command: 'ls' }, permission: { canAlways: true } }];
+    const turns: Turn[] = [{ prompt: 'q', answer: 'a', steps: [{ id: 'tu2', name: 'Write', input: { file_path: 'a.ts' }, permission: { title: 'Allow Write?' } }] }];
+    const g = serializeGraph([node('a', 0, { steps, turns })], [], 1, 1);
+    // The permission overlay is gone (exact toEqual = no leftover `permission` key), but the rest survives.
+    expect(g.nodes[0].data.steps).toEqual([{ id: 'tu1', name: 'Bash', input: { command: 'ls' } }]);
+    expect(g.nodes[0].data.turns).toEqual([{ prompt: 'q', answer: 'a', steps: [{ id: 'tu2', name: 'Write', input: { file_path: 'a.ts' } }] }]);
   });
 });
 

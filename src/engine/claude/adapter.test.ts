@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { ClaudeAdapter } from './adapter';
 import type { ProviderConfig } from '../../sdkOptions';
-import type { EventSink, PreToolInterceptor, PreToolDecision, TurnRequest, TurnHandle, Attach } from '../types';
+import type { EventSink, PreToolInterceptor, PreToolDecision, PermissionVerdict, TurnRequest, TurnHandle, Attach } from '../types';
 
 const cfg: ProviderConfig = {
   model: '', effort: '', thinking: 'inherit', permissionMode: 'bypassPermissions', maxTurns: 0,
@@ -264,5 +264,60 @@ describe('ClaudeAdapter — PreToolUse hook wiring', () => {
     const hook = await getHook();
     const out = await hook({ tool_name: 'Read', tool_input: { file_path: 'a.ts' } }, 'tu2', { signal: new AbortController().signal });
     expect(out).toEqual({});
+  });
+});
+
+describe('ClaudeAdapter — canUseTool (permission) wiring', () => {
+  let lastAsk: any;
+  let verdict: PermissionVerdict;
+  function permPre(): PreToolInterceptor {
+    return {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async (_b, _ti, ask): Promise<PermissionVerdict> => { lastAsk = ask; return verdict; },
+    };
+  }
+  async function getCanUse() {
+    const { adapter, fake, captured } = harness();
+    const { sink } = recordingSink();
+    const p = adapter.runTurn(req({ kind: 'fresh' }), sink, permPre(), { abort: new AbortController(), onLive: () => {} });
+    fake.emit(init); fake.emit({ type: 'result', is_error: false }); fake.finish();
+    await p;
+    return captured.options.canUseTool as (name: string, input: any, opts: any) => Promise<any>;
+  }
+
+  it('allow → behavior:allow echoing updatedInput (Zod requires a record; bare allow ZodErrors)', async () => {
+    verdict = { allow: true };
+    const canUse = await getCanUse();
+    const out = await canUse('Bash', { command: 'ls' }, { toolUseID: 'tx', suggestions: [] });
+    expect(out).toEqual({ behavior: 'allow', updatedInput: { command: 'ls' } });
+    expect(lastAsk).toMatchObject({ toolUseId: 'tx', toolName: 'Bash', canAlways: false });
+  });
+
+  it('deny → behavior:deny with the message', async () => {
+    verdict = { deny: true, message: 'no thanks' };
+    const canUse = await getCanUse();
+    const out = await canUse('Bash', { command: 'rm -rf /' }, { toolUseID: 'tx' });
+    expect(out).toEqual({ behavior: 'deny', message: 'no thanks' });
+  });
+
+  it('always → allow + the SDK suggestions remapped to localSettings', async () => {
+    verdict = { allow: true, always: true };
+    const canUse = await getCanUse();
+    const suggestions = [{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'ls:*' }], behavior: 'allow', destination: 'session' }];
+    const out = await canUse('Bash', { command: 'ls' }, { toolUseID: 'tx', suggestions });
+    expect(out.behavior).toBe('allow');
+    expect(out.updatedInput).toEqual({ command: 'ls' });
+    expect(out.updatedPermissions).toEqual([{ type: 'addRules', rules: [{ toolName: 'Bash', ruleContent: 'ls:*' }], behavior: 'allow', destination: 'localSettings' }]);
+    expect(lastAsk.canAlways).toBe(true); // suggestions present → the "always" choice was offered
+  });
+
+  it('ExitPlanMode approve with a mode → allow + setMode permission update (echoes the plan input)', async () => {
+    verdict = { allow: true, mode: 'acceptEdits' };
+    const canUse = await getCanUse();
+    const input = { plan: '# Plan', planFilePath: '/p.md' };
+    const out = await canUse('ExitPlanMode', input, { toolUseID: 'tx' });
+    expect(out.behavior).toBe('allow');
+    expect(out.updatedInput).toEqual(input);
+    expect(out.updatedPermissions).toEqual([{ type: 'setMode', mode: 'acceptEdits', destination: 'session' }]);
   });
 });

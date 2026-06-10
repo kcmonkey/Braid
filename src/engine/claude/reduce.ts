@@ -5,7 +5,7 @@
 // recorded message sequences with no live SDK. (plans/Engine-Abstraction Phase 0; AD2)
 import type { ThinkMark } from '../../webview/merge';
 import { TOOL_RESULT_CAP } from '../../webview/merge';
-import type { ToolUseEvent, ToolResultEvent } from '../types';
+import type { ToolUseEvent, ToolResultEvent, TaskEvent } from '../types';
 import type { RateLimitSnapshot, SlashCommandSpec } from '../../protocol';
 import { toRateLimitSnapshot } from './account';
 
@@ -105,6 +105,7 @@ export type NeutralEvent =
   | { t: 'toolResult'; turnIndex: number; ev: ToolResultEvent }
   | { t: 'rateLimit'; snapshot: RateLimitSnapshot }             // passive plan-limit snapshot (canvas-level)
   | { t: 'commands'; commands: SlashCommandSpec[] }             // mid-session slash-command list refresh
+  | { t: 'task'; turnIndex: number; ev: TaskEvent }            // background-task lifecycle (async continuation)
   | { t: 'result'; isError: boolean };                          // turn's result message (adapter settles)
 
 const view = (s: ParseState) => s.answer + s.pending;

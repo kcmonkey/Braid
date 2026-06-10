@@ -16,7 +16,7 @@ import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
   GRAPH_VERSION, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit,
-  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk,
+  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
@@ -327,9 +327,126 @@ function AskUserCard({ step }: { step: ToolStep }) {
   );
 }
 
+// Native permission prompt (canUseTool): the engine wants to run a tool that needs the user's OK. Rendered
+// inline in the turn flow (ChatView) — and a compact variant sits on the board card (PermissionBanner) —
+// so approval works from either surface. Interactive while the step's result is unset; the choice posts
+// permissionResponse (the host returns it to the SDK), then the tool runs (allow) or is refused (deny) and
+// the result arrives, at which point renderStep falls through to the normal tool card. Mirrors AskUserCard.
+function PermissionCard({ step }: { step: ToolStep }) {
+  const [submitted, setSubmitted] = useState(false);
+  const perm = step.permission ?? {};
+  const prompt = perm.title || `Allow ${perm.displayName || step.name}?`;
+  const detail = perm.description || toolSummary(step);
+  const answer = (decision: 'allow' | 'always' | 'deny') => {
+    setSubmitted(true);
+    post({ type: 'permissionResponse', toolUseId: step.id, decision });
+  };
+  return (
+    <div className="perm nodrag" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="perm__head"><span className="perm__icon">🔐</span><span className="perm__title">{prompt}</span></div>
+      {detail && <div className="perm__detail">{detail}</div>}
+      <div className="perm__actions">
+        <button type="button" className="perm__btn perm__btn--ok" onClick={() => answer('allow')} disabled={submitted} title="Allow once">✓</button>
+        {perm.canAlways && (
+          <button type="button" className="perm__btn perm__btn--always" onClick={() => answer('always')} disabled={submitted} title="Always allow — save a rule to .claude/settings.local.json">∞</button>
+        )}
+        <button type="button" className="perm__btn perm__btn--deny" onClick={() => answer('deny')} disabled={submitted} title="Deny">✕</button>
+        {submitted && <span className="perm__wait">Waiting for the model…</span>}
+      </div>
+    </div>
+  );
+}
+
+// Compact permission control shown on the board CARD body (detail LOD) when a tool awaits approval — so
+// the user can allow/deny straight from the canvas without opening the conversation. Picks the first
+// pending-permission step across the board's rounds and posts permissionResponse for it. Twin of the
+// ChatView PermissionCard (both drive the same host resolver; whichever answers first wins, the other no-ops).
+function PermissionBanner({ data }: { data: BoardData }) {
+  const [submitted, setSubmitted] = useState(false);
+  const step = boardTurns(data).flatMap((t) => t.steps ?? []).find((s) => s.permission != null && s.result == null);
+  if (!step) return null;
+  const perm = step.permission ?? {};
+  // ExitPlanMode = a plan awaiting approval; the full plan is read in the ChatView, but a quick approve/
+  // reject works here too. Show the plan's headline so the card isn't just "Allow ExitPlanMode?".
+  const isPlan = step.name === 'ExitPlanMode';
+  const planHeadline = isPlan ? firstLine(String(step.input.plan ?? '')).replace(/^#+\s*/, '') : '';
+  const label = isPlan ? `${planHeadline || 'Plan ready'} — review & approve` : (perm.title || `Allow ${perm.displayName || step.name}?`);
+  const answer = (decision: 'allow' | 'always' | 'deny') => {
+    setSubmitted(true);
+    post({ type: 'permissionResponse', toolUseId: step.id, decision });
+  };
+  return (
+    <div className="board__perm nodrag nopan" onClick={(e) => e.stopPropagation()}>
+      <div className="board__perm-label"><span className="board__perm-ic">{isPlan ? '📋' : '🔐'}</span>{label}</div>
+      <div className="board__perm-actions">
+        <button type="button" className="board__perm-btn ok" onClick={() => answer('allow')} disabled={submitted} title={isPlan ? 'Approve plan' : 'Allow once'}>✓</button>
+        {perm.canAlways && <button type="button" className="board__perm-btn always" onClick={() => answer('always')} disabled={submitted} title="Always allow — save to .claude/settings.local.json">∞</button>}
+        <button type="button" className="board__perm-btn deny" onClick={() => answer('deny')} disabled={submitted} title="Deny">✕</button>
+      </div>
+      {submitted && <div className="board__perm-wait">Waiting for the model…</div>}
+    </div>
+  );
+}
+
+// ExitPlanMode confirmation (Phase 5): plan mode blocks on ExitPlanMode (canUseTool) until the user
+// approves. The plan Markdown rides in step.input.plan (+ planFilePath) — so we render the actual plan,
+// not just "Allow ExitPlanMode?". Approve → allow + the chosen continue-mode (default = keep prompting for
+// risky tools; acceptEdits = auto-accept edits). Reject → deny with optional feedback (model keeps
+// planning). The allow MUST echo updatedInput (the adapter does that). (knowledge.md ExitPlanMode)
+function PlanCard({ step }: { step: ToolStep }) {
+  const [submitted, setSubmitted] = useState(false);
+  const [mode, setMode] = useState<'default' | 'acceptEdits'>('default');
+  const [rejecting, setRejecting] = useState(false);
+  const [feedback, setFeedback] = useState('');
+  const plan = typeof step.input.plan === 'string' ? step.input.plan : '';
+  const filePath = typeof step.input.planFilePath === 'string' ? step.input.planFilePath : '';
+  const approve = () => { setSubmitted(true); post({ type: 'permissionResponse', toolUseId: step.id, decision: 'allow', mode }); };
+  const reject = () => { setSubmitted(true); post({ type: 'permissionResponse', toolUseId: step.id, decision: 'deny', message: feedback.trim() || undefined }); };
+  return (
+    <div className="plan nodrag" onMouseDown={(e) => e.stopPropagation()}>
+      <div className="plan__head"><span className="plan__icon">📋</span><span className="plan__title">Plan ready for review</span></div>
+      <div className="plan__body">{plan ? <Markdown text={plan} /> : <span className="plan__empty">{toolSummary(step) || 'No plan text provided.'}</span>}</div>
+      {filePath && (
+        <button className="plan__file nodrag nopan" title={`Open ${filePath}`} onClick={() => post({ type: 'openFile', path: filePath })}>📄 {filePath}</button>
+      )}
+      {!rejecting ? (
+        <div className="plan__actions">
+          <label className="plan__mode" title="What to do after approving the plan">
+            <span>Continue in</span>
+            <select value={mode} onChange={(e) => setMode(e.target.value as 'default' | 'acceptEdits')} disabled={submitted}>
+              <option value="default">default · prompt for risky tools</option>
+              <option value="acceptEdits">acceptEdits · auto-accept edits</option>
+            </select>
+          </label>
+          <button type="button" className="plan__btn plan__btn--ok" onClick={approve} disabled={submitted} title="Approve & start coding">✓ Approve</button>
+          <button type="button" className="plan__btn plan__btn--no" onClick={() => setRejecting(true)} disabled={submitted} title="Reject & keep planning">✕ Reject</button>
+          {submitted && <span className="plan__wait">Waiting for the model…</span>}
+        </div>
+      ) : (
+        <div className="plan__reject">
+          <textarea
+            className="plan__feedback" placeholder="Optional: what to change before approving…"
+            value={feedback} onChange={(e) => setFeedback(e.target.value)} disabled={submitted}
+          />
+          <div className="plan__actions">
+            <button type="button" className="plan__btn plan__btn--no" onClick={reject} disabled={submitted} title="Send feedback & keep planning">Send & keep planning</button>
+            <button type="button" className="plan__btn" onClick={() => setRejecting(false)} disabled={submitted} title="Back">Back</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Route one step to its card kind. Single source of truth shared by StepList (nested) and TurnBody
 // (top-level interleave) so the Agent/MCP/generic routing lives in exactly one place. (principle 13)
 function renderStep(s: ToolStep, steps: ToolStep[]) {
+  // A tool awaiting permission approval shows the approve/deny prompt until its result arrives, then the
+  // normal card below. (canUseTool tools only — AskUserQuestion is gated by the PreToolUse hook, not here.)
+  // ExitPlanMode gets a richer plan-confirmation card (renders the plan + continue-mode / feedback).
+  if (s.permission != null && s.result == null) {
+    return s.name === 'ExitPlanMode' ? <PlanCard key={s.id} step={s} /> : <PermissionCard key={s.id} step={s} />;
+  }
   if (s.name === 'AskUserQuestion') return <AskUserCard key={s.id} step={s} />;
   if (s.name === 'TodoWrite') return <TodoCard key={s.id} step={s} />;
   if (s.name === 'Agent') return <SubagentCard key={s.id} step={s} steps={steps} />;
@@ -804,18 +921,19 @@ function boardGist(data: BoardData): string {
     || (data.compact ? 'Compacted context' : 'New board');
 }
 
-// A board "needs attention" when it has an unread completion (a done/error turn the user hasn't opened)
-// or a pending AskUserQuestion. This is the SSOT for every attention surface — the editor-tab dot, the
-// per-board red dot/amber ring, and the in-canvas notification panel all derive from it, so opening a
-// board (which clears its unread flag) drops it from all of them at once.
+// A board "needs attention" when it has an unread completion (a done/error turn the user hasn't opened),
+// a pending AskUserQuestion, or a pending permission approval (canUseTool). This is the SSOT for every
+// attention surface — the editor-tab dot, the per-board red dot/amber ring, and the in-canvas
+// notification panel all derive from it, so opening a board (which clears its unread flag) or answering
+// the prompt drops it from all of them at once.
 function boardNeedsAttention(d: BoardData): boolean {
-  return !!d.unread || hasPendingAsk(d);
+  return !!d.unread || hasPendingAsk(d) || hasPendingPermission(d);
 }
 
 // One row in the in-canvas notification panel.
-interface NoticeItem { id: string; gist: string; kind: 'ask' | 'error' | 'done' }
+interface NoticeItem { id: string; gist: string; kind: 'ask' | 'perm' | 'error' | 'done' }
 const noticeKind = (d: BoardData): NoticeItem['kind'] =>
-  hasPendingAsk(d) ? 'ask' : d.status === 'error' ? 'error' : 'done';
+  hasPendingAsk(d) ? 'ask' : hasPendingPermission(d) ? 'perm' : d.status === 'error' ? 'error' : 'done';
 
 // One switchable branch option below a fork node in the focused chain (see App.focusBranches).
 interface BranchOpt { id: string; gist: string; followed: boolean; status: BoardData['status'] }
@@ -866,6 +984,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const revealed = React.useContext(RevealCtx) === id;
   // This board has an AskUserQuestion awaiting an answer → prominent pending-answer ring/badge (open to answer).
   const needsAsk = hasPendingAsk(data);
+  // This board has a tool awaiting permission approval (canUseTool) → 🔐 badge/ring + a compact approve
+  // control in the body, so the user can allow/deny without opening the conversation.
+  const needsPerm = hasPendingPermission(data);
   const targetPos = dir === 'LR' ? Position.Left : Position.Top;
   const sourcePos = dir === 'LR' ? Position.Right : Position.Bottom;
   // A compact node is a boundary CHECKPOINT, not an input board (it takes no prompt of its own — you fork
@@ -943,7 +1064,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
     <div
-      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''}`}
+      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''}`}
     >
       <Handle type="target" position={targetPos} />
       {/* Zoom-LOD content wrapper: keyed on `lod` so it remounts (and re-runs the dissolve) on a
@@ -968,16 +1089,21 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         {/* Needs-response: the model called AskUserQuestion and is blocked → icon badge prompting to open
             and answer (icon-only per memory ui-icon-only). Unread: finished but not yet viewed → red dot. */}
         {needsAsk && <span className="board__needask" title="Needs your answer (open the conversation to respond)">❓</span>}
+        {needsPerm && <span className="board__needperm" title="Needs your approval to run a tool — allow or deny below">🔐</span>}
         {data.unread && <span className="board__unread" title="Unread · finished — clears once you open it" />}
-        {/* Working spinner only when actually generating — a pending AskUserQuestion is WAITING on you,
-            not working, so show the ❓ badge instead (also keeps the two states visually unambiguous). */}
-        {data.status === 'streaming' && !needsAsk && <span className="board__working" title="Generating…" />}
+        {/* Working spinner only when actually generating — a pending AskUserQuestion / permission prompt is
+            WAITING on you, not working, so show the ❓ / 🔐 badge instead (keeps the states unambiguous). */}
+        {data.status === 'streaming' && !needsAsk && !needsPerm && <span className="board__working" title="Generating…" />}
         {/* M11: context-usage badge (omitted at far zoom where the card is just a gist line). */}
         {lod !== 'far' && <ContextBadge tokens={data.contextTokens} window={data.contextWindow} />}
         {data.autoCompacted && <span className="board__autocompact" title="The engine auto-compacted context this turn">🗜</span>}
         {compactBtn}
         {stopBtn}
       </div>
+
+      {/* Pending permission approval → a compact approve/deny control on the card itself, so the user can
+          answer without opening the conversation (twin of the ChatView PermissionCard). Detail LOD only. */}
+      {needsPerm && lod !== 'far' && <PermissionBanner data={data} />}
 
       {/* far: no body at all — the fused gist lives in the head title, keeping the card compact (and
           shorter than the detail card, so it never overlaps the detail-baseline layout). */}
@@ -1486,7 +1612,13 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp }: 
   const [allowed, setAllowed] = useState(() => listToText(config.allowedTools));
   const [disallowed, setDisallowed] = useState(() => listToText(config.disallowedTools));
   const [env, setEnv] = useState(() => envToText(config.env));
-  const needsCaveat = config.permissionMode !== 'bypassPermissions' && config.permissionMode !== 'inherit';
+  // The approval UI now exists, so non-bypass modes work. Surface only the two caveats worth a note:
+  // bypass runs tools with NO prompt (a safety warning), and plan mode runs nothing until you approve.
+  const permWarn = config.permissionMode === 'bypassPermissions'
+    ? '⚠️ Bypass: tools run with no approval prompt — Claude can edit files and run commands unattended.'
+    : config.permissionMode === 'plan'
+    ? 'ℹ️ Plan mode: Claude proposes a plan and runs no tools until you approve it.'
+    : null;
   return (
     <div className="settings__panel" onClick={(e) => e.stopPropagation()}>
       <div className="settings__panelhead">
@@ -1523,8 +1655,8 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp }: 
           {PERM_OPTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </label>
-      {needsCaveat && (
-        <div className="settings__warn">⚠️ No approval UI yet: tools that require approval may be denied or hang.</div>
+      {permWarn && (
+        <div className="settings__warn">{permWarn}</div>
       )}
 
       <EffortSlider value={config.effort} onChange={(v) => onChange({ effort: v })} />
@@ -1721,7 +1853,7 @@ function NoticePanel({ notices, onOpen, onClose }: {
                 onClick={() => onOpen(n.id)}
                 title="Locate this board on the canvas"
               >
-                <span className="noticerow__icon">{n.kind === 'ask' ? '❓' : n.kind === 'error' ? '⚠' : '✓'}</span>
+                <span className="noticerow__icon">{n.kind === 'ask' ? '❓' : n.kind === 'perm' ? '🔐' : n.kind === 'error' ? '⚠' : '✓'}</span>
                 <span className="noticerow__text">{n.gist}</span>
               </button>
             ))
@@ -1849,7 +1981,7 @@ function App() {
   // Pending jump-to-board request from a notification. Held in a ref so it survives until the target
   // node actually exists (a freshly re-opened panel restores its graph async — see the retry effect).
   // `focus` true (ask jump) → open the full-screen ChatView; false (done/error jump) → locate + pulse.
-  const revealReqRef = useRef<{ id: string; focus: boolean } | null>(null);
+  const revealReqRef = useRef<{ id: string; focus: boolean; composer?: boolean } | null>(null);
   const revealedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // clears the pulse ring
   const rfRef = useRef<ReactFlowInstance<BoardNodeT, Edge> | null>(null);
   const suppressEnterRef = useRef(false); // true briefly after exit so the zoom-down doesn't re-trigger enter
@@ -2248,6 +2380,11 @@ function App() {
     setEdges(newEdges);
     setNodes(autoLayout([...curNodes.map((n): BoardNodeT => ({ ...n, selected: false })), merged], newEdges));
     setDrawer({ merge, context: mergeContext, ids: [...leaves], base }); // read-only preview of what got deduped
+    // Zoom the canvas to the freshly created merge card and focus its composer so the user can ask their
+    // new question right away (the merge node carries the deduped context; the drawer stays up alongside as
+    // a read-only preview). The node isn't in nodesRef yet — the retry-on-[nodes] effect fires tryReveal
+    // once it lands (same deferred-reveal pattern as newConversation).
+    revealReqRef.current = { id: mid, focus: false, composer: true };
   }, [selectedIds, byId, onSend, onFork, onStop, onCompact]);
 
 
@@ -2420,6 +2557,19 @@ function App() {
     setRevealedId(req.id);
     if (revealedTimerRef.current) clearTimeout(revealedTimerRef.current);
     revealedTimerRef.current = setTimeout(() => setRevealedId(null), 2200);
+    // Merge flow: drop the cursor into the revealed card's composer so the user can type the new question
+    // immediately (a merge/idle card is `isFresh` → always renders its `.compose__input`). preventScroll:
+    // the RF pane positions nodes by transform (not scroll), but this guards against the browser nudging
+    // layout while the fitView zoom animates. Retry once — the node just (re)mounted, so its textarea may
+    // lag a frame behind this post-commit callback.
+    if (req.composer) {
+      const focusComposer = () => {
+        const el = document.querySelector<HTMLTextAreaElement>(`.react-flow__node[data-id="${req.id}"] textarea.compose__input`);
+        if (el) { el.focus({ preventScroll: true }); return true; }
+        return false;
+      };
+      requestAnimationFrame(() => { if (!focusComposer()) setTimeout(focusComposer, 80); });
+    }
   }, [enterFocus]);
 
   // True when a board event should surface to the user — they are NOT currently viewing this board's
@@ -2732,6 +2882,20 @@ function App() {
           patchTurn(m.boardId, m.turnIndex, (t) => ({
             steps: (t.steps ?? []).map((s) => (s.id === m.toolUseId ? { ...s, result: m.content, isError: m.isError } : s)),
           }));
+          break;
+        case 'permissionRequest':
+          // Native permission ask (canUseTool) → attach the prompt to its tool step (upsert by id; the
+          // tool_use block usually arrives first, but order-independent by design). hasPendingPermission
+          // then lights up the 🔐 badge + the approve UI + the notification SSOT automatically.
+          patchTurn(m.boardId, m.turnIndex, (t) => {
+            const steps = t.steps ?? [];
+            const permission = { title: m.title, description: m.description, displayName: m.displayName, canAlways: m.canAlways };
+            return {
+              steps: steps.some((s) => s.id === m.toolUseId)
+                ? steps.map((s) => (s.id === m.toolUseId ? { ...s, permission } : s))
+                : [...steps, { id: m.toolUseId, name: m.toolName, input: m.input, permission }],
+            };
+          });
           break;
       }
     };

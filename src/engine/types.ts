@@ -33,6 +33,12 @@ export interface TurnRequest {
   turnIndex?: number;        // multi-turn slot base (0 = top-level; ≥1 = post-settle follow-up via resume)
   cwd: string;
   persistSession?: boolean;  // default true; aux one-shot turns set false (kept out of the session list)
+  // Async continuation (knowledge.md 异步续接): hold the streaming-input session OPEN after a turn settles
+  // while the Stop hook reports in-flight background tasks / scheduled wakeups, so the SDK's in-process
+  // re-invocation streams in as another round. Default true (omitted ⇒ on); false ⇒ today's immediate close.
+  asyncContinuation?: boolean;
+  // Safety cap: close a held-open (waiting) session after this much inactivity. Omitted ⇒ adapter default.
+  idleCapMs?: number;
 }
 
 export interface ToolUseEvent {
@@ -40,6 +46,37 @@ export interface ToolUseEvent {
   parentId?: string; textOffset?: number; seq?: number;
 }
 export interface ToolResultEvent { toolUseId: string; content: string; isError: boolean }
+
+// ---- async continuation (Stop-hook gate + task lifecycle) ----
+/** An in-flight background task (Stop hook `background_tasks` / task_* messages). knowledge.md 异步续接. */
+export interface BackgroundTaskInfo {
+  id: string;
+  type: string;          // 'shell' | 'subagent' | 'monitor' | 'workflow' | …
+  status: string;        // 'running' | 'pending' | 'completed' | 'failed' | …
+  description?: string;
+  command?: string;      // present for 'shell' tasks
+}
+/** A scheduled wakeup (Stop hook `session_crons` — ScheduleWakeup / CronCreate / /loop). */
+export interface CronInfo {
+  id: string;
+  schedule: string;      // cron expression (minute granularity)
+  recurring: boolean;
+  prompt: string;        // text submitted when it fires
+}
+/** Snapshot of pending async work that holds the session open (from the Stop hook). Empty arrays = none. */
+export interface AsyncPending {
+  background: BackgroundTaskInfo[];
+  crons: CronInfo[];
+}
+/** A background-task lifecycle event, folded from task_started / task_updated / task_notification. */
+export interface TaskEvent {
+  id: string;
+  phase: 'started' | 'updated' | 'notification';
+  status?: string;       // notification: 'completed'|'failed'|'stopped'; updated: patch.status
+  description?: string;
+  summary?: string;      // notification summary
+  toolUseId?: string;
+}
 
 /** The turn's terminal payload. `sessionId`/`messageUuid` are plain strings (webview-facing, persisted
  * on BoardData). Mirrors today's `done` HostMessage so the host sink maps 1:1. */
@@ -71,6 +108,12 @@ export interface EventSink {
   // Live slash-command refresh: the engine reported a mid-session `commands_changed` (REPLACE the cached
   // list). Canvas-level (no boardId), like `model`. The cold-start list comes from `listSlashCommands`.
   commands(commands: SlashCommandSpec[]): void;
+  // Async continuation: a turn settled but the session is HELD OPEN because the Stop hook reported pending
+  // background tasks / scheduled wakeups (`pending`). The SDK will re-drive the agent in-process → another
+  // round. The host finalizes the board to `done` when runTurn resolves (session fully closed). 异步续接.
+  waiting(boardId: string, turnIndex: number, pending: AsyncPending): void;
+  // Background-task lifecycle (task_started/updated/notification), folded for display on the board.
+  task(boardId: string, turnIndex: number, ev: TaskEvent): void;
 }
 
 /** Channel 2 — the engine asks the host BEFORE running a tool. The Claude adapter wires this to the
@@ -116,6 +159,9 @@ export interface PreToolInterceptor {
 export interface TurnHandle {
   push(text: string, images?: ImageInput[]): void;   // inject a follow-up (engine queues it as next turn)
   interrupt(): Promise<void>;                          // cut the current turn (send-now)
+  // Async continuation: end a `waiting` hold — stop in-flight background tasks (q.stopTask) + close the
+  // held session so the board finalizes. The escape hatch behind the UI Stop-waiting button. (AD5/AD8)
+  stopWaiting(): Promise<void>;
 }
 
 /** Host-owned turn control passed into runTurn. The host owns the AbortController (its `abort` message

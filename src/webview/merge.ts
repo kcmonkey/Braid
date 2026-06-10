@@ -46,6 +46,18 @@ export interface ToolStep {
   // occurred right after a tool call (same prose offset, no text between) sorts AFTER it, not before.
   // undefined on legacy persisted steps → the timeline falls back to the fixed ord tie-break.
   seq?: number;
+  // Native permission prompt (canUseTool) attached to this tool call while the engine waits for the
+  // user's OK. Present from the `permissionRequest` message until the tool's result arrives (allow → real
+  // result; deny → is_error result), at which point `result` is set and the step renders normally. So
+  // "pending permission" = `permission != null && result == null` (drives hasPendingPermission + the
+  // approve/deny UI). TRANSIENT — stripped in serializeGraph (the query is dead on reload). `canAlways` =
+  // an "always allow" choice is available. (Permission-Approval plan)
+  permission?: {
+    title?: string;
+    description?: string;
+    displayName?: string;
+    canAlways?: boolean;
+  };
 }
 
 // Per-result char cap applied at capture (host side) before display/persistence — keeps
@@ -563,6 +575,14 @@ export function hasPendingAsk(d: BoardData): boolean {
   return boardTurns(d).some((t) => (t.steps ?? []).some((s) => s.name === 'AskUserQuestion' && s.result == null));
 }
 
+// True when the board has a tool awaiting the user's permission approval (a native canUseTool prompt:
+// `step.permission` is set but no `result` yet — the engine is blocked waiting on our answer). Drives the
+// 🔐 needs-permission badge/ring, the board-card + ChatView approve UI, and the attention/notification
+// SSOT (boardNeedsAttention). Scans every round's steps (single- or multi-turn). Pure → unit-testable.
+export function hasPendingPermission(d: BoardData): boolean {
+  return boardTurns(d).some((t) => (t.steps ?? []).some((s) => s.permission != null && s.result == null));
+}
+
 /**
  * M12: contract the fork edge ancestor→descendant into one board (the surviving ANCESTOR node). The
  * ancestor absorbs the descendant's round(s): turns accumulate [ancestor…, descendant…]; answer becomes a
@@ -896,11 +916,28 @@ export function makeEdge(source: string, target: string, kind: EdgeKind): Edge {
   };
 }
 
+// Strip the transient canUseTool `permission` overlay from steps before persistence — on reload the
+// query is dead, so a step left with `permission` set + no `result` would falsely flag the board as
+// "needs approval" forever. Returns the same array reference when nothing changed (no needless clone).
+function stripStepPermissions(steps: ToolStep[] | undefined): ToolStep[] | undefined {
+  if (!steps) return steps;
+  let changed = false;
+  const out = steps.map((s) => {
+    if (s.permission == null) return s;
+    changed = true;
+    const { permission, ...rest } = s;
+    return rest;
+  });
+  return changed ? out : steps;
+}
+
 export function serializeGraph(nodes: BoardNodeT[], edges: Edge[], idCounter: number, seqCounter: number): SerializedGraph {
   return {
     version: GRAPH_VERSION,
     nodes: nodes.map((n) => {
       const { onSend, onFork, onStop, onCompact, summarizing, ...data } = n.data; // drop callbacks + transient summarizing flag
+      data.steps = stripStepPermissions(data.steps);
+      if (data.turns) data.turns = data.turns.map((t) => (t.steps ? { ...t, steps: stripStepPermissions(t.steps) } : t));
       return { id: n.id, position: n.position, data };
     }),
     edges: edges.map((e) => ({

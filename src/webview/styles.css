@@ -117,6 +117,12 @@ body {
   box-shadow: 0 0 0 2px rgba(210,153,34,.30);
 }
 
+/* Pending permission approval — same "needs your action" amber family as needs-ask (the 🔐 vs ❓ badge
+   and the inline control disambiguate the two states). */
+.board.needs-perm { border-color: var(--fork); box-shadow: 0 0 0 3px rgba(210,153,34,.45); animation: needs-ask-pulse 1.4s ease-in-out infinite; }
+.board.needs-perm .board__head { background: linear-gradient(180deg,#3b3320,var(--panel)); }
+.board__needperm { flex: none; margin-top: 0; font-size: 12px; line-height: 1; cursor: default; }
+
 .board.unread:not(.needs-ask):not(.selected) { border-color: var(--unread); box-shadow: 0 0 0 2px rgba(255,77,79,.45); }
 .board__unread {
   flex: none; margin-top: 3px; width: 11px; height: 11px; border-radius: 50%;
@@ -135,6 +141,7 @@ body {
      not decoration, and must keep spinning regardless of the reduced-motion preference (it kept looking
      frozen otherwise). The rotation is a small, contained ring, not a large screen-wide motion. */
   .board.needs-ask { animation: none; }
+  .board.needs-perm { animation: none; }
 }
 .board.error { border-color: var(--red); }
 .board.merged { border-style: dashed; border-color: var(--merge); }
@@ -919,6 +926,62 @@ body {
 .askuser__btn:disabled { opacity: .45; cursor: default; }
 .askuser__wait { font-size: 11px; color: var(--accent); }
 
+/* Permission approval — ChatView inline card (PermissionCard). */
+.perm { border: 1px solid var(--fork); border-radius: 8px; background: rgba(210,153,34,.08); padding: 8px 10px; margin: 4px 0; }
+.perm__head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--fork); margin-bottom: 5px; }
+.perm__icon { flex: none; }
+.perm__title { color: var(--text); word-break: break-word; }
+.perm__detail { font-size: 11px; color: var(--text-2); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; margin-bottom: 7px; background: var(--bg-deep); border-radius: 5px; padding: 4px 6px; }
+.perm__actions { display: flex; align-items: center; gap: 6px; }
+.perm__btn { font-size: 13px; line-height: 1; min-width: 30px; padding: 5px 9px; border-radius: 6px; border: 1px solid var(--border-sub); background: var(--bg-deep); color: var(--text-2); cursor: pointer; }
+.perm__btn:hover:not(:disabled) { color: var(--text); }
+.perm__btn:disabled { opacity: .45; cursor: default; }
+.perm__btn--ok { color: var(--green); }
+.perm__btn--ok:hover:not(:disabled) { border-color: var(--green); }
+.perm__btn--deny { color: var(--red); }
+.perm__btn--deny:hover:not(:disabled) { border-color: var(--red); }
+.perm__btn--always { color: var(--accent); }
+.perm__btn--always:hover:not(:disabled) { border-color: var(--accent); }
+.perm__wait { font-size: 11px; color: var(--fork); }
+
+/* Permission approval — compact control on the board card (PermissionBanner). */
+.board__perm { margin: 6px 0; padding: 6px 8px; border: 1px solid var(--fork); border-radius: 7px; background: rgba(210,153,34,.10); }
+.board__perm-label { display: flex; align-items: center; gap: 5px; font-size: 11.5px; font-weight: 600; color: var(--text); margin-bottom: 5px; word-break: break-word; }
+.board__perm-ic { flex: none; }
+.board__perm-actions { display: flex; gap: 5px; }
+.board__perm-btn { font-size: 12px; line-height: 1; min-width: 26px; padding: 4px 7px; border-radius: 6px; border: 1px solid var(--border-sub); background: var(--bg-deep); color: var(--text-2); cursor: pointer; }
+.board__perm-btn:hover:not(:disabled) { color: var(--text); }
+.board__perm-btn:disabled { opacity: .45; cursor: default; }
+.board__perm-btn.ok { color: var(--green); }
+.board__perm-btn.ok:hover:not(:disabled) { border-color: var(--green); }
+.board__perm-btn.deny { color: var(--red); }
+.board__perm-btn.deny:hover:not(:disabled) { border-color: var(--red); }
+.board__perm-btn.always { color: var(--accent); }
+.board__perm-wait { font-size: 10.5px; color: var(--muted); margin-top: 4px; }
+
+/* ExitPlanMode confirmation card (PlanCard) — renders the plan + approve(mode)/reject(feedback). */
+.plan { border: 1px solid var(--accent); border-radius: 8px; background: var(--panel-2); padding: 8px 10px; margin: 4px 0; }
+.plan__head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+.plan__icon { flex: none; }
+.plan__body { font-size: 12px; color: var(--text); max-height: 360px; overflow: auto; background: var(--bg-deep); border-radius: 6px; padding: 6px 9px; margin-bottom: 7px; }
+.plan__empty { color: var(--muted); font-style: italic; }
+.plan__file { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--muted-2); background: var(--bg-deep); border: 1px solid var(--border-sub); border-radius: 5px; padding: 3px 7px; margin-bottom: 7px; cursor: pointer; }
+.plan__file:hover { border-color: var(--accent); color: var(--text-2); }
+.plan__actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.plan__mode { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted-2); }
+.plan__mode select { font-size: 11px; background: var(--bg-deep); color: var(--text-2); border: 1px solid var(--border-sub); border-radius: 5px; padding: 3px 5px; }
+.plan__btn { font-size: 11.5px; font-weight: 600; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--border-sub); background: var(--bg-deep); color: var(--text-2); cursor: pointer; }
+.plan__btn:hover:not(:disabled) { color: var(--text); }
+.plan__btn:disabled { opacity: .45; cursor: default; }
+.plan__btn--ok { color: var(--green); border-color: rgba(124,181,115,.4); }
+.plan__btn--ok:hover:not(:disabled) { border-color: var(--green); }
+.plan__btn--no { color: var(--red); }
+.plan__btn--no:hover:not(:disabled) { border-color: var(--red); }
+.plan__wait { font-size: 11px; color: var(--accent); }
+.plan__reject { display: flex; flex-direction: column; gap: 6px; }
+.plan__feedback { width: 100%; min-height: 48px; resize: vertical; font-size: 11.5px; font-family: inherit; background: var(--bg-deep); color: var(--text); border: 1px solid var(--border-sub); border-radius: 6px; padding: 5px 7px; box-sizing: border-box; }
+.plan__feedback:focus { outline: none; border-color: var(--accent); }
+
 /* "Working" indicator on the streaming turn in ChatView — the model is busy even with no fresh text yet
    (the gap after a tool/AskUserQuestion result before the next output). Keeps the chat from looking stuck.
    Uses a rotating SPINNER (same language as the canvas card's board__working), NOT a pulsing dot: when a
@@ -1101,6 +1164,8 @@ body {
 .noticerow__text { flex: 1; font-size: 12px; line-height: 1.4; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .noticerow--ask { border-color: var(--fork); }
 .noticerow--ask .noticerow__icon { color: var(--fork); }
+.noticerow--perm { border-color: var(--fork); }
+.noticerow--perm .noticerow__icon { color: var(--fork); }
 .noticerow--error { border-color: var(--red); }
 .noticerow--error .noticerow__icon { color: var(--red); }
 .noticerow--done .noticerow__icon { color: var(--accent); }
