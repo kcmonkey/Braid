@@ -2714,7 +2714,8 @@ function App() {
   useEffect(() => {
     if (!hydratedRef.current) return;
     const pending = nodes.some((n) => boardNeedsAttention(n.data));
-    const busy = nodes.some((n) => n.data.status === 'streaming');
+    // 'waiting' (异步续接) = background work still running → the board is busy (tab spinner), like streaming.
+    const busy = nodes.some((n) => n.data.status === 'streaming' || n.data.status === 'waiting');
     const last = tabStateRef.current;
     if (pending !== last.pending || busy !== last.busy) {
       tabStateRef.current = { pending, busy };
