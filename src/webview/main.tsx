@@ -1115,6 +1115,12 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
     {/* The board slot sizes to its card in BOTH LODs now (no fixed height): far cards are content-tight
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
+    {/* far-far map: the branch summary floats ABOVE the thin board, transparent (plain text, no plate).
+        Rendered in node DOM → it scales with the board; in-flow (first slot child) → the layout reserves
+        its space so rows don't collide. */}
+    {lod === 'far-far' && signpostLabel && (
+      <div className="board__toplabel nodrag nopan" title={signpostLabel}>{signpostLabel}</div>
+    )}
     <div
       className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''}`}
     >
@@ -1123,11 +1129,13 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           detail↔far switch. Handles stay OUTSIDE it so React Flow's cached handle geometry / edges
           are never disturbed (the classic handle-remount pitfall). */}
       <div className="board__content" key={lod}>
-      {/* Digest tags: at the TOP for detail/far. In 'far-far' they move to the BOTTOM (below the summary
-          label) — see the far-far body branch — so the card reads summary-on-top, tags-below. */}
+      {/* Digest tags: a strip at the TOP for detail/far. In 'far-far' they render INLINE in the (thin) head
+          row instead — see below — so the board is one slim bar. */}
       {lod !== 'far-far' && <TagChips tags={data.tags} />}
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
+        {/* far-far: tags inline in the thin head row (the board is a slim bar; the summary floats above it). */}
+        {lod === 'far-far' && <TagChips tags={data.tags} />}
         {/* Multi-turn board: M11 in-board follow-ups or an M12 fusion — show how many rounds it holds. */}
         {data.turns && data.turns.length > 1 && (
           <span className="board__fused" title={`${data.turns.length} rounds`}>⛓{data.turns.length}</span>
@@ -1166,15 +1174,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
       {/* Async continuation (异步续接): what background work / wakeup is holding this board open (detail LOD). */}
       {data.status === 'waiting' && isDetail && <AsyncChips pending={data.asyncPending} />}
 
-      {/* Body by LOD: far-far shows the branch label as the board BODY (main content; it scales with the
-          board and stays inside the card → no overlap). far has no body (gist lives in the head). detail =
-          the full body below. */}
-      {lod === 'far-far' ? (
-        <>
-          {signpostLabel && <div className="board__farfarbody nodrag nopan" title={signpostLabel}>{signpostLabel}</div>}
-          <TagChips tags={data.tags} /> {/* tags at the BOTTOM in far-far (summary-on-top, tags-below) */}
-        </>
-      ) : !isDetail ? null : compacting ? (
+      {/* Body by LOD: far/far-far have NO body — the board is a thin bar (far = gist in head; far-far = just
+          badge+tags, with the summary floating above). detail = the full body below. */}
+      {!isDetail ? null : compacting ? (
         <div className="board__summary board__compacting"><span className="board__dot" /> 🗜 Compacting…</div>
       ) : data.compact && !data.prompt ? (
         // Compacted-boundary node: a context checkpoint, NOT an input board. Show the compacted summary
