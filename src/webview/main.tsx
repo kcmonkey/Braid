@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { createPortal } from 'react-dom';
 import {
   ReactFlow, ReactFlowProvider, Background, MiniMap, Handle, Position,
   applyNodeChanges, useUpdateNodeInternals, type Edge, type NodeChange, type Node,
@@ -21,8 +22,9 @@ import {
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
 import { layoutGraph, type LayoutDir } from './layout';
-import type { HostMessage, WebviewMessage, McpServerInfo, BoardTag } from '../protocol';
+import type { HostMessage, WebviewMessage, McpServerInfo, BoardTag, SlashCommandSpec } from '../protocol';
 import { PROVIDER_CATALOG } from '../protocol';
+import { detectTrigger, filterCommands, applyCompletion, type Trigger } from './autofill';
 import type { BraidConfig } from '../sdkOptions';
 
 declare function acquireVsCodeApi(): {
@@ -599,6 +601,135 @@ const DraftCtx = React.createContext<DraftState>({ get: () => '', set: () => {} 
 const imageFilesFrom = (list: FileList | File[] | null | undefined): File[] =>
   list ? Array.from(list).filter((f) => f.type.startsWith('image/')) : [];
 
+// ---- Composer autofill (`/` slash commands + `@` file mentions) ----
+// Workspace-level (not per-board): one command list + one file-search channel, shared by every composer.
+// `commands` = the active provider's slash commands (host-cached, replaced on commands_changed). `searchFiles`
+// dispatches a debounced host file search; `fileResults` is the latest reply (echoed query → drop stale).
+interface AutofillData {
+  commands: SlashCommandSpec[];
+  searchFiles: (query: string) => void;
+  fileResults: { query: string; files: string[] };
+}
+const AutofillCtx = React.createContext<AutofillData>({ commands: [], searchFiles: () => {}, fileResults: { query: '', files: [] } });
+
+// One row's display data, plus the exact text spliced in on accept (incl. the trigger char + trailing space).
+interface AutofillItem { insert: string; primary: string; secondary?: string; hint?: string }
+
+// The dropdown. Rendered in a PORTAL anchored to the textarea's screen rect (position:fixed), so it escapes
+// the card's `overflow:hidden` AND renders at readable size regardless of canvas zoom. Flips below the input
+// when there's little room above (card near the viewport top). onMouseDown preventDefault keeps the textarea
+// focused (no blur-close) when clicking a row.
+function AutofillMenu({ anchorRef, items, active, kind, loading, onPick, onHover }: {
+  anchorRef: React.RefObject<HTMLTextAreaElement>;
+  items: AutofillItem[]; active: number; kind: 'slash' | 'file'; loading: boolean;
+  onPick: (it: AutofillItem) => void; onHover: (i: number) => void;
+}) {
+  const ta = anchorRef.current;
+  if (!ta) return null;
+  const rect = ta.getBoundingClientRect();
+  const width = Math.min(460, Math.max(300, rect.width));
+  let left = Math.max(8, rect.left);
+  if (left + width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - width);
+  const below = rect.top < 340; // little room above → drop below the input
+  const style: React.CSSProperties = below
+    ? { position: 'fixed', left, top: rect.bottom + 6, width, zIndex: 80 }
+    : { position: 'fixed', left, bottom: window.innerHeight - rect.top + 6, width, zIndex: 80 };
+  return createPortal(
+    <div className="autofill nodrag nopan" style={style} onMouseDown={(e) => e.preventDefault()}>
+      <div className="autofill__title">{kind === 'slash' ? 'Slash Commands' : 'Files'}</div>
+      {items.length === 0 && loading && <div className="autofill__empty">Searching…</div>}
+      {items.map((it, i) => (
+        <div
+          key={it.insert + i}
+          className={`autofill__item${i === active ? ' is-active' : ''}`}
+          onMouseEnter={() => onHover(i)}
+          onMouseDown={(e) => { e.preventDefault(); onPick(it); }}
+        >
+          <div className="autofill__row">
+            <span className="autofill__name">{kind === 'slash' ? '/' : ''}{it.primary}</span>
+            {it.hint && <span className="autofill__hint">{it.hint}</span>}
+            {kind === 'file' && it.secondary && <span className="autofill__dir">{it.secondary}</span>}
+          </div>
+          {kind === 'slash' && it.secondary && <div className="autofill__desc">{it.secondary}</div>}
+        </div>
+      ))}
+    </div>,
+    document.body,
+  );
+}
+
+// Hook shared by both composers (card + ChatView): owns trigger/active state, derives items from the pure
+// autofill core + the shared command/file data, and returns merged textarea handlers + the menu element.
+// `onKeyDown` returns true when it consumed the key (Arrow/Enter/Tab/Esc while open) so the caller skips its
+// own submit logic. `value`/`setValue` are the board's shared draft (DraftCtx).
+function useAutofill(setValue: (s: string) => void, taRef: React.RefObject<HTMLTextAreaElement>) {
+  const ctx = React.useContext(AutofillCtx);
+  const [trigger, setTrigger] = useState<Trigger | null>(null);
+  const [active, setActive] = useState(0);
+
+  const recompute = useCallback((text: string, caret: number) => {
+    const t = detectTrigger(text, caret);
+    setTrigger(t);
+    setActive(0);
+    if (t && t.kind === 'file') ctx.searchFiles(t.query);
+  }, [ctx]);
+
+  const loading = !!trigger && trigger.kind === 'file' && ctx.fileResults.query !== trigger.query;
+  const items: AutofillItem[] = useMemo(() => {
+    if (!trigger) return [];
+    if (trigger.kind === 'slash') {
+      return filterCommands(ctx.commands, trigger.query).map((c) => ({
+        insert: `/${c.name} `, primary: c.name, secondary: c.description, hint: c.argumentHint,
+      }));
+    }
+    if (ctx.fileResults.query !== trigger.query) return []; // stale / still loading
+    return ctx.fileResults.files.map((f) => {
+      const slash = f.lastIndexOf('/');
+      return { insert: `@${f} `, primary: slash >= 0 ? f.slice(slash + 1) : f, secondary: slash >= 0 ? f.slice(0, slash + 1) : undefined };
+    });
+  }, [trigger, ctx.commands, ctx.fileResults]);
+
+  const open = !!trigger && (items.length > 0 || loading);
+  const activeClamped = items.length ? Math.min(active, items.length - 1) : 0;
+
+  const accept = useCallback((it: AutofillItem) => {
+    const ta = taRef.current; if (!ta) return;
+    const t = detectTrigger(ta.value, ta.selectionStart ?? ta.value.length);
+    if (!t) return;
+    const { text, caret } = applyCompletion(ta.value, t, it.insert);
+    setValue(text);
+    setTrigger(null);
+    requestAnimationFrame(() => { const el = taRef.current; if (el) { el.focus(); el.setSelectionRange(caret, caret); } });
+  }, [setValue, taRef]);
+
+  const onChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setValue(e.target.value);
+    recompute(e.target.value, e.target.selectionStart ?? e.target.value.length);
+  }, [setValue, recompute]);
+
+  const onSelect = useCallback((e: React.SyntheticEvent<HTMLTextAreaElement>) => {
+    const el = e.currentTarget;
+    recompute(el.value, el.selectionStart ?? el.value.length);
+  }, [recompute]);
+
+  // Returns true iff it handled the key (caller must then NOT run its own submit/newline logic).
+  const onKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (!trigger) return false;
+    if (e.key === 'Escape') { e.preventDefault(); setTrigger(null); return true; }
+    if (!items.length) return false; // loading / no matches → let Enter etc. fall through to submit
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive((a) => (a + 1) % items.length); return true; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); setActive((a) => (a - 1 + items.length) % items.length); return true; }
+    if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); accept(items[activeClamped]); return true; }
+    return false;
+  }, [trigger, items, activeClamped, accept]);
+
+  const menu = open && trigger
+    ? <AutofillMenu anchorRef={taRef} items={items} active={activeClamped} kind={trigger.kind} loading={loading} onPick={accept} onHover={setActive} />
+    : null;
+
+  return { menu, onChange, onKeyDown, onSelect };
+}
+
 // Thumbnail strip + file-picker button. Lives in a compose box; reads the shared ImageCtx. Paste/drop
 // capture is wired on each compose box's textarea/container (they call add() with the dropped files).
 function ImageBar({ boardId }: { boardId: string }) {
@@ -769,6 +900,10 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
     setDraft('');
   };
 
+  // Composer autofill (`/` commands + `@` files): the hook owns the menu + merged textarea handlers.
+  const taRef = useRef<HTMLTextAreaElement>(null);
+  const af = useAutofill(setDraft, taRef);
+
   // Graphical "+" to spawn a child conversation, pinned on the output handle (LR → right dot,
   // TB → bottom dot). Lives outside the overflow-hidden .board so it isn't clipped at the edge.
   // Fork "+" on done boards (their real session) AND on compacted-boundary nodes (idle, carrying the
@@ -892,15 +1027,19 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
               <div className="compose__hint">🗜 Prior context compacted — further questions build on the compacted context</div>
             )}
             <textarea
+              ref={taRef}
               className="compose__input"
-              placeholder={data.merged ? 'Ask a new question based on the merged context…' : data.compact ? 'Continue based on the compacted context…' : 'Ask something…  (Enter to send / Shift+Enter for newline)'}
+              placeholder={data.merged ? 'Ask a new question based on the merged context…' : data.compact ? 'Continue based on the compacted context…' : 'Ask something…  (/ commands · @ files · Enter to send)'}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              onChange={af.onChange}
+              onSelect={af.onSelect}
               onPaste={(e) => { const f = imageFilesFrom(e.clipboardData.files); if (f.length) { e.preventDefault(); imgCtx.add(id, f); } }}
               onKeyDown={(e) => {
+                if (af.onKeyDown(e)) return;
                 if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(); }
               }}
             />
+            {af.menu}
             <AttachBar boardId={id} />
             <ImageBar boardId={id} />
             <button className="btn primary" onClick={submit} title="Send (Enter)">↑</button>
@@ -1166,6 +1305,9 @@ function ChatView({
     setDraft('');
   };
 
+  // Composer autofill (`/` commands + `@` files): shares the hook with the card composer.
+  const af = useAutofill(setDraft, taRef);
+
   // Exit, telling the canvas which board to zoom back to = whatever you're currently viewing in the
   // thread (the scroll-spy board), read live from the DOM so it's right regardless of nav/scroll state.
   const requestExit = () => onExit(currentViewedId() ?? undefined);
@@ -1234,13 +1376,15 @@ function ChatView({
           <textarea
             ref={taRef}
             className="composer__input"
-            placeholder={leafCompactIdle ? 'Continue on the compacted context (opens a new board)…' : leafStatus === 'streaming' ? 'Follow up while generating: Enter to queue · » to send now…' : 'Continue…'}
+            placeholder={leafCompactIdle ? 'Continue on the compacted context (opens a new board)…' : leafStatus === 'streaming' ? 'Follow up while generating: Enter to queue · » to send now…' : 'Continue…  (/ commands · @ files)'}
             rows={1}
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={af.onChange}
+            onSelect={af.onSelect}
             onPaste={(e) => { const f = imageFilesFrom(e.clipboardData.files); if (f.length) { e.preventDefault(); imgCtx.add(leafId, f); } }}
-            onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(false); } }}
+            onKeyDown={(e) => { if (af.onKeyDown(e)) return; if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit(false); } }}
           />
+          {af.menu}
           <div className="composer__bar">
             <div className="composer__left">
               {config && <SettingsControls config={config} onChange={onConfigChange} resolvedModel={resolvedModel} up onOpenMcp={onOpenMcp} />}
@@ -1651,6 +1795,15 @@ function App() {
   const [mcpPanelOpen, setMcpPanelOpen] = useState(false);
   const [mcpServers, setMcpServers] = useState<McpServerInfo[] | null>(null);
   const [mcpBusy, setMcpBusy] = useState<string[]>([]);
+  // Composer autofill (workspace-level): the host-served slash-command list + latest `@`-file search reply.
+  // `searchFiles` debounces the host round-trip; the reply echoes its query so the menu drops stale results.
+  const [slashCommands, setSlashCommands] = useState<SlashCommandSpec[]>([]);
+  const [fileResults, setFileResults] = useState<{ query: string; files: string[] }>({ query: '', files: [] });
+  const fileSearchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const searchFiles = useCallback((query: string) => {
+    if (fileSearchTimerRef.current) clearTimeout(fileSearchTimerRef.current);
+    fileSearchTimerRef.current = setTimeout(() => post({ type: 'searchFiles', query }), 120);
+  }, []);
   // M7 gap3: per-board pending editor-context attachment, keyed by composer board id (DraftCtx-style SSOT
   // so the card and the ChatView composer for one board share a chip, and attachments never bleed across
   // boards). A ref mirror is read at send time (not the state) so a send in the same tick as a change isn't
@@ -2416,6 +2569,7 @@ function App() {
   useEffect(() => {
     post({ type: 'ready' });
     post({ type: 'getConfig' });
+    post({ type: 'getSlashCommands' }); // composer `/` autofill — populate before the first keystroke
   }, []);
 
   // Settings change → optimistically update local state (so controlled inputs don't lag a round-trip)
@@ -2449,6 +2603,8 @@ function App() {
         }
         case 'config': setConfig(m.config); configRef.current = m.config; break;
         case 'model': setResolvedModel(m.model); break;
+        case 'slashCommands': setSlashCommands(m.commands); break;
+        case 'fileResults': setFileResults({ query: m.query, files: m.files }); break;
         case 'mcpServers': setMcpServers(m.servers); setMcpBusy(m.busy); break;
         case 'rollbackResult': {
           // Phase 3: transient hint summarizing the best-effort file rollback after a delete.
@@ -2931,6 +3087,10 @@ function App() {
     () => ({ get: (id) => drafts[id] ?? '', set: setDraft }),
     [drafts, setDraft],
   );
+  const autofillState = useMemo<AutofillData>(
+    () => ({ commands: slashCommands, searchFiles, fileResults }),
+    [slashCommands, searchFiles, fileResults],
+  );
 
   return (
     <DirCtx.Provider value={dir}>
@@ -2941,6 +3101,7 @@ function App() {
     <AttachCtx.Provider value={attachState}>
     <ImageCtx.Provider value={imageState}>
     <DraftCtx.Provider value={draftState}>
+    <AutofillCtx.Provider value={autofillState}>
     <div
       style={{ width: '100vw', height: '100vh' }}
       onPointerMove={onCanvasPointerMove}
