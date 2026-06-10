@@ -2875,7 +2875,12 @@ function App() {
     if (hit) enterFocus(hit.id);
   }, [enterFocus]);
 
-  const onNodeDoubleClick = useCallback((_: React.MouseEvent, node: Node) => {
+  const onNodeDoubleClick = useCallback((e: React.MouseEvent, node: Node) => {
+    // A dbl-click that lands on an editable/interactive element (e.g. selecting a word in the
+    // compose textarea, or hitting a button) must NOT open the ChatView — only a dbl-click on the
+    // bare card body enters focus. Every interactive widget on the card carries `.nodrag`.
+    const t = e.target as HTMLElement | null;
+    if (t?.closest('textarea, input, select, button, a, .nodrag')) return;
     enterFocus(node.id);
   }, [enterFocus]);
 
