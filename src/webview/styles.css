@@ -245,14 +245,14 @@ body {
 .board.lod-far-far .board__head .board__tags { padding: 0; margin: 0; gap: 7px; }
 /* Far-far "labels" = the tag chips + type badge, blown up much LARGER so they're the prominent content of
    the bar (this is the color-coded branch map; the summary above is a small caption). */
-.board.lod-far-far .tag { font-size: 24px; padding: 2px 11px; border-radius: 8px; letter-spacing: .02em; }
-.board.lod-far-far .board__turn { font-size: 19px; padding: 3px 11px; border-radius: 8px; }
+.board.lod-far-far .tag { font-size: 18px; padding: 2px 10px; border-radius: 7px; letter-spacing: .02em; }
+.board.lod-far-far .board__turn { font-size: 16px; padding: 3px 10px; border-radius: 7px; }
 /* The summary floats above the thin board — TRANSPARENT (plain text, no plate). FIXED height (filled for
    signposts, empty for other nodes) so every far-far node box is the same height → all bars line up at the
    same level and connected bars are horizontal. Width matched to the board keeps the node ~320px wide
    (stable column spacing). The text is bottom-anchored (justify-content:flex-end) so it hugs the bar. */
 .board__toplabel {
-  width: 320px; max-width: 320px; height: 64px; margin-bottom: 7px; padding: 0 4px; box-sizing: border-box;
+  width: 320px; max-width: 320px; height: 80px; margin-bottom: 7px; padding: 0 4px; box-sizing: border-box;
   display: flex; flex-direction: column; justify-content: flex-end; align-items: center;
   background: none; cursor: default; user-select: none;
 }
