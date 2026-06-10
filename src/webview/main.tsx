@@ -916,6 +916,28 @@ function TagChips({ tags }: { tags?: BoardTag[] }) {
   );
 }
 
+// Async continuation (异步续接): chips for the background tasks + scheduled wakeups holding a board open.
+// Shared by the board card (detail) and the ChatView. Timing is intentionally vague (minute-granularity
+// cron — knowledge.md), so wakeups never show a precise countdown.
+function AsyncChips({ pending }: { pending?: BoardData['asyncPending'] }) {
+  if (!pending || (!pending.background.length && !pending.crons.length)) return null;
+  const done = (s: string) => s === 'completed' || s === 'failed' || s === 'stopped';
+  return (
+    <div className="async-chips nodrag">
+      {pending.background.map((t) => (
+        <span key={t.id} className={`async-chip async-chip--task${done(t.status) ? ' async-chip--done' : ''}`} title={t.command || t.description || `${t.type} task`}>
+          ⚙ {done(t.status) ? t.status : (t.description || t.type || 'task')}
+        </span>
+      ))}
+      {pending.crons.map((c) => (
+        <span key={c.id} className="async-chip async-chip--cron" title={`Scheduled wakeup${c.recurring ? ' (recurring)' : ''} — fires at minute granularity: ${c.prompt}`}>
+          ⏰ wakeup{c.recurring ? ' (recurring)' : ''}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 // One-line gist for a board: prefer the generated mini summary (miniSummary), else fall back through
 // summary headline → answer slice → question → compact label. Shared by the far-zoom card gist and
 // the ChatView conversation nav so both label a board the same way (SSOT).
@@ -1111,6 +1133,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         {/* Working spinner only when actually generating — a pending AskUserQuestion / permission prompt is
             WAITING on you, not working, so show the ❓ / 🔐 badge instead (keeps the states unambiguous). */}
         {data.status === 'streaming' && !needsAsk && !needsPerm && <span className="board__working" title="Generating…" />}
+        {/* Async continuation (异步续接): held open for background work / a scheduled wakeup — a distinct
+            indicator (not the streaming spinner) so the board reads as "waiting", not stuck/done. */}
+        {data.status === 'waiting' && <span className="board__awaiting" title={`Waiting — ${describeAsyncPending(data.asyncPending) || 'background work'} (will continue automatically; Stop to end)`}>⏱</span>}
         {/* M11: context-usage badge (omitted at far zoom where the card is just a gist line). */}
         {lod !== 'far' && <ContextBadge tokens={data.contextTokens} window={data.contextWindow} />}
         {data.autoCompacted && <span className="board__autocompact" title="The engine auto-compacted context this turn">🗜</span>}
@@ -1121,6 +1146,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
       {/* Pending permission approval → a compact approve/deny control on the card itself, so the user can
           answer without opening the conversation (twin of the ChatView PermissionCard). Detail LOD only. */}
       {needsPerm && lod !== 'far' && <PermissionBanner data={data} />}
+
+      {/* Async continuation (异步续接): what background work / wakeup is holding this board open (detail LOD). */}
+      {data.status === 'waiting' && lod !== 'far' && <AsyncChips pending={data.asyncPending} />}
 
       {/* far: no body at all — the fused gist lives in the head title, keeping the card compact (and
           shorter than the detail card, so it never overlaps the detail-baseline layout). */}
@@ -1284,6 +1312,7 @@ function ChatView({
   const imgCtx = React.useContext(ImageCtx);
   const bottomRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null); // wrapper observed for auto-follow (height changes → stick to bottom)
   const taRef = useRef<HTMLTextAreaElement>(null);
   // Right-side conversation nav: auto-opens when the viewport is wide enough (NAV_AUTO_OPEN_WIDTH),
   // else folded to preserve full-width reading. The user can toggle it any time for this focus session.
@@ -1300,8 +1329,10 @@ function ChatView({
   // effect on each successive switch.
   const [branchAnim, setBranchAnim] = useState<{ ids: string[]; tick: number } | null>(null);
   // Auto-follow streaming output only while the user is pinned at (or near) the bottom. Once they
-  // scroll up to read earlier turns, stop yanking the view down on every delta; scrolling back to
-  // the bottom re-pins. Tracked in a ref (read inside the scroll effect, no re-render needed).
+  // scroll up to read earlier turns, stop yanking the view down; scrolling back to the bottom re-pins.
+  // Tracked in a ref, read inside the content ResizeObserver below — which follows EVERY height change
+  // (streaming text AND tool cards/diffs/results growing), so tool-call output no longer scrolls out of
+  // view the way the old `tail`/answer-text–driven follow did (tool steps don't change the answer text).
   const pinnedRef = useRef(true);
   // scroll-spy: active nav item = the last turn whose top has scrolled to/above the spy line.
   // (forEach in DOM order keeps the lowest turn that still satisfies the condition.) setState
@@ -1401,31 +1432,48 @@ function ChatView({
   //  • Branch switch (goBranch while mounted): do NOT jump. The fork's chips sit in the unchanged region
   //    above the animated branch, so leaving the scroll put keeps them in place while the chosen branch
   //    fades+slides in below (a reveal scroll only kicks in if it lands off-screen — see next effect).
-  // While the entry is unchanged (same view, streaming deltas), smoothly follow the bottom if pinned.
+  // Following the bottom while pinned is NOT done here — it used to live in this effect's `else` branch,
+  // firing on `tail` (answer-text) changes only, so tool-call output (which grows `steps`, not the answer)
+  // scrolled out of view. That follow now lives in the content ResizeObserver below, which reacts to every
+  // height change regardless of source. This effect only handles ENTRY-node changes.
   // useLayoutEffect (pre-paint) so a branch switch's animation class is present on the chosen branch's
   // FIRST paint — a post-paint useEffect would flash the branch at full opacity for one frame before the
   // fade restarts it from 0.
   const scrolledEntryRef = useRef<string | null>(null);
   useLayoutEffect(() => {
-    if (scrolledEntryRef.current !== entryId) {
-      const isSwitch = scrolledEntryRef.current !== null;
-      scrolledEntryRef.current = entryId;
-      if (isSwitch && entryId) {
-        // Capture the chosen branch = the entry board and everything below it in the chain. Only these
-        // boards get tagged for the fade+slide; ancestors above the fork stay put and don't animate.
-        const idx = rendered.findIndex((b) => b.id === entryId);
-        const ids = idx >= 0 ? rendered.slice(idx).map((b) => b.id) : [entryId];
-        setBranchAnim((p) => ({ ids, tick: (p?.tick ?? 0) + 1 }));
-      } else {
-        const anchor = entryId ?? leafId;
-        const el = scrollRef.current?.querySelector<HTMLElement>(`.turn[data-board-id="${anchor}"]`);
-        if (el) el.scrollIntoView({ behavior: 'auto', block: 'start' });
-        else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
-      }
-    } else if (pinnedRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (scrolledEntryRef.current === entryId) return;
+    const isSwitch = scrolledEntryRef.current !== null;
+    scrolledEntryRef.current = entryId;
+    if (isSwitch && entryId) {
+      // Capture the chosen branch = the entry board and everything below it in the chain. Only these
+      // boards get tagged for the fade+slide; ancestors above the fork stay put and don't animate.
+      const idx = rendered.findIndex((b) => b.id === entryId);
+      const ids = idx >= 0 ? rendered.slice(idx).map((b) => b.id) : [entryId];
+      setBranchAnim((p) => ({ ids, tick: (p?.tick ?? 0) + 1 }));
+    } else {
+      const anchor = entryId ?? leafId;
+      const el = scrollRef.current?.querySelector<HTMLElement>(`.turn[data-board-id="${anchor}"]`);
+      if (el) el.scrollIntoView({ behavior: 'auto', block: 'start' });
+      else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
     }
   }, [boards.length, tail, entryId, leafId]);
+  // Auto-follow the latest output while pinned to the bottom — the SSOT for streaming-follow. A
+  // ResizeObserver on the content wrapper fires on EVERY height change (streaming text, tool cards
+  // appearing, diffs/results expanding), so output stays in view whatever produces it; the old
+  // `tail`-driven follow missed tool steps because they don't change the answer text. The observer's
+  // initial callback is skipped so it never overrides the entry-anchor jump above. pinnedRef is owned
+  // by onScroll, so scrolling up turns following off until the user returns to the bottom.
+  useEffect(() => {
+    const content = contentRef.current;
+    if (!content || typeof ResizeObserver === 'undefined') return;
+    let primed = false;
+    const ro = new ResizeObserver(() => {
+      if (!primed) { primed = true; return; }
+      if (pinnedRef.current) bottomRef.current?.scrollIntoView({ block: 'end' });
+    });
+    ro.observe(content);
+    return () => ro.disconnect();
+  }, []);
   // After a branch switch mounts the chosen branch, reveal it ONLY if it landed below the fold (e.g.
   // switching at a fork that sat at the bottom — the picker case). A mid-chain switch where the branch is
   // already on-screen doesn't move (the condition is false), so the clicked chips stay exactly in place.
@@ -1484,13 +1532,16 @@ function ChatView({
       <div className="chatview__main">
       <div className="chatview__scrollwrap">
       <div className="chatview__scroll" ref={scrollRef} onScroll={onScroll}>
-        {/* The thread, root → leaf. A fork node (branches[b.id]) gets a BranchSwitcher after its turn(s):
-            mid-chain it shows which branch is followed (switchable); at the view leaf it's the picker.
-            On a branch switch the chosen branch's boards (branchAnim.ids) fade+slide in, while the shared
-            ancestors above keep their DOM identity and stay still — so the scroll position holds and only
-            the new branch moves. */}
-        {rendered.map((b) => renderBoard(b, branchAnim?.ids.includes(b.id) ?? false))}
-        <div ref={bottomRef} />
+        {/* Content wrapper observed by the auto-follow ResizeObserver (any height growth → stick to the
+            bottom while pinned). The thread, root → leaf. A fork node (branches[b.id]) gets a BranchSwitcher
+            after its turn(s): mid-chain it shows which branch is followed (switchable); at the view leaf
+            it's the picker. On a branch switch the chosen branch's boards (branchAnim.ids) fade+slide in,
+            while the shared ancestors above keep their DOM identity and stay still — so the scroll position
+            holds and only the new branch moves. */}
+        <div className="chatview__content" ref={contentRef}>
+          {rendered.map((b) => renderBoard(b, branchAnim?.ids.includes(b.id) ?? false))}
+          <div ref={bottomRef} />
+        </div>
       </div>
       {!atBottom && (
         <button
@@ -1516,10 +1567,16 @@ function ChatView({
           {leafCompactIdle && (
             <div className="composer__hint">🗜 Compacted boundary — your question opens a new board built on the compacted context</div>
           )}
+          {leafStatus === 'waiting' && (
+            <div className="composer__hint composer__hint--waiting">
+              <span className="working__dot" /> Waiting — {describeAsyncPending(last?.data.asyncPending) || 'background work'}. Claude continues automatically; ■ to end the wait.
+              <AsyncChips pending={last?.data.asyncPending} />
+            </div>
+          )}
           <textarea
             ref={taRef}
             className="composer__input"
-            placeholder={leafCompactIdle ? 'Continue on the compacted context (opens a new board)…' : leafStatus === 'streaming' ? 'Follow up while generating: Enter to queue · » to send now…' : 'Continue…  (/ commands · @ files)'}
+            placeholder={leafCompactIdle ? 'Continue on the compacted context (opens a new board)…' : leafStatus === 'streaming' ? 'Follow up while generating: Enter to queue · » to send now…' : leafStatus === 'waiting' ? 'Background work running — Enter to add a round to this board…' : 'Continue…  (/ commands · @ files)'}
             rows={1}
             value={draft}
             onChange={af.onChange}
@@ -1547,6 +1604,13 @@ function ChatView({
                     </>
                   )}
                   <button className="iconbtn iconbtn--stop" title="Stop generating" onClick={() => onStop(leafId)}>■</button>
+                </>
+              ) : leafStatus === 'waiting' ? (
+                // 异步续接 AD8: send adds a round to THIS board (focusSend pushes into the held session);
+                // ■ ends the wait (stopWaiting) and finalizes the board.
+                <>
+                  <button className="iconbtn iconbtn--send" title="Send: add a round to this board while it waits (Enter)" onClick={() => submit(false)} disabled={!draft.trim()}>↑</button>
+                  <button className="iconbtn iconbtn--stop" title="Stop waiting — end background work and finalize this board" onClick={() => onStop(leafId)}>■</button>
                 </>
               ) : (
                 <button className="iconbtn iconbtn--send" title="Send (Enter)" onClick={() => submit(false)} disabled={!draft.trim()}>↑</button>
