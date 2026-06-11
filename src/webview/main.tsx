@@ -1930,13 +1930,14 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
 // In-canvas settings (M5): a model quick-switch dropdown + the resolved full model name + ⚙ gear.
 // Changes write through to global VS Code settings (host applies; see App.setConfigField).
 // `resolvedModel` is the full id from the last query's init message (e.g. claude-opus-4-8).
-function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, showPerm, activeProvider, providerCaps, onSetActive, onOpenAccount }: {
+function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, showPerm, gearOnly, activeProvider, providerCaps, onSetActive, onOpenAccount }: {
   config: BraidConfig;
   onChange: (patch: Partial<BraidConfig>) => void;
   resolvedModel: string | null;
   up?: boolean; // open the gear panel upward (when the controls sit at the bottom, e.g. the composer)
   onOpenMcp: () => void; // open the MCP servers manager from inside the gear panel
   showPerm?: boolean; // show the read-only permission-mode indicator (composer only — the canvas chip is hidden behind the focus view)
+  gearOnly?: boolean; // render only the ⚙ gear + panel (no model quick-switch) — used in the top-right account bar
   activeProvider: EngineId;
   providerCaps: Partial<Record<EngineId, ProviderCapabilitiesView>>;
   onSetActive: (id: EngineId) => void;
@@ -1947,12 +1948,14 @@ function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, show
   const models = providerCaps[activeProvider]?.models ?? MODEL_OPTS;
   return (
     <div className={`settings nodrag nopan ${up ? 'settings--up' : ''}`}>
-      <select
-        className="settings__model" title="Model" value={config.model}
-        onChange={(e) => onChange({ model: e.target.value })}
-      >
-        {models.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-      </select>
+      {!gearOnly && (
+        <select
+          className="settings__model" title="Model" value={config.model}
+          onChange={(e) => onChange({ model: e.target.value })}
+        >
+          {models.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+      )}
       {/* Read-only permission-mode indicator: the canvas PermModeHint chip is hidden behind the focus
           view, so surface the active mode here too. Switch via Shift+Tab or the ⚙ panel; bypass = red. */}
       {showPerm && (
@@ -2233,21 +2236,22 @@ function AccountsPanel({ accounts, activeProvider, onSignIn, onSignOut, onSetAct
   );
 }
 
-// Passive plan-limit chip — the always-visible usage indicator, fed by the free `rate_limit_event` that
-// rides every turn stream (no control session). Hidden until a snapshot with a utilization% arrives.
-function UsageChip({ snapshot, accent, onClick }: { snapshot: RateLimitSnapshot | null; accent: string; onClick: () => void }) {
-  if (!snapshot || snapshot.utilizationPct == null) return null;
-  const pct = Math.round(snapshot.utilizationPct);
+// Active-provider chip (top-right) — provider dot + name + plan-limit usage. The usage% rides the free
+// `rate_limit_event` on every turn stream (no control session); until the first event lands the chip shows
+// just the provider name (no %). Color bands on utilization (≥60 warn, ≥85 high). Click → Accounts overlay.
+function UsageChip({ snapshot, providerName, accent, onClick }: { snapshot: RateLimitSnapshot | null; providerName: string; accent: string; onClick: () => void }) {
+  const pct = snapshot && snapshot.utilizationPct != null ? Math.round(snapshot.utilizationPct) : null;
   const band = usageBand(pct);
-  const win = snapshot.windowId === 'seven_day' ? '7d' : snapshot.windowId === 'five_hour' ? '5h' : '';
+  const win = snapshot?.windowId === 'seven_day' ? '7d' : snapshot?.windowId === 'five_hour' ? '5h' : '';
   return (
     <button
       type="button"
       className={`usagechip ${band === 'high' ? 'usagechip--high' : band === 'warn' ? 'usagechip--warn' : ''}`}
-      title="Plan usage — click for Accounts" onClick={onClick}
+      title={pct != null ? `${providerName} — plan usage; click for Accounts` : `${providerName} — click for Accounts`} onClick={onClick}
     >
       <span className="usagechip__dot" style={{ background: accent }} />
-      <span className="usagechip__pct">{win ? `${win} ` : ''}{pct}%</span>
+      <span className="usagechip__name">{providerName}</span>
+      {pct != null && <span className="usagechip__pct">{win ? `${win} ` : ''}{pct}%</span>}
     </button>
   );
 }
@@ -3992,6 +3996,36 @@ function App() {
           mode. Cycle with Shift+Tab (global keydown handler) or change in Settings. Hidden until config loads. */}
       {config && <PermModeHint mode={config.permissionMode} />}
 
+      {/* Top-right account bar (mockup parity): active-provider usage chip · account avatar · ⚙ settings.
+          Each element floats separately (no wrapping dock chrome), like the official extension's top-right. */}
+      <div className="toolbar toolbar--top">
+        {config && (
+          <UsageChip
+            snapshot={rateLimit}
+            providerName={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.name ?? 'Claude'}
+            accent={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.accent ?? '#d97757'}
+            onClick={openAcctPanel}
+          />
+        )}
+        {(() => {
+          // Avatar reads as an account entry: signed-in → a filled accent circle with the email's initial
+          // (like the official extension); signed-out → a ghost person glyph. Click → Accounts overlay.
+          const email = accounts[activeProvider]?.account?.email;
+          const initial = email?.trim().charAt(0).toUpperCase();
+          return (
+            <button
+              className={`btn settings__avatar ${initial ? 'settings__avatar--filled' : ''} ${acctPanelOpen ? 'active' : ''}`}
+              onClick={toggleAcctPanel}
+              title="Accounts & usage — identity, plan usage, sign in / out"
+            >
+              {initial ? <span className="settings__avatarinitial">{initial}</span> : <span className="tb-ico">👤</span>}
+            </button>
+          );
+        })()}
+        {config && <SettingsControls config={config} onChange={setConfigField} resolvedModel={resolvedModel} gearOnly onOpenMcp={toggleMcpPanel} activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActiveProvider} onOpenAccount={openAcctPanel} />}
+      </div>
+
+      {/* Bottom-right action dock: new conversation · notifications · model quick-switch. */}
       <div className="toolbar">
         <button className="btn primary" onClick={() => newConversation()} title="New conversation">+</button>
         <button
@@ -4001,28 +4035,14 @@ function App() {
         >
           <span className="tb-ico">🔔</span>{noticeBadge > 0 && <span className="btn__badge">{noticeBadge}</span>}
         </button>
-        <UsageChip
-          snapshot={rateLimit}
-          accent={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.accent ?? '#d97757'}
-          onClick={openAcctPanel}
-        />
-        {(() => {
-          // Avatar reads as an account entry: the signed-in email's initial (like the official extension),
-          // else a generic person glyph. Clicking opens the centered Accounts overlay.
-          const email = accounts[activeProvider]?.account?.email;
-          const initial = email?.trim().charAt(0).toUpperCase();
-          return (
-            <button
-              className={`btn settings__avatar ${acctPanelOpen ? 'active' : ''}`}
-              onClick={toggleAcctPanel}
-              title="Accounts & usage — identity, plan usage, sign in / out"
-            >
-              {initial ? <span className="settings__avatarinitial">{initial}</span> : <span className="tb-ico">👤</span>}
-            </button>
-          );
-        })()}
-        <span className="toolbar__sep" />
-        {config && <SettingsControls config={config} onChange={setConfigField} resolvedModel={resolvedModel} up onOpenMcp={toggleMcpPanel} activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActiveProvider} onOpenAccount={openAcctPanel} />}
+        {config && (
+          <select
+            className="settings__model nodrag nopan" title="Model" value={config.model}
+            onChange={(e) => setConfigField({ model: e.target.value })}
+          >
+            {(providerCaps[activeProvider]?.models ?? MODEL_OPTS).map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+          </select>
+        )}
       </div>
 
       {/* M12: transient hint when a board is dropped on a non-fusable neighbor. */}

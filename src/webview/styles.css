@@ -555,6 +555,21 @@ body {
 /* dock sits at the bottom-right: gear panel opens UPWARD (via .settings--up) and anchors to the RIGHT edge */
 .toolbar .settings--up .settings__panel { left: auto; right: 0; }
 
+/* ---- Top-right account bar (mockup parity) ----
+   Anchored at the top instead of the bottom, and stripped of the dock's container chrome so the chip,
+   avatar and gear float as separate elements (each carries its own border/fill). The ⚙ panel opens
+   DOWNWARD here (no .settings--up) — the default .settings__panel (top:100%+8, right:0) already does that. */
+.toolbar--top { top: 14px; bottom: auto; background: none; border: none; border-radius: 0; padding: 0; gap: 8px; }
+.toolbar--top .btn { background: var(--bg-deep); border: 1px solid var(--border-sub); color: var(--muted); }
+.toolbar--top .btn:hover { background: var(--bg-deep); border-color: var(--border); color: var(--text); }
+.toolbar--top .btn.active { border-color: var(--accent); color: var(--accent); background: var(--bg-deep); }
+/* Avatar: a round account chip. Filled accent circle (dark initial) when signed in; ghost glyph otherwise. */
+.toolbar .btn.settings__avatar { border-radius: 50%; }
+.toolbar .btn.settings__avatar--filled {
+  background: var(--accent); border: 2px solid var(--bg-deep); box-shadow: 0 0 0 1px var(--accent); color: #1c1b1a;
+}
+.toolbar .btn.settings__avatar--filled:hover { background: var(--accent); filter: brightness(1.08); }
+
 /* ---- Right-click context menu (new conversation) ---- */
 .ctxmenu__backdrop { position: fixed; inset: 0; z-index: 39; }
 .ctxmenu {
