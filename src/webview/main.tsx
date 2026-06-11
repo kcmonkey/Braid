@@ -2726,6 +2726,9 @@ function App() {
     post({
       type: 'send', boardId, prompt: sendPrompt,
       resume: parentSessionId, fork, resumeAt,
+      // Route this turn to the board's OWN engine (AD2), not the global active provider — so a switch since
+      // creation can't re-home its session. Stamped at creation; defaults claude for a board without one.
+      engine: node ? boardEngine(node.data) : 'claude',
       images: pendingImages.length ? pendingImages.map((i) => ({ mediaType: i.mediaType, data: i.data })) : undefined,
     });
     if (pendingImages.length) clearImages(fromId);
@@ -2787,9 +2790,9 @@ function App() {
       // resume/turnIndex = self-heal: if the live query already closed (rare race), the host runs this
       // as a send+resume into the same board instead of dropping it (so the board never hangs). interrupt
       // only applies while actively generating; a waiting board has nothing to cut.
-      post({ type: 'followup', boardId: leafId, text: sendText, interrupt: wasStreaming && interrupt, resume: leaf.data.sessionId, turnIndex, images });
+      post({ type: 'followup', boardId: leafId, text: sendText, interrupt: wasStreaming && interrupt, resume: leaf.data.sessionId, turnIndex, images, engine: boardEngine(leaf.data) });
     } else {
-      post({ type: 'send', boardId: leafId, prompt: sendText, resume: leaf.data.sessionId, fork: false, turnIndex, images });
+      post({ type: 'send', boardId: leafId, prompt: sendText, resume: leaf.data.sessionId, fork: false, turnIndex, images, engine: boardEngine(leaf.data) });
     }
     if (pendingImages.length) clearImages(leafId);
     if (attached) clearAttach(leafId);
@@ -2845,7 +2848,8 @@ function App() {
       position: parent.position, // placeholder; layoutGraph assigns the real spot
       data: {
         prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
-        ...forkBaseFor(parent), // parent's session, or a rebuilt base if the parent is lineage-dirty (Phase 1)
+        engine: activeProviderRef.current, // a NEW board runs on the active provider (AD1); cross-engine continuation replays (Phase 1)
+        ...forkBaseFor(parent, activeProviderRef.current), // parent's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
         onSend, onFork, onStop, onCompact,
       },
     };
@@ -2868,6 +2872,7 @@ function App() {
       data: {
         prompt: '', answer: '', status: 'streaming', seq: seqRef.current++,
         compact: true,
+        engine: boardEngine(board.data), // compact forks the SOURCE board's session → same engine (AD1)
         parentSessionId: board.data.sessionId, // placeholder; replaced with the compacted session on `compacted`
         onSend, onFork, onStop, onCompact,
       },
@@ -2878,7 +2883,7 @@ function App() {
     nodesRef.current = newNodes;
     setEdges(newEdges);
     setNodes(newNodes);
-    post({ type: 'compact', boardId: cid, resume: board.data.sessionId });
+    post({ type: 'compact', boardId: cid, resume: board.data.sessionId, engine: boardEngine(board.data) });
   }, [onSend, onFork, onStop]);
 
   // Box-select must only mark boards selected on mouse RELEASE (not mid-drag): otherwise they'd flip to
@@ -3068,7 +3073,7 @@ function App() {
     const id = `b${idRef.current++}`;
     const root: BoardNodeT = {
       id, type: 'board', position: { x: 0, y: 0 }, selected: true, // select it → it renders detail, others collapse
-      data: { prompt: '', answer: '', status: 'idle', seq: seqRef.current++, onSend, onFork, onStop, onCompact },
+      data: { prompt: '', answer: '', status: 'idle', seq: seqRef.current++, engine: activeProviderRef.current, onSend, onFork, onStop, onCompact },
     };
     setNodes(autoLayout(nodesRef.current.map((n): BoardNodeT => ({ ...n, selected: false })).concat(root), edgesRef.current));
     // Pan/zoom the viewport onto the freshly created node (same as clicking a completion notification).
@@ -3108,7 +3113,8 @@ function App() {
       position: leaf.position, // placeholder; layoutGraph assigns the real spot
       data: {
         prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
-        ...forkBaseFor(leaf), // leaf's session, or a rebuilt base if the leaf is lineage-dirty (Phase 1)
+        engine: activeProviderRef.current, // a NEW board runs on the active provider (AD1); cross-engine continuation replays (Phase 1)
+        ...forkBaseFor(leaf, activeProviderRef.current), // leaf's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
         onSend, onFork, onStop, onCompact,
       },
     };
@@ -3394,7 +3400,7 @@ function App() {
   const seedRoot = useCallback(() => {
     setNodes([{
       id: 'b1', type: 'board', position: { x: 360, y: 60 }, selected: true, // select it → renders detail
-      data: { prompt: '', answer: '', status: 'idle', seq: 0, onSend, onFork, onStop, onCompact },
+      data: { prompt: '', answer: '', status: 'idle', seq: 0, engine: activeProviderRef.current, onSend, onFork, onStop, onCompact },
     }]);
     setEdges([]);
   }, [onSend, onFork, onStop, onCompact]);
@@ -3814,7 +3820,7 @@ function App() {
       const fails = summaryFailRef.current.get(n.id) ?? 0;
       if (needsDigest(d) && !summaryReqRef.current.has(n.id) && fails < MAX_SUMMARY_ATTEMPTS) {
         summaryReqRef.current.add(n.id);
-        post({ type: 'summarize', boardId: n.id, prompt: d.prompt, answer: d.answer });
+        post({ type: 'summarize', boardId: n.id, prompt: d.prompt, answer: d.answer, engine: boardEngine(d) });
         patch(n.id, () => ({ summarizing: true })); // drives the "Summarizing…" card hint until `summary` returns
         inFlight++;
       }
@@ -3840,7 +3846,7 @@ function App() {
         .join('\n\n');
       branchReqRef.current.add(n.id);
       branchReqKeyRef.current.set(n.id, key);
-      post({ type: 'branchSummarize', boardId: n.id, text });
+      post({ type: 'branchSummarize', boardId: n.id, text, engine: boardEngine(n.data) });
       patch(n.id, () => ({ branchSummarizing: true }));
       inFlight++;
     }
