@@ -97,12 +97,14 @@ describe('buildSdkOptions', () => {
 
 describe('migrateLegacyConfig', () => {
   const fullLegacy: LegacyFlatProviderConfig = {
+    authMethod: 'apiKey',
     model: 'opus', effort: 'max', thinking: 'disabled', permissionMode: 'acceptEdits', maxTurns: 7,
     appendSystemPrompt: 'Be terse.', allowedTools: ['Read'], disallowedTools: ['Bash'], env: { FOO: 'bar' },
   };
 
   it('carries every set legacy value over verbatim (lossless)', () => {
     expect(migrateLegacyConfig(fullLegacy)).toEqual({
+      authMethod: 'apiKey',
       model: 'opus', effort: 'max', thinking: 'disabled', permissionMode: 'acceptEdits', maxTurns: 7,
       appendSystemPrompt: 'Be terse.', allowedTools: ['Read'], disallowedTools: ['Bash'], env: { FOO: 'bar' },
     });

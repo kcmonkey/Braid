@@ -96,13 +96,13 @@ export class ClaudeAdapter implements Engine {
    * The injection is gated STRICTLY on authMethod==='apiKey' — so a subscription user is never silently
    * switched to metered billing (the refined invariant). (knowledge.md: env replaces subprocess env)
    */
-  private spawnEnv(): Record<string, string> | undefined {
+  private spawnEnv(): Record<string, string | undefined> | undefined {
     const cfg = this.deps.readProviderConfig();
     const extra = cfg.env && Object.keys(cfg.env).length ? cfg.env : null;
     const key = cfg.authMethod === 'apiKey' ? (this.deps.getApiKey?.() || undefined) : undefined;
     if (!extra && !key) return undefined; // subscription + no override → inherit process.env (unchanged)
     return {
-      ...(process.env as Record<string, string>),
+      ...process.env,
       ...(extra ?? {}),
       ...(key ? { ANTHROPIC_API_KEY: key } : {}),
     };

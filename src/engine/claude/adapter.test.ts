@@ -47,17 +47,52 @@ function fakeQuery() {
   return { q, emit: (m: any) => { buffer.push(m); wake(); }, finish: () => { done = true; wake(); }, get interrupts() { return interruptCount; } };
 }
 
-function harness(opts: { loadSdk?: () => Promise<any> } = {}) {
+function harness(opts: { loadSdk?: () => Promise<any>; config?: ProviderConfig; getApiKey?: () => string | undefined } = {}) {
   const captured: { options?: any; prompt?: any } = {};
   const fake = fakeQuery();
   const sdk = { query: (args: any) => { captured.options = args.options; captured.prompt = args.prompt; return fake.q; } };
-  const adapter = new ClaudeAdapter({ loadSdk: opts.loadSdk ?? (async () => sdk), readProviderConfig: () => cfg });
+  const adapter = new ClaudeAdapter({ loadSdk: opts.loadSdk ?? (async () => sdk), readProviderConfig: () => opts.config ?? cfg, getApiKey: opts.getApiKey });
   return { adapter, fake, captured };
 }
 
 const noopPre: PreToolInterceptor = { onPreToolUse: async () => ({ proceed: true }), onPermissionRequest: async () => ({ allow: true }) };
 const req = (attach: Attach, extra: Partial<TurnRequest> = {}): TurnRequest => ({ boardId: 'b1', attach, prompt: 'hi', cwd: '/w', ...extra });
 const init = { type: 'system', subtype: 'init', session_id: 's1', model: 'claude-opus-4-8' };
+
+describe('ClaudeAdapter.runTurn — auth method → spawn env (authMethod / billing invariant)', () => {
+  const runFresh = async (h: ReturnType<typeof harness>) => {
+    const { sink } = recordingSink();
+    const p = h.adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: () => {} });
+    h.fake.emit(init); h.fake.emit({ type: 'result', is_error: false, session_id: 's1' }); h.fake.finish();
+    await p;
+  };
+
+  it('subscription (default) + no braid.env → env OMITTED (inherits process.env, unchanged)', async () => {
+    const h = harness(); // default cfg: authMethod undefined ⇒ subscription, env {}
+    await runFresh(h);
+    expect(h.captured.options.env).toBeUndefined();
+  });
+
+  it('apiKey mode → injects ANTHROPIC_API_KEY (the stored key wins) over a spread process.env', async () => {
+    const h = harness({ config: { ...cfg, authMethod: 'apiKey' }, getApiKey: () => 'sk-test-key' });
+    await runFresh(h);
+    expect(h.captured.options.env.ANTHROPIC_API_KEY).toBe('sk-test-key');
+    expect(Object.keys(h.captured.options.env).length).toBeGreaterThan(1); // process.env spread in (PATH/HOME kept)
+  });
+
+  it('apiKey mode but NO stored key → env OMITTED (cannot inject; the spawn still runs)', async () => {
+    const h = harness({ config: { ...cfg, authMethod: 'apiKey' }, getApiKey: () => undefined });
+    await runFresh(h);
+    expect(h.captured.options.env).toBeUndefined();
+  });
+
+  it('subscription NEVER injects the key, even when one is available (the invariant)', async () => {
+    const h = harness({ config: { ...cfg, env: { FOO: 'bar' } }, getApiKey: () => 'sk-should-not-be-used' });
+    await runFresh(h);
+    expect(h.captured.options.env.FOO).toBe('bar');                              // braid.env merged over process.env
+    expect(h.captured.options.env.ANTHROPIC_API_KEY).not.toBe('sk-should-not-be-used'); // our stored key NOT injected
+  });
+});
 
 describe('ClaudeAdapter.runTurn — Attach → SDK options', () => {
   it('fresh → no resume / no forkSession', async () => {
