@@ -34,15 +34,37 @@ describe('reduceClaudeMessage — turn boundary', () => {
     expect(s.answer).toBe('carried'); // first turn of a resumed board must NOT reset
   });
 
-  it('multi-turn: second init resets accumulators (reset=true), turnIndex 0→1', () => {
-    const { s, events } = run([init(), textDelta('hello'), asstText('hello'), result(), init('sess-1')]);
-    const turns = events.filter((e) => e.t === 'turn');
+  it('multi-turn USER follow-up: second init advances turnIndex 0→1 with reset=true', () => {
+    const s = initParseState(0);
+    const ev: NeutralEvent[] = [];
+    for (const m of [init(), textDelta('hello'), asstText('hello'), result()]) ev.push(...reduceClaudeMessage(s, m, 1000));
+    s.pendingUserInit = true; // the adapter sets this before yielding a queued follow-up → its init is a USER round
+    ev.push(...reduceClaudeMessage(s, init('sess-1'), 1000));
+    const turns = ev.filter((e) => e.t === 'turn');
     expect(turns).toEqual([
       { t: 'turn', turnIndex: 0, reset: false },
       { t: 'turn', turnIndex: 1, reset: true },
     ]);
     expect(s.turnIndex).toBe(1);
-    expect(s.answer).toBe(''); // cleared by the reset on the 2nd init
+    expect(s.answer).toBe(''); // cleared by the reset on the 2nd USER init
+  });
+
+  // Regression (2026-06-12): an async-continuation init (background task finished / scheduled wakeup fired →
+  // the SDK re-drove the agent in-process, NOT preceded by a user-message yield) must REUSE the round index,
+  // not advance it. Otherwise a queued follow-up's turnIndex desyncs from the webview's allocated slot and the
+  // board sticks in 'Generating…'. (异步续接 + follow-up desync fix; verified live in probe-followup-fix.mjs)
+  it('async continuation: an init NOT preceded by a user yield reuses the round index (continuation, no reset)', () => {
+    const s = initParseState(0);
+    const ev: NeutralEvent[] = [];
+    for (const m of [init(), textDelta('first'), asstText('first'), result()]) ev.push(...reduceClaudeMessage(s, m, 1000));
+    ev.push(...reduceClaudeMessage(s, init('sess-1'), 1000)); // pendingUserInit is false → async continuation
+    const turns = ev.filter((e) => e.t === 'turn');
+    expect(turns).toEqual([
+      { t: 'turn', turnIndex: 0, reset: false },
+      { t: 'turn', turnIndex: 0, reset: false, continuation: true },
+    ]);
+    expect(s.turnIndex).toBe(0);    // reused, NOT advanced
+    expect(s.answer).toBe('first'); // NOT reset → the continuation appends to the same round
   });
 });
 

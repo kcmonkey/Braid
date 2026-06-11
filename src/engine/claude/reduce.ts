@@ -72,6 +72,12 @@ export function coerceToolResult(content: any): string {
 export interface ParseState {
   baseTurn: number;
   turnIndex: number;
+  // The adapter sets this true right before yielding a USER message (turn 1 / a queued follow-up). The next
+  // `init` then advances turnIndex as a new user round. When it is false, an `init` is an async-continuation
+  // (a background task finished / a scheduled wakeup fired → the SDK re-drove the agent in-process) — those
+  // reuse the current round's index so the engine's turnIndex stays == the webview's user-round index even
+  // when continuations interleave with a queued follow-up. (异步续接 + follow-up desync fix, 2026-06-12)
+  pendingUserInit: boolean;
   sessionId?: string;
   lastUuid?: string;          // Lazy Fork: terminal top-level assistant uuid of this turn
   answer: string;
@@ -90,13 +96,14 @@ export interface ParseState {
 export function initParseState(baseTurn: number): ParseState {
   return {
     baseTurn, turnIndex: baseTurn - 1,
+    pendingUserInit: true, // the first init is always turn 1 (a user turn)
     answer: '', pending: '', thinking: '', thinks: [], thinkOpen: -1, evSeq: 0, autoCompacted: false,
     lastUsage: undefined,
   };
 }
 
 export type NeutralEvent =
-  | { t: 'turn'; turnIndex: number; reset: boolean }            // new init boundary (reset = fold cleared)
+  | { t: 'turn'; turnIndex: number; reset: boolean; continuation?: boolean } // new init boundary (reset = fold cleared; continuation = async re-drive of the SAME round)
   | { t: 'session'; sessionId: string }
   | { t: 'model'; model: string }
   | { t: 'update'; turnIndex: number; text: string; thinking: string }
@@ -123,10 +130,22 @@ function resetTurn(s: ParseState) {
 export function reduceClaudeMessage(s: ParseState, m: any, now: number): NeutralEvent[] {
   const out: NeutralEvent[] = [];
   if (m.type === 'system' && m.subtype === 'init') {
-    s.turnIndex++;
-    const reset = s.turnIndex > s.baseTurn;
-    if (reset) resetTurn(s);
-    out.push({ t: 'turn', turnIndex: s.turnIndex, reset });
+    const userTurn = s.pendingUserInit;
+    s.pendingUserInit = false;
+    if (userTurn) {
+      // A USER round (turn 1 or a queued follow-up the adapter just yielded): advance the round index. The
+      // first turn of a fresh/resumed board (turnIndex == baseTurn) must NOT clear carried state.
+      s.turnIndex++;
+      const reset = s.turnIndex > s.baseTurn;
+      if (reset) resetTurn(s);
+      out.push({ t: 'turn', turnIndex: s.turnIndex, reset });
+    } else {
+      // An async-continuation init (background task completed / scheduled wakeup fired → the SDK re-drove the
+      // agent in the SAME session). It is NOT a new user round: reuse the current round's index and do NOT
+      // reset, so the continuation's output appends to the round that spawned the async work — and a queued
+      // follow-up still lands in the turnIndex slot the webview allocated. (异步续接 + follow-up desync fix)
+      out.push({ t: 'turn', turnIndex: s.turnIndex, reset: false, continuation: true });
+    }
     s.sessionId = m.session_id ?? s.sessionId;
     if (s.sessionId) out.push({ t: 'session', sessionId: s.sessionId });
     if (typeof m.model === 'string' && m.model) { s.modelId = m.model; out.push({ t: 'model', model: m.model }); }

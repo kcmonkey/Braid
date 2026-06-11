@@ -230,10 +230,11 @@ export class ClaudeAdapter implements Engine {
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
     let outstanding = 1; // the first user message; gates close-on-settle (bug fix 2026-06-10)
     // A turn is currently being generated → the gate is closed. A queued follow-up written to the CLI's
-    // stdin mid-turn (e.g. while it's running tools) is DROPPED by the CLI: the generator has already
-    // yielded it and goes back to awaiting, so after the turn's `result` the CLI gets no further input and
-    // the follow-up turn never runs (board hangs in 'streaming'). So we hold queued messages until the
-    // current turn settles, then release the next one as its OWN turn. (probe-followup-fix, 2026-06-11)
+    // stdin mid-turn (while it runs tools, OR right as an async-continuation turn is about to start) is
+    // DROPPED / interleaved by the CLI: the generator already yielded it and goes back to awaiting, so the
+    // follow-up turn never runs / desyncs the turnIndex (board hangs in 'streaming'). So we hold queued
+    // messages until the current turn settles AND no background continuation is imminent, then release the
+    // next as its OWN turn. (probe-followup-fix 2026-06-11 / probe-followup-hang 2026-06-12)
     let turnInFlight = true; // the first user message starts turn 1
     const FOLLOWUP_GRACE_MS = 1000;
     const wakeUp = () => { if (wake) { const w = wake; wake = null; w(); } };
@@ -245,17 +246,26 @@ export class ClaudeAdapter implements Engine {
     const holdEnabled = req.asyncContinuation !== false;
     const idleCapMs = req.idleCapMs ?? DEFAULT_IDLE_CAP_MS;
     const armIdleCap = () => { cancelIdle(); idleTimer = setTimeout(() => { closed = true; wakeUp(); }, idleCapMs); };
+    // A pending background task = an async-continuation turn is IMMINENT (the SDK will re-drive the agent in
+    // this same session when the task settles). Yielding a queued follow-up into that window makes the CLI
+    // drop it or run it AFTER the continuation, desyncing the engine turnIndex from the webview's allocated
+    // round slot → the board sticks in 'Generating…' forever. So hold the follow-up until no background
+    // continuation is imminent (crons fire far in the future and don't block). (异步续接 + follow-up fix)
+    const continuationImminent = () => holdEnabled && latestPending.background.length > 0;
+
+    const state = initParseState(req.turnIndex ?? 0);
     async function* input() {
-      yield userMessage(req.prompt, req.images); // turn 1 — turnInFlight already true
+      state.pendingUserInit = true;               // turn 1's init is a USER turn (not an async continuation)
+      yield userMessage(req.prompt, req.images);  // turn 1 — turnInFlight already true
       while (!closed) {
-        // Release a queued follow-up only BETWEEN turns (gate open = the prior turn's `result` arrived).
-        if (turnInFlight || queue.length === 0) { await new Promise<void>((r) => { wake = r; }); if (closed) break; continue; }
+        // Release a queued follow-up only at a SAFE input boundary: the prior turn settled (gate open) AND no
+        // background-task continuation is imminent. Otherwise park (re-checked on every wakeUp).
+        if (turnInFlight || queue.length === 0 || continuationImminent()) { await new Promise<void>((r) => { wake = r; }); if (closed) break; continue; }
         turnInFlight = true;
+        state.pendingUserInit = true;             // the next init is THIS follow-up = a USER turn (advances turnIndex)
         yield queue.shift();
       }
     }
-
-    const state = initParseState(req.turnIndex ?? 0);
     let turnSettled = false;
     let interrupted = false;
     const settle = (isError: boolean) => {
@@ -283,10 +293,12 @@ export class ClaudeAdapter implements Engine {
         for (const e of events) {
           switch (e.t) {
             case 'turn':
-              // A fresh init = a new round began. reset ⇒ it's a continuation/follow-up: a turn is now
-              // generating (turnInFlight → hold any queued follow-up), and any waiting hold is over — this
-              // round's own `result` re-decides whether to hold again. (async continuation 异步续接)
-              if (e.reset) { turnSettled = false; interrupted = false; turnInFlight = true; waiting = false; cancelIdle(); }
+              // A new round began — either a USER follow-up (reset) or an async continuation re-driving the
+              // same round (continuation). Either way a turn is now generating (turnInFlight → hold any queued
+              // follow-up) and any waiting hold is over; this round's own `result` re-decides whether to hold
+              // again. The very first init (turn 1: reset=false, continuation=false) needs none of this — it's
+              // already in flight. (async continuation 异步续接 + follow-up desync fix)
+              if (e.reset || e.continuation) { turnSettled = false; interrupted = false; turnInFlight = true; waiting = false; cancelIdle(); }
               break;
             case 'session': sink.session(boardId, e.sessionId); break;
             case 'model': sink.model(e.model); break;

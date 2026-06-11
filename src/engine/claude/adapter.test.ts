@@ -420,6 +420,9 @@ describe('ClaudeAdapter.runTurn — async continuation (hold-open gate)', () => 
     expect(calls.filter((c) => c.t === 'done')).toHaveLength(1);   // round 1 settled
 
     // SDK re-drives in-process: task_notification → continuation init → answer → result, now no pending.
+    // The continuation init is NOT preceded by a user-message yield → it REUSES round 0 (appends), so its
+    // done settles turnIndex 0 again (not a new round 1) — this keeps a queued follow-up's index aligned
+    // with the webview's slot. (异步续接 + follow-up desync fix, 2026-06-12)
     fake.emit({ type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed', summary: 'done', tool_use_id: 'tu1' });
     fake.emit({ type: 'system', subtype: 'init', session_id: 's1' });
     fake.emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'finished' }] } });
@@ -427,7 +430,7 @@ describe('ClaudeAdapter.runTurn — async continuation (hold-open gate)', () => 
     fake.emit(result());
     await tick();
     expect(calls.filter((c) => c.t === 'task')).toHaveLength(1);            // notification folded + surfaced
-    expect(calls.filter((c) => c.t === 'done').map((d) => d.ti)).toEqual([0, 1]); // a second round settled
+    expect(calls.filter((c) => c.t === 'done').map((d) => d.ti)).toEqual([0, 0]); // continuation re-settled round 0
 
     await handle!.stopWaiting(); await p;                          // teardown: close the (now no-pending) session
     expect(resolved).toBe(true);
@@ -487,5 +490,69 @@ describe('ClaudeAdapter.runTurn — async continuation (hold-open gate)', () => 
     await new Promise((r) => setTimeout(r, 1100));        // grace-close (1s) → input closes → resolves
     expect(resolved).toBe(true);
     expect(calls.filter((c) => c.t === 'waiting')).toHaveLength(0); // disabled → no hold
+  });
+
+  // Regression (2026-06-12): the reported "queued message stuck forever" bug. A follow-up queued during a
+  // turn that spawned a BACKGROUND TASK must NOT be released at that turn's `result` — an async-continuation
+  // turn is imminent and yielding the follow-up there made the CLI run it AFTER the continuation, desyncing
+  // the engine turnIndex from the webview's allocated slot → board stuck 'Generating…'. The fix: hold the
+  // follow-up until no background continuation is imminent, AND continuation inits reuse the round index. So
+  // the continuation re-settles round 0 and the follow-up lands at round 1 (the slot the webview allocated).
+  // Verified live against the real CLI in probe-followup-fix.mjs (dones [0, 0, 1]).
+  it('holds a queued follow-up across a background-task continuation, releasing it as the NEXT user round', async () => {
+    const pulledInput: any[] = [];
+    const out: any[] = [];
+    let outWake: (() => void) | null = null;
+    let outDone = false;
+    let promptIterable: AsyncIterable<any> | null = null;
+    let capturedOptions: any = null;
+    const wake = () => { if (outWake) { const w = outWake; outWake = null; w(); } };
+    const q: any = {
+      async *[Symbol.asyncIterator]() {
+        (async () => { try { for await (const msg of promptIterable as AsyncIterable<any>) pulledInput.push(msg); } finally { outDone = true; wake(); } })();
+        while (true) { while (out.length) yield out.shift(); if (outDone) return; await new Promise<void>((r) => { outWake = r; }); }
+      },
+      interrupt: async () => {},
+      stopTask: async () => {},
+    };
+    const sdk = { query: (args: any) => { promptIterable = args.prompt; capturedOptions = args.options; return q; } };
+    const adapter = new ClaudeAdapter({ loadSdk: async () => sdk, readProviderConfig: () => cfg });
+    const { sink, calls } = recordingSink();
+    let handle: TurnHandle | undefined;
+    const p = adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } });
+    const emit = (m: any) => { out.push(m); wake(); };
+    const t = () => new Promise((r) => setTimeout(r, 10));
+
+    await t();
+    const stop = capturedOptions.hooks.Stop[0].hooks[0];
+    expect(pulledInput.length).toBe(1); // turn 1 handed over
+
+    // Turn 1 spawns a background task; user queues a follow-up mid-turn.
+    emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    handle!.push('what is 2+2?', undefined);
+    await t();
+    await stop({ background_tasks: [{ id: 't1', type: 'shell', status: 'running' }], session_crons: [] });
+    emit({ type: 'result', is_error: false, session_id: 's1' }); // result#1 — bg task still pending
+    await t();
+    expect(pulledInput.length).toBe(1); // follow-up HELD (background continuation imminent)
+
+    // SDK re-drives in-process (task done): continuation init + answer + result, now NO pending.
+    emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'task done' }] } });
+    await stop({ background_tasks: [], session_crons: [] });
+    emit({ type: 'result', is_error: false }); // result#2 — pending now clear → follow-up released
+    await t();
+    expect(pulledInput.length).toBe(2); // follow-up released only now, after the continuation settled
+
+    // Follow-up's own turn.
+    emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    emit({ type: 'assistant', message: { content: [{ type: 'text', text: '4' }] } });
+    emit({ type: 'result', is_error: false });
+    await t();
+    outDone = true; wake();
+    await p;
+
+    // turn1=round0, continuation re-settles round0 (NOT a phantom round1), follow-up=round1. No turnIdx≥2.
+    expect(calls.filter((c) => c.t === 'done').map((d) => d.ti)).toEqual([0, 0, 1]);
   });
 });
