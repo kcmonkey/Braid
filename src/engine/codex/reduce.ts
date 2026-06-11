@@ -24,6 +24,8 @@ export interface CodexParseState {
   baseTurn: number;
   turnIndex: number;
   threadId?: string;          // set by the adapter from thread/start|resume|fork; feeds TurnDone.sessionId
+  lastTurnId?: string;        // last turn/started turn.id → TurnDone.messageUuid (Lazy-Fork mid-point marker:
+                              // a branch off this board forks the thread then rolls back to this turn)
   answer: string;
   thinking: string;
   thinks: ThinkMark[];
@@ -98,6 +100,7 @@ export function reduceCodexNotification(s: CodexParseState, method: string, para
       s.turnIndex++;
       const reset = s.turnIndex > s.baseTurn;
       if (reset) resetTurn(s);
+      if (typeof params?.turn?.id === 'string') s.lastTurnId = params.turn.id; // Lazy-Fork mid-point marker
       out.push({ t: 'turn', turnIndex: s.turnIndex, reset });
       break;
     }
