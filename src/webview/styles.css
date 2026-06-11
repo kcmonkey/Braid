@@ -1317,7 +1317,7 @@ body {
   padding: 5px 9px; border-radius: 8px; border: 1px solid var(--border-sub); background: var(--bg-deep); color: var(--muted-2); }
 .usagechip:hover { border-color: var(--border); color: var(--text-2); }
 .usagechip__dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
-.usagechip__name { color: var(--text-2); }
+.usagechip__name { font-weight: 700; } /* color inherits so warn/high bands tint the name too */
 .usagechip__pct { font-variant-numeric: tabular-nums; }
 .usagechip--warn { color: #d8a43a; border-color: #6b5417; background: #2a2616; }
 .usagechip--high { color: var(--red); border-color: var(--red); background: var(--red-bg); }
