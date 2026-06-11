@@ -1,7 +1,7 @@
 // Pure graph/merge/serialization logic — no React/DOM deps so it's unit-testable in plain node.
 // Types from @xyflow/react are imported type-only (erased at compile time; xyflow is never loaded at runtime).
 import type { Node, Edge } from '@xyflow/react';
-import { TAG_VOCAB, type BoardTag, type AsyncPending, type EngineId } from '../protocol';
+import { TAG_VOCAB, PROVIDER_CATALOG, type BoardTag, type AsyncPending, type EngineId } from '../protocol';
 
 // 'waiting' (异步续接) = the last round settled but the board's session is HELD OPEN for in-flight background
 // tasks / scheduled wakeups; the SDK re-drives → a new round may still arrive. Non-terminal (like 'streaming')
@@ -680,6 +680,11 @@ export function fuseEligibility(
   if (!anc || !desc) return null;
   if (anc.status !== 'done' || desc.status !== 'done') return null;
   if (!desc.sessionId) return null; // the descendant's session is the fused context SSOT
+  // M-MultiEngine (AD3): fuse ADOPTS the descendant's session forward as the fused board's live handle. Across
+  // engines that contract is false (the descendant's session — a different engine — doesn't contain the
+  // ancestor's turn as a real prior round), so it would silently orphan the ancestor's session. Block it; the
+  // user should Merge (the honest cross-engine combiner) instead. No-op when both boards share an engine.
+  if (boardEngine(anc) !== boardEngine(desc)) return null;
   if (continuationChildren(ancestorId, edges).length !== 1) return null; // ancestor branches → can't contract one limb
   return { ancestorId, descendantId };
 }
@@ -950,25 +955,55 @@ export function computeMerge(ids: string[], edges: Edge[], byId: Record<string, 
   return { shared, branches };
 }
 
+/** A node's forkable session id for its engine: its own sessionId, or (for a compact boundary) the compacted
+ * `parentSessionId`. undefined ⇒ not natively forkable. (M-MultiEngine) */
+export function forkableSession(d: BoardData): string | undefined {
+  return d.compact ? d.parentSessionId : d.sessionId;
+}
+
 /**
- * Pick the session to native-fork the merged board from: the deepest (highest-seq) SHARED ancestor that
- * has a real sessionId. Forking from it inherits that whole shared lineage as a real, lossless, cache-warm
- * session — so the shared background need not be re-injected as text. `uncoveredShared` = the shared nodes
- * NOT in the fork base's own lineage (only possible in a merge-DAG where `shared` isn't a single chain);
- * those still need text injection. null = no shared ancestor has a session → caller falls back to all-text
- * (a fresh session, = pre-Merge-LCA-Fork behavior). Pure, unit-tested. (Merge-LCA-Fork plan; principle 13)
+ * Pick the session to native-fork the merged board from: the HEAVIEST engine-compatible node in the selected
+ * boards' lineage union (max `contextTokens`), filtered to the turn engine (can't fork a foreign session) +
+ * a forkable session. Forking the heaviest compatible node keeps the largest real session cache-warm; only
+ * the LIGHTER branches are replayed as text (`covered` = that node's lineage ∪ itself → the caller injects
+ * union − covered). Usually a branch leaf, not the shared root — strictly more native coverage, strictly less
+ * cold text, and it makes a long same-engine chain the anchor of a cross-engine merge so it fits the budget.
+ * Ties → deeper seq, then id (deterministic). null = no compatible sessioned node → caller falls back to
+ * all-text (fresh session). Pure, unit-tested. (M-MultiEngine AD8 — supersedes the LCA-only Merge-LCA-Fork.)
  */
 export function pickForkBase(
-  shared: string[], byId: Record<string, BoardNodeT>, edges: Edge[],
-): { lcaId: string; uncoveredShared: string[] } | null {
-  const sessioned = shared.filter((id) => !!byId[id]?.data.sessionId);
-  if (!sessioned.length) return null;
+  merge: MergeResult, byId: Record<string, BoardNodeT>, edges: Edge[], turnEngine: EngineId = 'claude',
+): { baseId: string; covered: Set<string> } | null {
+  const union = new Set<string>(merge.shared);
+  for (const br of merge.branches) for (const id of br.nodes) union.add(id);
+  const candidates = [...union].filter((id) => {
+    const d = byId[id]?.data;
+    return !!d && boardEngine(d) === turnEngine && !!forkableSession(d);
+  });
+  if (!candidates.length) return null;
+  const weight = (id: string) => byId[id]?.data.contextTokens ?? 0;
   const seqOf = (id: string) => byId[id]?.data.seq ?? 0;
-  const lcaId = sessioned.reduce((best, id) => (seqOf(id) >= seqOf(best) ? id : best));
-  const covered = ancestorsOf(lcaId, edges);
-  covered.add(lcaId);
-  const uncoveredShared = shared.filter((id) => !covered.has(id));
-  return { lcaId, uncoveredShared };
+  const baseId = candidates.reduce((best, id) => {
+    const dw = weight(id) - weight(best);
+    if (dw !== 0) return dw > 0 ? id : best;
+    const ds = seqOf(id) - seqOf(best);
+    if (ds !== 0) return ds > 0 ? id : best;
+    return id < best ? id : best;
+  });
+  const covered = ancestorsOf(baseId, edges);
+  covered.add(baseId);
+  return { baseId, covered };
+}
+
+/** The model context window for a provider's model value, from the catalog (cross-engine budget target when a
+ * never-run engine has no measured BoardData.contextWindow). Falls back to the provider's default-model
+ * window, else 0 (unknown → callers fail-open). Pure. (M-MultiEngine AD5) */
+export function modelWindowFor(provider: EngineId, modelValue: string): number {
+  const p = PROVIDER_CATALOG.find((x) => x.id === provider);
+  if (!p) return 0;
+  const exact = p.models.find((m) => m.value === modelValue)?.contextWindow;
+  if (typeof exact === 'number') return exact;
+  return p.models.find((m) => m.value === '')?.contextWindow ?? 0;
 }
 
 /**
@@ -1067,14 +1102,19 @@ export interface MergeFit {
  */
 export function mergeFit(
   mergeContext: string,
-  base: { lcaId: string } | null,
+  base: { baseId: string } | null,
   leaves: string[],
   byId: Record<string, BoardNodeT>,
+  targetWindow?: number,
 ): MergeFit {
-  const estimated = roughTokens(mergeContext) + (base ? (byId[base.lcaId]?.data.contextTokens ?? 0) : 0);
-  const window = base
-    ? (byId[base.lcaId]?.data.contextWindow ?? 0)
+  const estimated = roughTokens(mergeContext) + (base ? (byId[base.baseId]?.data.contextTokens ?? 0) : 0);
+  // Window precedence: an explicit TARGET window (the engine that will RUN the merge — required when that
+  // engine never ran the source boards, so no measured window exists) wins; else the base/leaf MEASURED
+  // window. Same-engine merges pass no targetWindow → byte-identical to before (the no-op). (M-MultiEngine AD5)
+  const measured = base
+    ? (byId[base.baseId]?.data.contextWindow ?? 0)
     : leaves.reduce((m, id) => Math.max(m, byId[id]?.data.contextWindow ?? 0), 0);
+  const window = (targetWindow && targetWindow > 0) ? targetWindow : measured;
   if (window <= 0) return { fits: true, estimated, budget: 0, window: 0 };
   const budget = Math.round((window * MERGE_BUDGET_PCT) / 100);
   return { fits: estimated <= budget, estimated, budget, window };

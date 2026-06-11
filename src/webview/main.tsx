@@ -15,7 +15,7 @@ import './styles.css';
 import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
-  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit,
+  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, modelWindowFor, forkableSession,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock, describeAsyncPending,
@@ -2498,7 +2498,7 @@ function App() {
   const [branchRetryTick, setBranchRetryTick] = useState(0);
   const [nodes, setNodes] = useState<BoardNodeT[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
-  const [drawer, setDrawer] = useState<{ merge: MergeResult; context: string; ids: string[]; base: { lcaId: string; uncoveredShared: string[] } | null } | null>(null);
+  const [drawer, setDrawer] = useState<{ merge: MergeResult; context: string; ids: string[]; base: { baseId: string; covered: Set<string> } | null } | null>(null);
   const [focusedId, setFocusedId] = useState<string | null>(null); // non-null → focus chat overlay; = the VIEW LEAF (deepest shown board, may have auto-descended below the entered node)
   const [focusEntryId, setFocusEntryId] = useState<string | null>(null); // the board the user actually entered/branched to → ChatView initial-scroll anchor (distinct from focusedId)
   const [focusOrigin, setFocusOrigin] = useState<{ x: number; y: number } | null>(null); // screen anchor for the zoom-into/out-of animation (the focused board's center)
@@ -2717,7 +2717,7 @@ function App() {
     let fork = !!parentSessionId;
     let resumeAt: string | undefined = node?.data.resumeAt; // dirty-rebuild truncation point from forkBaseFor (Phase 2)
     if (parentSessionId && !mergeContext && node && !node.data.lineageDirty) {
-      const mode = continuationMode(node, nodesRef.current, edgesRef.current);
+      const mode = continuationMode(node, nodesRef.current, edgesRef.current, boardEngine(node.data));
       fork = mode.fork;
       resumeAt = mode.resumeAt;
     }
@@ -2802,12 +2802,16 @@ function App() {
   // the parent is lineage-dirty (an ancestor was deleted → its session still contains that node), walk up
   // the fork chain to the nearest CLEAN ancestor that has a session and replay the dirty chain's turns
   // (via mergeContext) instead, so the deleted node is excluded from the child's context. (plans/Node-Delete)
-  const forkBaseFor = useCallback((parent: BoardNodeT): { parentSessionId?: string; mergeContext?: string; resumeAt?: string } => {
-    // A compacted-boundary node has no session of its own — its parentSessionId IS the (forked) compacted
-    // session. Forking from it resumes that compacted context losslessly; the boundary stops the merge walk
-    // upward (computeMerge uses the `compact` flag), so its lineage never needs rebuilding. (M9)
-    if (parent.data.compact) return { parentSessionId: parent.data.parentSessionId };
-    if (!parent.data.lineageDirty) return { parentSessionId: parent.data.sessionId };
+  const forkBaseFor = useCallback((parent: BoardNodeT, turnEngine: EngineId = 'claude'): { parentSessionId?: string; mergeContext?: string; resumeAt?: string } => {
+    const sameEngine = (d: BoardData) => boardEngine(d) === turnEngine;
+    // Clean, SAME-ENGINE parent → fork it directly (the common case; no replay). A compacted boundary's
+    // session is its parentSessionId (forking it resumes the compacted context losslessly). The engine check
+    // generalizes the lineage-dirty walk below: a foreign-engine parent (cross-engine continuation) is NOT a
+    // valid native base, so it falls through to the walk like a dirty ancestor. (M-MultiEngine AD4; M9)
+    if (sameEngine(parent.data)) {
+      if (parent.data.compact) return { parentSessionId: parent.data.parentSessionId };
+      if (!parent.data.lineageDirty) return { parentSessionId: parent.data.sessionId };
+    }
     const ns = nodesRef.current, es = edgesRef.current;
     const byId = new Map(ns.map((n) => [n.id, n] as const));
     const forkParentOf = (id: string): string | undefined =>
@@ -2822,15 +2826,20 @@ function App() {
       guard.add(p);
       const pn = byId.get(p);
       if (!pn) break;
-      if (!pn.data.lineageDirty && pn.data.sessionId) { anchor = pn; break; } // nearest clean ancestor
-      chain.unshift(pn); // dirty ancestor → replay its turns too
+      // Nearest CLEAN, SAME-ENGINE ancestor with a session = the native anchor. Foreign-engine ancestors are
+      // "transparent" (skipped + replayed as text), exactly like deleted/dirty nodes. (M-MultiEngine AD4)
+      if (!pn.data.lineageDirty && pn.data.sessionId && sameEngine(pn.data)) { anchor = pn; break; }
+      chain.unshift(pn); // dirty / foreign ancestor → replay its turns too
       cur = p;
     }
+    // Cross-engine seed (any skipped node is a different engine) carries tool steps (AD5); a pure same-engine
+    // Node-Delete rebuild stays Q/A-only (byte-identical to before, the no-op). No anchor → fresh + full text.
+    const crossEngine = chain.some((n) => !sameEngine(n.data));
     const seedTurns = chain.flatMap((n) => boardTurns(n.data));
     // Lazy Fork: truncate the anchor's session to the anchor's own point (resumeSessionAt). Under lazy
     // fork the anchor's session is the SHARED spine — its end may contain the deleted node(s); truncating
     // to the anchor's messageUuid excludes them, then the replayed chain turns re-add only the kept turns.
-    return { parentSessionId: anchor?.data.sessionId, resumeAt: anchor?.data.messageUuid, mergeContext: buildRebuildSeed(seedTurns) };
+    return { parentSessionId: anchor?.data.sessionId, resumeAt: anchor?.data.messageUuid, mergeContext: buildRebuildSeed(seedTurns, { withSteps: crossEngine }) };
   }, []);
 
   // NOTE on deps: the node-data callbacks (onSend/onFork/onStop/onCompact) reference each other —
@@ -3016,16 +3025,30 @@ function App() {
     // shared history) and inject only the divergent branches (+ any shared the fork can't cover) as text
     // WITH tool steps. No fork base (no common ancestor / no sessioned shared node) → fall back to a fresh
     // session with everything as text (still WITH steps) — pre-LCA behavior, no regression.
-    const base = pickForkBase(merge.shared, byId, curEdges);
-    const mergeContext = buildPrompt(
-      base ? { shared: base.uncoveredShared, branches: merge.branches } : merge,
-      byId, { withSteps: true },
-    );
+    const base = pickForkBase(merge, byId, curEdges, activeProviderRef.current);
+    // Inject only nodes the fork base's session does NOT already cover (AD8): with a heaviest-node base, that's
+    // the lighter branches (+ any shared not in the base's lineage); fully-covered branches drop out entirely.
+    const injected = base
+      ? {
+          shared: merge.shared.filter((id) => !base.covered.has(id)),
+          branches: merge.branches
+            .map((br) => ({ leaf: br.leaf, nodes: br.nodes.filter((id) => !base.covered.has(id)) }))
+            .filter((br) => br.nodes.length),
+        }
+      : merge;
+    const mergeContext = buildPrompt(injected, byId, { withSteps: true });
     // Context-budget guard: the merged board's first send seeds a session with the LCA fork base's carried
     // context PLUS this excerpt text. If that would overflow the model window the query errors before it can
     // even auto-compact — and /compact can't shrink a single oversized first message. So block here and ask
     // the user to compress first; we do NOT silently degrade their context. Window unknown → fail-open. (decisions)
-    const fit = mergeFit(mergeContext, base, leaves, byId);
+    // Budget vs the TARGET engine's window only when the merge actually crosses an engine (the active provider
+    // never ran some selected board). Same-engine merges pass no target → measured-window budget, byte-identical
+    // to before (the no-op). (M-MultiEngine AD5)
+    const unionIds = new Set<string>(merge.shared);
+    for (const br of merge.branches) for (const id of br.nodes) unionIds.add(id);
+    const crossEngine = [...unionIds].some((id) => boardEngine(byId[id]!.data) !== activeProviderRef.current);
+    const targetWindow = crossEngine ? modelWindowFor(activeProviderRef.current, configRef.current?.model ?? '') : undefined;
+    const fit = mergeFit(mergeContext, base, leaves, byId, targetWindow);
     if (!fit.fits) {
       const k = (n: number) => Math.round(n / 1000);
       setMergeNote(`⚠️ Can’t merge: the combined context (~${k(fit.estimated)}K tokens) would exceed the model window (${k(fit.window)}K). Select fewer boards, or compact a branch first.`);
@@ -3046,9 +3069,9 @@ function App() {
       id: mid, type: 'board', position: { x: 0, y: 0 }, selected: true,
       data: {
         prompt: '', answer: '', status: 'idle', merged: true,
-        // base set → onSend does resume+fork from the LCA session AND prepends mergeContext (zero onSend
-        // change). pickForkBase only returns sessioned LCAs, so this sessionId is defined when base is set.
-        parentSessionId: base ? byId[base.lcaId]?.data.sessionId : undefined,
+        // base set → onSend does resume+fork from the heaviest compatible node's session AND prepends
+        // mergeContext (zero onSend change). pickForkBase only returns forkable nodes, so this is defined.
+        parentSessionId: base ? forkableSession(byId[base.baseId]!.data) : undefined,
         mergeContext, seq: seqRef.current++, onSend, onFork, onStop, onCompact,
       },
     };
@@ -4042,14 +4065,25 @@ function App() {
       // Tailor the hint: if the overlap WAS an adjacent fork pair rejected only because the parent still
       // has sibling branches, say so (the generic "not adjacent" line would be misleading there).
       const curEdges = edgesRef.current;
-      const branchBlocked = (inst.getIntersectingNodes(node) as BoardNodeT[]).some((h) => {
-        const e = curEdges.find((x) => (x.data?.kind ?? 'fork') === 'fork' &&
-          ((x.source === node.id && x.target === h.id) || (x.source === h.id && x.target === node.id)));
+      const byIdNow = Object.fromEntries(nodesRef.current.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
+      const hits = inst.getIntersectingNodes(node) as BoardNodeT[];
+      const adjFork = (h: BoardNodeT) => curEdges.find((x) => (x.data?.kind ?? 'fork') === 'fork' &&
+        ((x.source === node.id && x.target === h.id) || (x.source === h.id && x.target === node.id)));
+      // M-MultiEngine (AD3): an adjacent fork pair rejected purely because the two boards ran on DIFFERENT
+      // engines — fuse can't adopt one engine's session forward, so steer to Merge (the cross-engine combiner).
+      const crossEngineBlocked = hits.some((h) => {
+        const e = adjFork(h);
+        return !!e && boardEngine(byIdNow[e.source]!.data) !== boardEngine(byIdNow[e.target]!.data);
+      });
+      const branchBlocked = hits.some((h) => {
+        const e = adjFork(h);
         return !!e && continuationChildren(e.source, curEdges).length > 1;
       });
-      setFuseNote(branchBlocked
-        ? 'Can’t fuse: the parent has multiple branches — delete or merge the other branches first'
-        : 'Only adjacent parent/child boards can be fused (use "Merge" across branches)');
+      setFuseNote(crossEngineBlocked
+        ? 'Can’t fuse across providers — these boards ran on different engines. Use “Merge” to combine them.'
+        : branchBlocked
+          ? 'Can’t fuse: the parent has multiple branches — delete or merge the other branches first'
+          : 'Only adjacent parent/child boards can be fused (use "Merge" across branches)');
       if (fuseNoteTimerRef.current) clearTimeout(fuseNoteTimerRef.current);
       fuseNoteTimerRef.current = setTimeout(() => setFuseNote(''), 2600);
       return;
@@ -4407,12 +4441,12 @@ function App() {
               <div className="section__label">
                 <span className="pill shared">Shared</span>{' '}
                 {drawer.base
-                  ? <>inherited via session fork from “{firstLine(byId[drawer.base.lcaId]?.data.prompt ?? '') || '(root)'}” · not re-sent as text</>
+                  ? <>inherited via session fork from “{firstLine(byId[drawer.base.baseId]?.data.prompt ?? '') || '(root)'}” · not re-sent as text</>
                   : <>deduped · sent once</>}
               </div>
               {drawer.merge.shared.length ? drawer.merge.shared.map((id) => {
                 const d = byId[id]?.data;
-                const viaFork = !!drawer.base && !drawer.base.uncoveredShared.includes(id);
+                const viaFork = !!drawer.base && drawer.base.covered.has(id);
                 return (
                   <div className="ctx-item" key={id}>
                     <b>{firstLine(d?.prompt ?? '') || '(empty)'}</b>{viaFork ? ' · via fork' : (drawer.base ? ' · sent as text' : '')}<br />

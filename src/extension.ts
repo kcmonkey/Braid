@@ -558,7 +558,7 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // follow-up as a fresh send+resume into the SAME board so it isn't dropped and the board doesn't
       // hang in 'streaming' (principle 11). Nothing to interrupt — the prior turn is already done.
       if (msg.resume) {
-        await runSend({ type: 'send', boardId: msg.boardId, prompt: msg.text, resume: msg.resume, fork: false, turnIndex: msg.turnIndex, images: msg.images }, canvasId);
+        await runSend({ type: 'send', boardId: msg.boardId, prompt: msg.text, resume: msg.resume, fork: false, turnIndex: msg.turnIndex, images: msg.images, engine: msg.engine }, canvasId);
       } else {
         console.warn('[Braid] followup with no live query and no resume:', msg.boardId);
       }
@@ -1241,11 +1241,20 @@ function makePreToolInterceptor(canvasId: string, boardId: string, boardSignal: 
   };
 }
 
+/** The engine that should run a BOARD-bound op (turn / compact / summarize / branchSummary): the board's own
+ * engine (M-MultiEngine AD2), routed by the `engine` the webview stamped on the message. Falls back to Claude
+ * when absent or not-yet-registered, so a switch since the board's creation can't re-home its session, and a
+ * board tagged with an unimplemented engine never throws. No-op while only Claude is registered. */
+function engineFor(id?: EngineId) {
+  return id && engineHost.has(id) ? engineHost.get(id) : engineHost.get('claude');
+}
+
 /** webview send fields → the engine-neutral Attach (Lazy-Fork three modes). resume+fork(+resumeAt) is
- * exactly the pre-refactor mapping; fork's `at` = resumeSessionAt mid-point marker. */
-function toAttach(msg: { resume?: string; fork?: boolean; resumeAt?: string }): Attach {
+ * exactly the pre-refactor mapping; fork's `at` = resumeSessionAt mid-point marker. `engine` tags the
+ * SessionRef with the board's engine so the adapter can reject a foreign session (M-MultiEngine AD3). */
+function toAttach(msg: { resume?: string; fork?: boolean; resumeAt?: string; engine?: EngineId }): Attach {
   if (!msg.resume) return { kind: 'fresh' };
-  const session = { engine: 'claude' as const, raw: msg.resume };
+  const session = { engine: msg.engine ?? 'claude', raw: msg.resume };
   if (msg.fork) return { kind: 'fork', session, at: msg.resumeAt };
   return { kind: 'resume', session };
 }
@@ -1352,7 +1361,7 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
     idleCapMs: Math.max(1, canvas.asyncContinuationIdleCapMin) * 60_000,
   };
   try {
-    await engineHost.getActive().runTurn(req, sink, pre, { abort, onLive: (h: TurnHandle) => liveQueries.set(k, h) });
+    await engineFor(msg.engine).runTurn(req, sink, pre, { abort, onLive: (h: TurnHandle) => liveQueries.set(k, h) });
   } finally {
     liveQueries.delete(k);
     aborters.delete(k);
@@ -1369,7 +1378,7 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
 async function runSummaryHost(msg: Extract<WebviewMessage, { type: 'summarize' }>, canvasId: string) {
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   try {
-    const { summary, miniSummary, tags } = await engineHost.getActive().summarize({ cwd, prompt: msg.prompt, answer: msg.answer });
+    const { summary, miniSummary, tags } = await engineFor(msg.engine).summarize({ cwd, prompt: msg.prompt, answer: msg.answer });
     postTo(canvasId, { type: 'summary', boardId: msg.boardId, summary, miniSummary, tags });
   } catch (e: any) {
     // summarize() itself threw (e.g. loadSdk rejected) — post an empty summary so the webview clears the
@@ -1385,7 +1394,7 @@ async function runSummaryHost(msg: Extract<WebviewMessage, { type: 'summarize' }
 async function runBranchSummaryHost(msg: Extract<WebviewMessage, { type: 'branchSummarize' }>, canvasId: string) {
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   try {
-    const { text } = await engineHost.getActive().branchSummary({ cwd, text: msg.text });
+    const { text } = await engineFor(msg.engine).branchSummary({ cwd, text: msg.text });
     postTo(canvasId, { type: 'branchSummary', boardId: msg.boardId, text });
   } catch (e: any) {
     console.error('[Braid] branch summarize failed:', e?.message ?? e);
@@ -1399,7 +1408,7 @@ async function runBranchSummaryHost(msg: Extract<WebviewMessage, { type: 'branch
  * deleting the node mid-compact stops it. (knowledge.md "native /compact")
  */
 async function runCompactHost(msg: Extract<WebviewMessage, { type: 'compact' }>, canvasId: string) {
-  const engine = engineHost.getActive();
+  const engine = engineFor(msg.engine); // compact forks the board's OWN session → its engine (AD2)
   if (engine.compact.mode !== 'native') return; // Claude is native; other engines may not support compact nodes
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   const abort = new AbortController();

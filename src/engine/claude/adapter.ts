@@ -8,7 +8,7 @@ import { buildSdkOptions } from '../../sdkOptions';
 import type { ImageInput, McpServerInfo, SlashCommandSpec, ProviderAccount } from '../../protocol';
 import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
-  Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle,
+  Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle, Attach,
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
   AsyncPending, BranchSummarizeRequest,
 } from '../types';
@@ -200,13 +200,18 @@ export class ClaudeAdapter implements Engine {
         return result;
       },
     };
+    // M-MultiEngine (AD3): a SessionRef from another engine is meaningless here — its raw id is not a Claude
+    // session — so never resume/fork it; fail safe to a fresh turn instead of spawning a corrupt resume. Can't
+    // trip while only Claude is registered (every Claude board's session is Claude's). (principle 11/17)
+    const attach: Attach = (req.attach.kind !== 'fresh' && req.attach.session.engine !== this.id)
+      ? { kind: 'fresh' } : req.attach;
     // Attach → SDK options. fresh → none; resume → resume; fork → resume + forkSession (+resumeSessionAt).
-    if (req.attach.kind === 'resume') {
-      options.resume = req.attach.session.raw;
-    } else if (req.attach.kind === 'fork') {
-      options.resume = req.attach.session.raw;
+    if (attach.kind === 'resume') {
+      options.resume = attach.session.raw;
+    } else if (attach.kind === 'fork') {
+      options.resume = attach.session.raw;
       options.forkSession = true;
-      if (req.attach.at) options.resumeSessionAt = req.attach.at;
+      if (attach.at) options.resumeSessionAt = attach.at;
     }
     if (req.persistSession === false) options.persistSession = false;
     // Auth method: inject ANTHROPIC_API_KEY (apiKey mode) / merge braid.env over process.env. Omitted in
