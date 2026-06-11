@@ -15,7 +15,7 @@ import './styles.css';
 import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
-  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, modelWindowFor, forkableSession,
+  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, mergeUnion, modelWindowFor, forkableSession,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock, describeAsyncPending,
@@ -2728,7 +2728,7 @@ function App() {
     let fork = !!parentSessionId;
     let resumeAt: string | undefined = node?.data.resumeAt; // dirty-rebuild truncation point from forkBaseFor (Phase 2)
     if (parentSessionId && !mergeContext && node && !node.data.lineageDirty) {
-      const mode = continuationMode(node, nodesRef.current, edgesRef.current, boardEngine(node.data));
+      const mode = continuationMode(node, nodesRef.current, edgesRef.current);
       fork = mode.fork;
       resumeAt = mode.resumeAt;
     }
@@ -3054,10 +3054,10 @@ function App() {
     // the user to compress first; we do NOT silently degrade their context. Window unknown → fail-open. (decisions)
     // Budget vs the TARGET engine's window only when the merge actually crosses an engine (the active provider
     // never ran some selected board). Same-engine merges pass no target → measured-window budget, byte-identical
-    // to before (the no-op). (M-MultiEngine AD5)
-    const unionIds = new Set<string>(merge.shared);
-    for (const br of merge.branches) for (const id of br.nodes) unionIds.add(id);
-    const crossEngine = [...unionIds].some((id) => boardEngine(byId[id]!.data) !== activeProviderRef.current);
+    // to before (the no-op). Gated on MULTI_PROVIDER so it short-circuits to a constant false while one engine is
+    // registered. `mergeUnion` is the SSOT union (also used by pickForkBase). (M-MultiEngine AD5)
+    const crossEngine = MULTI_PROVIDER
+      && mergeUnion(merge).some((id) => boardEngine(byId[id]?.data ?? {}) !== activeProviderRef.current);
     const targetWindow = crossEngine ? modelWindowFor(activeProviderRef.current, configRef.current?.model ?? '') : undefined;
     const fit = mergeFit(mergeContext, base, leaves, byId, targetWindow);
     if (!fit.fits) {
@@ -3080,6 +3080,7 @@ function App() {
       id: mid, type: 'board', position: { x: 0, y: 0 }, selected: true,
       data: {
         prompt: '', answer: '', status: 'idle', merged: true,
+        engine: activeProviderRef.current, // the merge runs on the active provider (AD1) — pickForkBase chose a base of THIS engine
         // base set → onSend does resume+fork from the heaviest compatible node's session AND prepends
         // mergeContext (zero onSend change). pickForkBase only returns forkable nodes, so this is defined.
         parentSessionId: base ? forkableSession(byId[base.baseId]!.data) : undefined,
@@ -4474,9 +4475,12 @@ function App() {
                 </div>
                 {br.nodes.map((id) => {
                   const d = byId[id]?.data;
+                  // With a heaviest-node fork base, the base's OWN branch is inherited via the session fork (in
+                  // `covered`), not re-sent as text — annotate honestly instead of always claiming "full text".
+                  const viaFork = !!drawer.base && drawer.base.covered.has(id);
                   return (
                     <div className="ctx-item" key={id}>
-                      <b>{firstLine(d?.prompt ?? '') || '(empty)'}</b>{id === br.leaf && ' · full text'}<br />
+                      <b>{firstLine(d?.prompt ?? '') || '(empty)'}</b>{viaFork ? ' · via fork' : (id === br.leaf ? ' · full text' : '')}<br />
                       <span>{d?.summary ? summaryHeadline(d.summary) : (d?.answer ? d.answer.slice(0, 80) : '')}</span>
                     </div>
                   );

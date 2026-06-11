@@ -1147,7 +1147,9 @@ describe('pickForkBase (heaviest engine-compatible fork base — M-MultiEngine A
     const byId = byIdOf(nodes);
     const base = pickForkBase(computeMerge(['A', 'B'], edges, byId), byId, edges);
     expect(base?.baseId).toBe('K');
-    expect(base?.covered.has('root')).toBe(true);
+    // covered STOPS at the compact boundary (K) — it must NOT walk up to root (root's content lives in K's
+    // compacted session, represented by its summary, not re-injected). (review fix: continuation-lineage covered)
+    expect([...(base?.covered ?? [])]).toEqual(['K']);
   });
 
   it('returns null when no engine-compatible sessioned node exists, or the union is empty', () => {
@@ -1211,14 +1213,6 @@ describe('M-MultiEngine engine attribution + guards', () => {
     expect(fuseEligibility(edges, 'P', 'C', byIdOf(cross))).toBeNull(); // claude × codex → blocked
     const same = [node('P', 1, { sessionId: 'sp' }), node('C', 2, { sessionId: 'sc' })];
     expect(fuseEligibility(edges, 'P', 'C', byIdOf(same))).toEqual({ ancestorId: 'P', descendantId: 'C' });
-  });
-
-  it('continuationMode keeps the legacy base when the graph parent is a foreign engine', () => {
-    // parent ran on codex; a claude continuation can't spine/branch its session → legacy fork base.
-    const parent = node('P', 1, { sessionId: 'sp', engine: 'codex' });
-    const child = node('C', 2, { parentSessionId: 'anchor-session' });
-    const edges = [forkEdge('P', 'C')];
-    expect(continuationMode(child, [parent, child], edges, 'claude')).toEqual({ fork: true });
   });
 });
 

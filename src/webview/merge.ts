@@ -513,17 +513,17 @@ export function continuationChildren(id: string, edges: Edge[]): string[] {
  * → branch falls back to forkSession-from-end (no resumeAt), i.e. the old eager behavior. (plans/Lazy-Fork)
  */
 export function continuationMode(
-  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[], turnEngine: EngineId = 'claude',
+  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[],
 ): { fork: boolean; resumeAt?: string } {
   const parentId = edges.find(
     (e) => e.target === board.id && ((e.data?.kind as string) ?? 'fork') !== 'merge',
   )?.source;
   const parent = parentId ? nodes.find((n) => n.id === parentId) : undefined;
   if (!parent?.data.sessionId) return { fork: !!board.data.parentSessionId }; // unresolvable parent → legacy
-  // M-MultiEngine (AD3): a foreign-engine graph parent can't be spine/branch-resumed — its session belongs to
-  // another engine. Keep the legacy base (forkBaseFor already rebuilt this board onto a same-engine anchor via
-  // mergeContext, so onSend won't even consult us here — this is a defensive guard). No-op when engines match.
-  if (boardEngine(parent.data) !== turnEngine) return { fork: !!board.data.parentSessionId };
+  // M-MultiEngine note (AD3): a cross-engine continuation never reaches here — forkBaseFor rebuilds it onto a
+  // same-engine anchor with `mergeContext` set, and onSend only consults continuationMode when `!mergeContext`.
+  // The line below (parentSessionId ≠ graph-parent.sessionId → fork) also already covers any such board, so no
+  // explicit engine guard is needed (a foreign parent's session id can never equal this board's resume target).
   // The board's resume target must BE the parent's session for spine/branch to apply. A compact node (and
   // any node whose parentSessionId points at a forked/independent session, not the graph parent's) keeps the
   // legacy fork base — resuming/truncating the parent's session would be wrong. (plans/Lazy-Fork)
@@ -971,12 +971,19 @@ export function forkableSession(d: BoardData): string | undefined {
  * Ties → deeper seq, then id (deterministic). null = no compatible sessioned node → caller falls back to
  * all-text (fresh session). Pure, unit-tested. (M-MultiEngine AD8 — supersedes the LCA-only Merge-LCA-Fork.)
  */
+/** The selected lineage union of a merge = shared ∪ every branch's nodes (deduped, order-stable). SSOT for
+ * "all nodes this merge spans" — used by pickForkBase (candidate pool) and doMerge (cross-engine detection),
+ * so the two never derive a divergent union. Pure. (M-MultiEngine) */
+export function mergeUnion(merge: MergeResult): string[] {
+  const set = new Set<string>(merge.shared);
+  for (const br of merge.branches) for (const id of br.nodes) set.add(id);
+  return [...set];
+}
+
 export function pickForkBase(
   merge: MergeResult, byId: Record<string, BoardNodeT>, edges: Edge[], turnEngine: EngineId = 'claude',
 ): { baseId: string; covered: Set<string> } | null {
-  const union = new Set<string>(merge.shared);
-  for (const br of merge.branches) for (const id of br.nodes) union.add(id);
-  const candidates = [...union].filter((id) => {
+  const candidates = mergeUnion(merge).filter((id) => {
     const d = byId[id]?.data;
     return !!d && boardEngine(d) === turnEngine && !!forkableSession(d);
   });
@@ -990,8 +997,18 @@ export function pickForkBase(
     if (ds !== 0) return ds > 0 ? id : best;
     return id < best ? id : best;
   });
-  const covered = ancestorsOf(baseId, edges);
-  covered.add(baseId);
+  // `covered` = the nodes whose content the base's NATIVE session actually carries: its single CONTINUATION
+  // lineage (fork/compact parents — NOT merge edges, which seed no session), stopping at a compact boundary
+  // (its summary stands in for everything above, exactly as computeMerge collects). Walking `ancestorsOf` here
+  // would fan out over merge edges and past compact nodes → claim coverage the session lacks → doMerge would
+  // then drop those nodes from injection (silent context loss). (review fix)
+  const covered = new Set<string>();
+  let cur: string | undefined = baseId;
+  while (cur && !covered.has(cur)) {
+    covered.add(cur);
+    if (byId[cur]?.data.compact) break; // compact boundary: included; its summary covers above → stop
+    cur = continuationParent(cur, edges);
+  }
   return { baseId, covered };
 }
 

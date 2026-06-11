@@ -202,9 +202,13 @@ export class ClaudeAdapter implements Engine {
     };
     // M-MultiEngine (AD3): a SessionRef from another engine is meaningless here — its raw id is not a Claude
     // session — so never resume/fork it; fail safe to a fresh turn instead of spawning a corrupt resume. Can't
-    // trip while only Claude is registered (every Claude board's session is Claude's). (principle 11/17)
-    const attach: Attach = (req.attach.kind !== 'fresh' && req.attach.session.engine !== this.id)
-      ? { kind: 'fresh' } : req.attach;
+    // trip while only Claude is registered (every Claude board's session is Claude's). Surfaced (not silent) so
+    // a real turn-routing bug is diagnosable rather than appearing as an amnesiac turn. (principle 11/17)
+    let attach: Attach = req.attach;
+    if (attach.kind !== 'fresh' && attach.session.engine !== this.id) {
+      console.warn(`[Braid] ClaudeAdapter received a '${attach.session.engine}' session for board ${boardId}; running FRESH (no resume) to avoid corruption — turn-routing bug?`);
+      attach = { kind: 'fresh' };
+    }
     // Attach → SDK options. fresh → none; resume → resume; fork → resume + forkSession (+resumeSessionAt).
     if (attach.kind === 'resume') {
       options.resume = attach.session.raw;
