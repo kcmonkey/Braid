@@ -573,9 +573,9 @@ body {
 /* Avatar: a round account chip. Filled accent circle (dark initial) when signed in; ghost glyph otherwise. */
 .toolbar .btn.settings__avatar { border-radius: 50%; }
 .toolbar .btn.settings__avatar--filled {
-  background: var(--accent); border: 2px solid var(--bg-deep); box-shadow: 0 0 0 1px var(--accent); color: #1c1b1a;
+  background: var(--provider-accent, var(--accent)); border: 2px solid var(--bg-deep); box-shadow: 0 0 0 1px var(--provider-accent, var(--accent)); color: #1c1b1a;
 }
-.toolbar .btn.settings__avatar--filled:hover { background: var(--accent); filter: brightness(1.08); }
+.toolbar .btn.settings__avatar--filled:hover { background: var(--provider-accent, var(--accent)); filter: brightness(1.08); }
 
 /* ---- Right-click context menu (new conversation) ---- */
 .ctxmenu__backdrop { position: fixed; inset: 0; z-index: 39; }

@@ -173,7 +173,7 @@ export class CodexAdapter implements Engine {
           case 'thinking': sink.thinking(req.boardId, e.turnIndex, e.thinks); break;
           case 'toolUse': sink.toolUse(req.boardId, e.turnIndex, e.ev); break;
           case 'toolResult': sink.toolResult(req.boardId, e.turnIndex, e.ev); break;
-          case 'rateLimit': sink.rateLimit(e.snapshot); break;
+          case 'rateLimit': sink.rateLimit({ ...e.snapshot, provider: this.id }); break;
           case 'result':
             settle(e.isError && !interrupted);
             if (resolveTurnEnd) { const r = resolveTurnEnd; resolveTurnEnd = null; r(); }

@@ -2546,7 +2546,9 @@ function App() {
   const [accounts, setAccounts] = useState<Partial<Record<EngineId, { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }>>>({});
   // Claude API-key auth status per provider (secret-safe: presence + last-4 hint + ambient-env detection).
   const [apiKeyStatus, setApiKeyStatus] = useState<Partial<Record<EngineId, ApiKeyStatus>>>({});
-  const [rateLimit, setRateLimit] = useState<RateLimitSnapshot | null>(null);
+  // Passive usage snapshots keyed by provider (each stamped by its adapter): the chip shows the ACTIVE
+  // provider's, so a Codex turn's snapshot never displays under the Claude chip (or vice versa). (M-Codex)
+  const [rateLimits, setRateLimits] = useState<Partial<Record<EngineId, RateLimitSnapshot>>>({});
   // Composer autofill (workspace-level): the host-served slash-command list + latest `@`-file search reply.
   // `searchFiles` debounces the host round-trip; the reply echoes its query so the menu drops stale results.
   const [slashCommands, setSlashCommands] = useState<SlashCommandSpec[]>([]);
@@ -3578,7 +3580,8 @@ function App() {
         }
         case 'config':
           if (m.activeProvider !== activeProviderRef.current) {
-            setRateLimit(null);
+            // Keep each provider's last usage snapshot (rateLimits is keyed by provider; the chip reads the
+            // active one) — only model id + slash commands are provider-specific and need clearing.
             setResolvedModel(null);
             setSlashCommands([]);
           }
@@ -3591,7 +3594,7 @@ function App() {
         case 'apiKeyStatus':
           setApiKeyStatus((prev) => ({ ...prev, [m.provider]: { stored: m.stored, hint: m.hint, envDetected: m.envDetected, envHint: m.envHint } }));
           break;
-        case 'rateLimit': setRateLimit(m.snapshot); break;
+        case 'rateLimit': setRateLimits((prev) => ({ ...prev, [m.snapshot.provider ?? 'claude']: m.snapshot })); break;
         case 'model': setResolvedModel(m.model); break;
         case 'slashCommands': setSlashCommands(m.commands); break;
         case 'fileResults': setFileResults({ query: m.query, files: m.files }); break;
@@ -4311,7 +4314,7 @@ function App() {
       <div className="toolbar toolbar--top">
         {config && (
           <UsageChip
-            snapshot={rateLimit}
+            snapshot={rateLimits[activeProvider] ?? null}
             providerName={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.name ?? 'Claude'}
             accent={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.accent ?? '#d97757'}
             onClick={openAcctPanel}
@@ -4326,9 +4329,11 @@ function App() {
           const email = accounts[activeProvider]?.account?.email;
           const initial = email?.trim().charAt(0).toUpperCase();
           const filled = apiKeyMode ? !!apiKeyStatus[activeProvider]?.stored : !!initial;
+          const providerAccent = PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.accent ?? '#d97757';
           return (
             <button
               className={`btn settings__avatar ${filled ? 'settings__avatar--filled' : ''} ${acctPanelOpen ? 'active' : ''}`}
+              style={filled ? ({ '--provider-accent': providerAccent } as React.CSSProperties) : undefined}
               onClick={toggleAcctPanel}
               title={apiKeyMode ? 'Account — API-key auth (metered). Click for Accounts.' : 'Accounts & usage — identity, plan usage, sign in / out'}
             >

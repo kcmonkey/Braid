@@ -307,7 +307,7 @@ export class ClaudeAdapter implements Engine {
             case 'toolUse': sink.toolUse(boardId, e.turnIndex, e.ev); break;
             case 'toolResult': sink.toolResult(boardId, e.turnIndex, e.ev); break;
             case 'task': sink.task(boardId, e.turnIndex, e.ev); break;
-            case 'rateLimit': sink.rateLimit(e.snapshot); break;
+            case 'rateLimit': sink.rateLimit({ ...e.snapshot, provider: this.id }); break;
             case 'commands': sink.commands(e.commands); break;
             case 'result':
               // interrupted turn ends as error_during_execution/is_error — the user's send-now cut, NOT a
