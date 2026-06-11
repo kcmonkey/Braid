@@ -150,16 +150,22 @@ export function reduceCodexNotification(s: CodexParseState, method: string, para
     case 'thread/tokenUsage/updated': {
       const u = params?.tokenUsage;
       if (u) {
-        // Context-window OCCUPANCY = the LAST turn's footprint (`last`), NOT `total`. `total` is a cumulative
-        // running sum across EVERY turn of the thread — it only grows and never drops, not even after a
-        // compaction (probe C4/C5: `total` stays 39385 while `last` falls to 7838/5674). Using `total` pinned
-        // the % near/over 100% on long threads and re-triggered auto-compact every turn right after a
-        // compaction had already shrunk the real context. `last.totalTokens` = current window fill (the model
-        // re-reads the whole history each turn, so a single turn's input already covers it) and it resets
-        // after compact/fork — so the % correctly drops. Fall back to `total` only if `last` is absent.
+        // Context-window OCCUPANCY = the LAST request's footprint (`last`), NOT `total`. `total` is a
+        // cumulative running sum over EVERY internal model round-trip of the turn — an agentic turn makes
+        // one model call per tool step, each re-reading the whole growing history, so `total` accumulates
+        // far past the window (probe-codex-tokens: an 8-step turn grows total 13k→124k while `last` stays
+        // ~14k; a real 22-step research board hit total=428520 vs a 258400 window = 166%, clamped to a
+        // misleading 100% that also re-triggered auto-compact every turn). `last.totalTokens` = the current
+        // window fill (the model re-reads all history each call, so one request's input already covers it)
+        // and it resets after compact/fork — so the % correctly drops.
+        const win = typeof u.modelContextWindow === 'number' ? u.modelContextWindow : s.contextWindow;
         const last = typeof u.last?.totalTokens === 'number' ? u.last.totalTokens : undefined;
         const total = typeof u.total?.totalTokens === 'number' ? u.total.totalTokens : undefined;
-        const occ = last ?? total;
+        // Fall back to `total` ONLY when `last` is absent AND it's still a plausible occupancy (<= window).
+        // A cumulative `total` that overflows the window is throughput, never fill — recording it is the
+        // exact bug above, so reject it rather than pin the badge at 100%.
+        const totalOk = total !== undefined && (win === undefined || total <= win) ? total : undefined;
+        const occ = last ?? totalOk;
         if (typeof occ === 'number') s.contextTokens = occ;
         if (typeof u.modelContextWindow === 'number') s.contextWindow = u.modelContextWindow;
       }

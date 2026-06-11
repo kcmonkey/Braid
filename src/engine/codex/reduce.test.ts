@@ -112,6 +112,31 @@ describe('reduceCodexNotification — usage, rate limit, result', () => {
     expect(buildCodexTurnDone(s, false, 2000).contextTokens).toBe(7838);
   });
 
+  it('prefers `last` over an overflowing cumulative `total` on a multi-step turn (occupancy stays <= window)', () => {
+    // probe-codex-tokens: an 8-step turn ends with last.totalTokens≈14203 while total.totalTokens≈124299.
+    // `last` is the real window fill; never let the cumulative throughput sum become the occupancy.
+    const { s } = run([
+      turnStarted(),
+      delta('answer'),
+      ['thread/tokenUsage/updated', { tokenUsage: { total: { totalTokens: 124299 }, last: { totalTokens: 14203 }, modelContextWindow: 258400 } }],
+    ]);
+    expect(buildCodexTurnDone(s, false, 2000).contextTokens).toBe(14203);
+  });
+
+  it('rejects a cumulative `total` that OVERFLOWS the window when `last` is absent (the 100%-pin bug)', () => {
+    // Reproduces the original failure: a 22-step research board reported total=428520 vs a 258400 window
+    // (166% → clamped to a misleading 100%). With `last` absent we must NOT store an impossible >window
+    // occupancy — leave it unset rather than pin the badge full.
+    const { s } = run([
+      turnStarted(),
+      delta('answer'),
+      ['thread/tokenUsage/updated', { tokenUsage: { total: { totalTokens: 428520 }, last: {}, modelContextWindow: 258400 } }],
+    ]);
+    const done = buildCodexTurnDone(s, false, 2000);
+    expect(done.contextTokens).toBeUndefined(); // overflowing cumulative total rejected
+    expect(done.contextWindow).toBe(258400);    // window still recorded
+  });
+
   it('account/rateLimits/updated → a rateLimit snapshot', () => {
     const { events } = run([['account/rateLimits/updated', { rateLimits: { primary: { usedPercent: 11, windowDurationMins: 300, resetsAt: 1781193749 } } }]]);
     const rl = events.find((e) => e.t === 'rateLimit') as Extract<CodexEvent, { t: 'rateLimit' }>;
