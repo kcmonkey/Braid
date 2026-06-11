@@ -83,6 +83,12 @@ body {
   width: 320px; border: 1px solid var(--border); border-radius: 12px;
   background: var(--panel); overflow: hidden; box-shadow: 0 6px 24px rgba(0,0,0,.35);
 }
+/* Detail LOD (the selected board / its expanded lineage) renders WIDER than the 320px far gist — the full
+   Q/A body, tool cards, and diffs all read better with more horizontal room (the card already grows TALLER
+   content-driven; this gives the matching width). far / far-far stay 320px (compact gist / branch map).
+   Safe to widen here alone: dagre lays out per-node measured width (layout.ts sizeOf) and the sizeSig
+   effect re-packs the graph on a width change, so nothing else hardcodes the detail width. */
+.board.lod-detail { width: 480px; }
 .board.selected { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 /* ancestor of a merge-selected board: its context folds into the merge — softer dashed ring,
    clearly secondary to the prominent solid `.selected` ring on directly-picked boards. */
