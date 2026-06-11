@@ -107,9 +107,13 @@ const mcpControls = new Map<string, McpController>();
 // Accounts panel: one lazily-created account/usage control session per canvas (twin of mcpControls).
 // Created on `accountOpen`, disposed on `accountClose` / panel dispose — so it never idle-runs.
 const accountControls = new Map<string, AccountController>();
-// In-flight sign-in AbortControllers, keyed by canvas — aborted when the panel closes so a stuck OAuth
-// wait is canceled promptly (and never leaves the card spinning "Working…").
+// In-flight sign-in AbortControllers — aborted when the panel closes so a stuck OAuth wait is canceled
+// promptly (and never leaves the card spinning "Working…").
 const accountAuthAborts = new Map<string, AbortController>();
+// Account control sessions + sign-in aborts are keyed canvasId::provider: the Accounts panel shows a card
+// per provider, each with its own session, so sign-in/out targets the CARD's provider (not the active one),
+// and a non-active provider's card resolves instead of spinning "Checking subscription…" forever. (M-Codex)
+const acctKey = (canvasId: string, provider: EngineId) => `${canvasId}::${provider}`;
 
 // Composer autofill: the active provider's slash commands, cached for the workspace (cwd is fixed =
 // workspaceFolders[0]). Fetched lazily on the first `getSlashCommands`; replaced on a live `commands_changed`
@@ -636,10 +640,10 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       closeAccount(canvasId);
       break;
     case 'accountSignIn':
-      await accountAuth(canvasId, 'in');
+      await accountAuth(canvasId, 'in', msg.provider);
       break;
     case 'accountSignOut':
-      await accountAuth(canvasId, 'out');
+      await accountAuth(canvasId, 'out', msg.provider);
       break;
     case 'setApiKey':
       // Store a Claude API key (SecretStorage) + switch to apiKey auth. The key value never echoes back.
@@ -1025,13 +1029,14 @@ function closeMcp(canvasId: string) {
 /** Fast identity-only push (no control session) — used on canvas load so the toolbar avatar reflects the
  * signed-in account without the user opening the Accounts panel. Usage fills in later via openAccount. */
 async function pushAccountIdentity(canvasId: string) {
-  if (accountControls.has(canvasId)) return; // panel already open → its refresh owns identity + usage
+  const active = readSettings().activeProvider;
+  if (accountControls.has(acctKey(canvasId, active))) return; // panel already open → its refresh owns identity + usage
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   let account: ProviderAccount | null = null;
   try { account = await engineHost.getActive().accountIdentity(cwd); }
   catch (e: any) { console.error('[Braid] account identity fetch failed:', e?.message ?? e); }
-  if (!panels.has(canvasId) || accountControls.has(canvasId)) return; // closed / panel opened mid-fetch
-  postTo(canvasId, { type: 'account', provider: readSettings().activeProvider, account, usage: null });
+  if (!panels.has(canvasId) || accountControls.has(acctKey(canvasId, active))) return; // closed / panel opened mid-fetch
+  postTo(canvasId, { type: 'account', provider: active, account, usage: null });
 }
 
 // ---- Claude API-key auth method (SecretStorage-backed; the key never enters settings.json / the webview) ----
@@ -1096,35 +1101,47 @@ async function afterApiKeyChange() {
 /** Accounts panel opened → lazily create the account/usage control session, then push identity + usage. */
 async function openAccount(canvasId: string) {
   pushApiKeyStatus(canvasId); // refresh the API-key face + adopt offer when the panel opens
-  if (!accountControls.has(canvasId)) {
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    const ctrl = await engineHost.getActive().accountControl(cwd);
-    if (!ctrl) { postTo(canvasId, { type: 'account', provider: readSettings().activeProvider, account: null, usage: null }); return; }
-    // The panel may have closed (accountClose / dispose) during the async create — don't leak.
-    if (!panels.has(canvasId)) { ctrl.dispose(); return; }
-    accountControls.set(canvasId, ctrl);
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  const active = readSettings().activeProvider;
+  // Resolve EVERY non-active implemented provider's card with a fast identity push (one-shot, no control
+  // session), so a non-active provider (e.g. Codex while Claude is active) doesn't spin "Checking
+  // subscription…" forever. Fire-and-forget (concurrent) so they never block the active card's usage refresh.
+  for (const p of PROVIDER_CATALOG.filter((q) => q.implemented && engineHost.has(q.id) && q.id !== active && !accountControls.has(acctKey(canvasId, q.id)))) {
+    void (async () => {
+      let account: ProviderAccount | null = null;
+      try { account = await engineHost.get(p.id).accountIdentity(cwd); }
+      catch (e: any) { console.error(`[Braid] ${p.id} identity fetch failed:`, e?.message ?? e); }
+      if (panels.has(canvasId) && !accountControls.has(acctKey(canvasId, p.id))) postTo(canvasId, { type: 'account', provider: p.id, account, usage: null });
+    })();
   }
-  await refreshAccount(canvasId);
+  // The ACTIVE provider gets a persistent control session (identity + usage windows + sign-in/out).
+  if (!accountControls.has(acctKey(canvasId, active))) {
+    const ctrl = await engineHost.getActive().accountControl(cwd);
+    if (!ctrl) { postTo(canvasId, { type: 'account', provider: active, account: null, usage: null }); return; }
+    if (!panels.has(canvasId)) { ctrl.dispose(); return; } // panel closed during the async create — don't leak
+    accountControls.set(acctKey(canvasId, active), ctrl);
+  }
+  await refreshAccount(canvasId, active);
 }
 
 /** Fetch identity + usage and push to the panel. Polls a few times: account info is immediate, but
  * plan-limit usage can be empty/pending until the control session warms. */
-async function refreshAccount(canvasId: string) {
-  const ctrl = accountControls.get(canvasId);
+async function refreshAccount(canvasId: string, provider: EngineId) {
+  const key = acctKey(canvasId, provider);
+  const ctrl = accountControls.get(key);
   if (!ctrl) return;
-  const provider = readSettings().activeProvider;
-  // Identity FIRST — `ctrl.info()` is the fast one-shot `claude auth status` (~250ms). Push it immediately
-  // so the panel resolves quickly instead of blocking on the slower usage control request.
+  // Identity FIRST — `ctrl.info()` is the fast one-shot. Push it immediately so the panel resolves quickly
+  // instead of blocking on the slower usage control request.
   let account: ProviderAccount | null = await ctrl.info();
-  if (accountControls.get(canvasId) !== ctrl) return; // disposed during the await
+  if (accountControls.get(key) !== ctrl) return; // disposed during the await
   postTo(canvasId, { type: 'account', provider, account, usage: null, busy: ctrl.busy.size > 0 });
   // Usage (rate-limit windows) comes only from the streaming control session, which can lag while warming
   // (~1s+). Poll it and fill the bars in as they arrive, keeping the already-shown identity. Retry identity
   // too if the fast path missed.
   for (let i = 0; i < ACCOUNT_POLL_TRIES; i++) {
-    if (accountControls.get(canvasId) !== ctrl) return;
+    if (accountControls.get(key) !== ctrl) return;
     const usage = await ctrl.usage();
-    if (accountControls.get(canvasId) !== ctrl) return;
+    if (accountControls.get(key) !== ctrl) return;
     if (!account) account = await ctrl.info();
     postTo(canvasId, { type: 'account', provider, account, usage, busy: ctrl.busy.size > 0 });
     if (account && usage && usage.windows.length > 0) break; // got identity + real usage → stop polling
@@ -1132,39 +1149,47 @@ async function refreshAccount(canvasId: string) {
   }
 }
 
-/** Sign in / out the active provider's account (browser-OAuth flow; engine side completed in Phase 4). */
-async function accountAuth(canvasId: string, action: 'in' | 'out') {
-  const ctrl = accountControls.get(canvasId);
-  if (!ctrl) return;
+/** Sign in / out a SPECIFIC provider's account (browser-OAuth flow). Routed by `provider` (the card the
+ * user clicked), NOT the active provider — so signing out Codex never signs out Claude. Lazily creates a
+ * control session for that provider if its card was only identity-resolved (no persistent session yet). */
+async function accountAuth(canvasId: string, action: 'in' | 'out', provider: EngineId) {
+  if (!engineHost.has(provider)) return;
+  const key = acctKey(canvasId, provider);
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  let ctrl = accountControls.get(key);
+  if (!ctrl) {
+    const made = await engineHost.get(provider).accountControl(cwd);
+    if (!made || !panels.has(canvasId)) { made?.dispose(); return; }
+    ctrl = made;
+    accountControls.set(key, ctrl);
+  }
   const abort = new AbortController();
-  accountAuthAborts.set(canvasId, abort);
+  accountAuthAborts.set(key, abort);
   try {
-    if (action === 'in') {
-      await ctrl.signIn((url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); }, abort.signal);
-    } else {
-      await ctrl.signOut();
-    }
+    if (action === 'in') await ctrl.signIn((url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); }, abort.signal);
+    else await ctrl.signOut();
   } catch (e: any) {
     console.error('[Braid] account auth failed:', e?.message ?? e);
   } finally {
-    accountAuthAborts.delete(canvasId);
+    accountAuthAborts.delete(key);
   }
-  // The long-lived control session was spawned BEFORE this auth change, so its identity view is now stale
-  // (it would still report the old signed-in/out state). Recreate it so the post-auth refresh reflects
-  // reality — this is what makes a sign-out actually show "not signed in" (and a sign-in show identity).
-  if (accountControls.get(canvasId) === ctrl && panels.has(canvasId)) {
+  // The control session was spawned BEFORE this auth change, so its identity view is now stale. Recreate it
+  // so the refresh reflects reality (sign-out → "not signed in"; sign-in → identity).
+  if (accountControls.get(key) === ctrl && panels.has(canvasId)) {
     ctrl.dispose();
-    accountControls.delete(canvasId);
-    await openAccount(canvasId); // creates a fresh session, then refreshes
+    accountControls.delete(key);
+    const fresh = await engineHost.get(provider).accountControl(cwd);
+    if (fresh && panels.has(canvasId)) { accountControls.set(key, fresh); await refreshAccount(canvasId, provider); }
+    else { fresh?.dispose(); postTo(canvasId, { type: 'account', provider, account: null, usage: null }); }
   }
 }
 
-/** Accounts panel closed (or canvas disposed) → cancel any in-flight sign-in, then tear down the session. */
+/** Accounts panel closed (or canvas disposed) → cancel in-flight sign-ins + tear down ALL this canvas's
+ * per-provider account control sessions, so none idle-run. */
 function closeAccount(canvasId: string) {
-  accountAuthAborts.get(canvasId)?.abort();
-  accountAuthAborts.delete(canvasId);
-  const ctrl = accountControls.get(canvasId);
-  if (ctrl) { ctrl.dispose(); accountControls.delete(canvasId); }
+  const prefix = canvasId + '::';
+  for (const [k, a] of accountAuthAborts) if (k.startsWith(prefix)) { a.abort(); accountAuthAborts.delete(k); }
+  for (const [k, c] of accountControls) if (k.startsWith(prefix)) { c.dispose(); accountControls.delete(k); }
 }
 
 /** Build the canvas-bound EventSink: each neutral output → the matching HostMessage via postTo.
