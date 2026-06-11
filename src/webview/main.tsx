@@ -238,10 +238,9 @@ function TodoCard({ step }: { step: ToolStep }) {
   );
 }
 
-// An MCP tool call. The stream name is `mcp__<server>__<tool>`; render it first-class (🔌 server /
-// tool) instead of the raw namespaced string. Body is the generic tool_result (MCP results have no
-// diff). MCP support itself needs no engine code: the spawned CLI already loads .mcp.json / user MCP
-// by default (strictMcpConfig off), so these tool_use blocks arrive for free — this is display polish.
+// An MCP tool call. The stream name is `mcp__<server>__<tool>`; render it first-class (server / tool)
+// instead of the raw namespaced string. Body is the generic tool_result. These arrive only when the
+// provider's mcpEnabled switch allows MCP startup, so this component is display polish for that mode.
 function McpCard({ step, mcp }: { step: ToolStep; mcp: { server: string; tool: string } }) {
   const [open, setOpen] = useState(false);
   const pending = step.result == null;
@@ -2619,8 +2618,9 @@ function App() {
   const [accounts, setAccounts] = useState<Partial<Record<EngineId, { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }>>>({});
   // Claude API-key auth status per provider (secret-safe: presence + last-4 hint + ambient-env detection).
   const [apiKeyStatus, setApiKeyStatus] = useState<Partial<Record<EngineId, ApiKeyStatus>>>({});
-  // Passive usage snapshots keyed by provider (each stamped by its adapter): the chip shows the ACTIVE
-  // provider's, so a Codex turn's snapshot never displays under the Claude chip (or vice versa). (M-Codex)
+  // Passive usage snapshots keyed by provider. The host filters stale provider events before posting; the
+  // webview stores the snapshot under the active provider at receipt time so switching providers keeps each
+  // provider's last known usage chip state separate. (M-Codex)
   const [rateLimits, setRateLimits] = useState<Partial<Record<EngineId, RateLimitSnapshot>>>({});
   // Composer autofill (workspace-level): the host-served slash-command list + latest `@`-file search reply.
   // `searchFiles` debounces the host round-trip; the reply echoes its query so the menu drops stale results.
@@ -3667,7 +3667,7 @@ function App() {
         case 'apiKeyStatus':
           setApiKeyStatus((prev) => ({ ...prev, [m.provider]: { stored: m.stored, hint: m.hint, envDetected: m.envDetected, envHint: m.envHint } }));
           break;
-        case 'rateLimit': setRateLimits((prev) => ({ ...prev, [m.snapshot.provider ?? 'claude']: m.snapshot })); break;
+        case 'rateLimit': setRateLimits((prev) => ({ ...prev, [activeProviderRef.current]: m.snapshot })); break;
         case 'model': setResolvedModel(m.model); break;
         case 'slashCommands': setSlashCommands(m.commands); break;
         case 'fileResults': setFileResults({ query: m.query, files: m.files }); break;
