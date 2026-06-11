@@ -197,6 +197,8 @@ body {
   background: linear-gradient(180deg,#37352f,var(--panel)); border-bottom: 1px solid var(--border-sub);
 }
 .board__turn { flex: none; margin-top: 1px; font-size: 11px; font-weight: 700; color: var(--muted-2); background: var(--bg-deep); border-radius: 6px; padding: 2px 7px; white-space: nowrap; }
+/* M-MultiEngine: per-board engine badge (gated to multi-provider — never shown while one engine is implemented). */
+.board__engine { flex: none; margin-top: 1px; font-size: 10px; font-weight: 600; white-space: nowrap; opacity: .85; }
 /* The user's question: multi-line (clamped) instead of a single ellipsis line, so it shows as fully
    as the card height allows. word-break keeps long unbroken strings from overflowing. */
 .board__title {
