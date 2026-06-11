@@ -42,6 +42,9 @@ export interface ClaudeAdapterDeps {
   readProviderConfig(): ProviderConfig;
   // The bundled `claude` binary path, for CLI subcommands the SDK doesn't expose (account sign-out). Optional.
   resolveBinary?(): string | undefined;
+  // The stored API key for this provider (from the host's SecretStorage cache), or undefined. Consumed only
+  // when authMethod==='apiKey'. The key never lives in config — the host owns it; the adapter injects it.
+  getApiKey?(): string | undefined;
 }
 
 /**
@@ -80,6 +83,30 @@ function userMessage(prompt: string, images?: ImageInput[]): any {
 export class ClaudeAdapter implements Engine {
   readonly id = 'claude' as const;
   constructor(private readonly deps: ClaudeAdapterDeps) {}
+
+  /**
+   * Resolve the spawn `env` for EVERY sdk.query in this adapter (turn / compact / summarize / control /
+   * auth), so the chosen auth method is applied consistently. The SDK REPLACES the subprocess env wholesale
+   * when `env` is set (sdk.d.ts:1402) — so we must spread `process.env` first or PATH/HOME break.
+   *  - subscription (default) + no `braid.env` → returns undefined ⇒ env OMITTED ⇒ the subprocess inherits
+   *    process.env exactly as before (byte-for-byte today's behavior; the subscription path never changes).
+   *  - apiKey → inject ANTHROPIC_API_KEY (the stored key wins over any ambient one) over process.env.
+   *  - any `braid.env` override → merged over process.env (this also fixes the latent PATH-wipe of the old
+   *    `out.env = cfg.env`, which replaced the whole env).
+   * The injection is gated STRICTLY on authMethod==='apiKey' — so a subscription user is never silently
+   * switched to metered billing (the refined invariant). (knowledge.md: env replaces subprocess env)
+   */
+  private spawnEnv(): Record<string, string> | undefined {
+    const cfg = this.deps.readProviderConfig();
+    const extra = cfg.env && Object.keys(cfg.env).length ? cfg.env : null;
+    const key = cfg.authMethod === 'apiKey' ? (this.deps.getApiKey?.() || undefined) : undefined;
+    if (!extra && !key) return undefined; // subscription + no override → inherit process.env (unchanged)
+    return {
+      ...(process.env as Record<string, string>),
+      ...(extra ?? {}),
+      ...(key ? { ANTHROPIC_API_KEY: key } : {}),
+    };
+  }
 
   async capabilities(): Promise<EngineCapabilities> {
     // Model list is sourced from the catalog (SSOT) — returned by reference so consumers + tests can
@@ -182,6 +209,10 @@ export class ClaudeAdapter implements Engine {
       if (req.attach.at) options.resumeSessionAt = req.attach.at;
     }
     if (req.persistSession === false) options.persistSession = false;
+    // Auth method: inject ANTHROPIC_API_KEY (apiKey mode) / merge braid.env over process.env. Omitted in
+    // subscription mode with no override (→ inherit process.env, unchanged). Supersedes buildSdkOptions' env.
+    const spawnEnv = this.spawnEnv();
+    if (spawnEnv) options.env = spawnEnv;
 
     // streaming-input multi-turn lifecycle (host-agnostic; identical invariants to the old runQuery)
     const queue: any[] = [];
@@ -316,6 +347,7 @@ export class ClaudeAdapter implements Engine {
             forkSession: true, // branch into a new session so the source board's session is not mutated
             permissionMode: 'bypassPermissions',
             abortController: abort,
+            env: this.spawnEnv(), // same auth method as turns (apiKey → key injected; subscription → inherit)
             hooks: { PostCompact: [{ hooks: [async (input: any) => { summary = input?.compact_summary ?? summary; return {}; }] }] },
           },
         });
@@ -354,7 +386,7 @@ export class ClaudeAdapter implements Engine {
         // thinking:disabled → digest is a cheap classify/summarize task that needs no reasoning; set it
         // EXPLICITLY (not omitted) so the binary default can never turn thinking on and burn thinking
         // tokens. SUMMARY_MODEL is Haiku 4.5, which accepts {type:'disabled'} (only Fable 5 would 400).
-        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, settingSources: [], settings: { autoMemoryEnabled: false }, maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false, thinking: { type: 'disabled' } },
+        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, settingSources: [], settings: { autoMemoryEnabled: false }, maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false, thinking: { type: 'disabled' }, env: this.spawnEnv() },
       });
       for await (const m of q as AsyncIterable<any>) {
         if (m.type === 'assistant') { const full = extractText(m); if (full) text = full; }
@@ -432,7 +464,7 @@ export class ClaudeAdapter implements Engine {
     const keepAlive = new Promise<void>((r) => { ctrl._release = r; });
     async function* input() { await keepAlive; } // yields nothing; stays open until dispose()
     try {
-      ctrl._q = sdk.query({ prompt: input(), options: { cwd, permissionMode: 'bypassPermissions', persistSession: false } });
+      ctrl._q = sdk.query({ prompt: input(), options: { cwd, permissionMode: 'bypassPermissions', persistSession: false, env: this.spawnEnv() } });
     } catch (e: any) {
       console.error('[Braid] MCP control session failed to start:', e?.message ?? e);
       return null;
@@ -452,7 +484,7 @@ export class ClaudeAdapter implements Engine {
     const keepAlive = new Promise<void>((r) => { ctrl._release = r; });
     async function* input() { await keepAlive; } // yields nothing; stays open until dispose()
     try {
-      ctrl._q = sdk.query({ prompt: input(), options: { cwd, permissionMode: 'bypassPermissions', persistSession: false } });
+      ctrl._q = sdk.query({ prompt: input(), options: { cwd, permissionMode: 'bypassPermissions', persistSession: false, env: this.spawnEnv() } });
     } catch (e: any) {
       console.error('[Braid] account control session failed to start:', e?.message ?? e);
       return null;
@@ -498,7 +530,7 @@ export class ClaudeAdapter implements Engine {
     async function* input() { await keepAlive; } // yields nothing; stays open until release()
     let q: any;
     try {
-      q = sdk.query({ prompt: input(), options: { cwd, permissionMode: 'bypassPermissions', persistSession: false } });
+      q = sdk.query({ prompt: input(), options: { cwd, permissionMode: 'bypassPermissions', persistSession: false, env: this.spawnEnv() } });
     } catch (e: any) {
       console.error('[Braid] control session failed to start:', e?.message ?? e);
       return fallback;
@@ -533,7 +565,7 @@ export class ClaudeAdapter implements Engine {
     try {
       const q = sdk.query({
         prompt: 'Reply with exactly one word: OK',
-        options: { cwd, permissionMode: 'bypassPermissions', maxTurns: 1, abortController: abort, persistSession: false },
+        options: { cwd, permissionMode: 'bypassPermissions', maxTurns: 1, abortController: abort, persistSession: false, env: this.spawnEnv() },
       });
       for await (const m of q as AsyncIterable<any>) {
         if (m.type === 'system' && m.subtype === 'init' && m.model) model = m.model;

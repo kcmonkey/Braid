@@ -224,6 +224,13 @@ export type WebviewMessage =
   // Provider spine: make `provider` the active engine for new turns (persists `braid.activeProvider`).
   // Only implemented providers are selectable; the host rebroadcasts `config` with the new active + caps.
   | { type: 'setActiveProvider'; provider: EngineId }
+  // Claude API-key auth method. `setApiKey` stores a key (VS Code SecretStorage — never settings.json,
+  // never synced) and switches that provider's authMethod→'apiKey'; `clearApiKey` removes it; `adoptEnvKey`
+  // copies a key already present in the environment (ANTHROPIC_API_KEY) into SecretStorage + switches mode.
+  // The raw key value travels ONLY on `setApiKey` (webview→host); it is NEVER echoed back (only a hint is).
+  | { type: 'setApiKey'; provider: EngineId; key: string }
+  | { type: 'clearApiKey'; provider: EngineId }
+  | { type: 'adoptEnvKey'; provider: EngineId }
   // M10 AskUserQuestion: the user answered (or canceled) an interactive question card. The webview
   // pre-formats the choice into `reason` (via merge.ts/formatAskUserAnswer) so the extension bundle
   // never pulls in merge.ts. The host resolves the blocked PreToolUse hook by `toolUseId` (= the
@@ -323,6 +330,11 @@ export type HostMessage =
   // Accounts panel: a provider's identity + usage snapshot (from the account control session). `busy` =
   // an auth action (sign in/out) is mid-flight. Pushed on accountOpen refresh + after sign in/out.
   | { type: 'account'; provider: EngineId; account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }
+  // Claude API-key auth status (secret-safe). `stored` = a key is saved in SecretStorage for this provider
+  // (+ a last-4 `hint` for the masked display); `envDetected` = a key is present in the environment to adopt
+  // (+ `envHint`). Drives the Accounts card's API-key face + the adopt offer. The key value itself never
+  // crosses this boundary — only presence + a hint. (authMethod)
+  | { type: 'apiKeyStatus'; provider: EngineId; stored: boolean; hint?: string; envDetected: boolean; envHint?: string }
   // Passive usage chip: latest rate-limit snapshot captured from a turn's stream (canvas-level, no boardId).
   | { type: 'rateLimit'; snapshot: RateLimitSnapshot }
   // Node-Delete Phase 3: result of a best-effort file rollback on delete — which files were restored vs

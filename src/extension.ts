@@ -108,7 +108,21 @@ function resolveClaudeBinary(): string | undefined {
   catch { return undefined; }
 }
 
-const engineHost = new EngineHost({ readSettings, getSdkInstallDir: () => provisionedSdkDir, resolveBinary: resolveClaudeBinary });
+// Claude API-key auth: in-memory cache of each provider's stored key, so the adapter's spawnEnv() can read
+// it synchronously at spawn time. The authoritative store is VS Code SecretStorage (loaded into this cache
+// on activate; written through on setApiKey/adopt/clear). The key value never enters settings.json / the
+// webview — only presence + a last-4 hint do. (authMethod / billing invariant)
+const apiKeyCache: Partial<Record<EngineId, string>> = {};
+const secretKey = (id: EngineId) => `braid.apiKey.${id}`;
+/** Last-4 hint for a masked key display (never the full key). '' for too-short/empty. */
+const keyHint = (key: string | undefined): string | undefined => (key && key.length >= 4 ? key.slice(-4) : undefined);
+
+const engineHost = new EngineHost({
+  readSettings,
+  getSdkInstallDir: () => provisionedSdkDir,
+  resolveBinary: resolveClaudeBinary,
+  getApiKey: (id) => apiKeyCache[id],
+});
 
 // Notifications are entirely webview-side now: an in-canvas notification panel derived from each board's
 // unread / pending-ask state (which self-clears when the user opens the board). The host keeps no
@@ -157,6 +171,7 @@ export function activate(context: vscode.ExtensionContext) {
   provisionedSdkDir = sdkInstallDir(context.globalStorageUri.fsPath);
   extensionPathForSdk = context.extensionPath;
   isDevMode = context.extensionMode === vscode.ExtensionMode.Development;
+  void loadApiKeys(context); // hydrate the SecretStorage-backed API keys into the sync cache for spawnEnv()
   // Provision the SDK up front (at startup), not lazily on first send: a fresh install downloads now with
   // a progress notification; an existing (older) install updates silently in the background.
   if (!sdkPresent()) void ensureSdkReady();
@@ -223,10 +238,22 @@ async function checkEnvironment() {
   out.appendLine('Braid · Environment check');
   out.appendLine('================================');
 
-  const hasApiKey = !!process.env.ANTHROPIC_API_KEY;
-  out.appendLine(hasApiKey
-    ? '• ANTHROPIC_API_KEY: set ⚠️  Subscription users should clear it — it switches billing from the subscription to the metered API.'
-    : '• ANTHROPIC_API_KEY: unset ✓  (using subscription auth)');
+  const apiKeyMode = (readSettings().providers.claude?.authMethod ?? 'subscription') === 'apiKey';
+  const hasEnvKey = !!process.env.ANTHROPIC_API_KEY;
+  const hasStoredKey = !!apiKeyCache.claude;
+  if (apiKeyMode) {
+    out.appendLine(`• Auth method: API key (metered, billed to your Anthropic API account) ${hasStoredKey || hasEnvKey ? '✓' : '⚠️'}`);
+    out.appendLine(hasStoredKey
+      ? '• API key: stored in SecretStorage ✓  (injected into the spawn; never written to settings.json)'
+      : hasEnvKey
+        ? '• API key: present in the environment (ANTHROPIC_API_KEY) ✓  — adopt it in Accounts to manage it here.'
+        : '• API key: none ⚠️  Add a key in the Accounts panel, or switch back to Subscription.');
+  } else {
+    out.appendLine('• Auth method: subscription (OAuth) ✓');
+    out.appendLine(hasEnvKey
+      ? '• ANTHROPIC_API_KEY: set ⚠️  In subscription mode this silently bills the metered API — clear it, or adopt it as an API-key account in Accounts.'
+      : '• ANTHROPIC_API_KEY: unset ✓  (using subscription auth)');
+  }
 
   // Claude SDK provisioning (Shape 2): the SDK is downloaded from Anthropic's official npm registry into
   // this extension's global storage — never bundled. Report where/which version, then make sure it's ready.
@@ -274,12 +301,14 @@ async function checkEnvironment() {
         ? `• Test connection: success ✓${model ? `  (model: ${model})` : ''}`
         : `• Test connection: failed ✗  ${errText}`);
 
-      if (ok && !hasApiKey) {
+      if (ok && apiKeyMode) {
+        vscode.window.showInformationMessage(`Braid: API-key auth works ✅${model ? ` (model: ${model})` : ''} — metered billing.`);
+      } else if (ok && !hasEnvKey) {
         vscode.window.showInformationMessage(`Braid: subscription auth works ✅${model ? ` (model: ${model})` : ''}`);
-      } else if (ok && hasApiKey) {
-        vscode.window.showWarningMessage('Braid: connected, but ANTHROPIC_API_KEY is set → currently billing the metered API. Subscription users should clear that env var and restart VS Code.');
+      } else if (ok && hasEnvKey) {
+        vscode.window.showWarningMessage('Braid: connected, but ANTHROPIC_API_KEY is set in subscription mode → currently billing the metered API. Clear that env var, or adopt it as an API-key account in Accounts.');
       } else {
-        vscode.window.showWarningMessage('Braid: connection failed. Make sure you have run `claude login` to sign in to your subscription account. See "Output → Braid" for details.');
+        vscode.window.showWarningMessage('Braid: connection failed. Run `claude login` (subscription), or add an API key in the Accounts panel. See "Output → Braid" for details.');
       }
     },
   );
@@ -498,6 +527,7 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // Proactively populate the toolbar avatar/identity (fast `claude auth status`, no control session) so
       // the account shows on load — the user shouldn't have to open the Accounts panel to see who's signed in.
       void pushAccountIdentity(canvasId);
+      pushApiKeyStatus(canvasId); // + the API-key status so the avatar/Accounts reflect apiKey mode on load
       break;
     }
     case 'persist': {
@@ -563,6 +593,17 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       break;
     case 'accountSignOut':
       await accountAuth(canvasId, 'out');
+      break;
+    case 'setApiKey':
+      // Store a Claude API key (SecretStorage) + switch to apiKey auth. The key value never echoes back.
+      await setApiKey(context, msg.provider, msg.key);
+      break;
+    case 'clearApiKey':
+      await clearApiKey(context, msg.provider);
+      break;
+    case 'adoptEnvKey':
+      // Adopt a key already in the environment (the "auto-detect & offer to adopt" path).
+      await adoptEnvKey(context, msg.provider);
       break;
     case 'askUserAnswer': {
       // M10: user answered an AskUserQuestion card → unblock the waiting PreToolUse hook with the
@@ -946,8 +987,68 @@ async function pushAccountIdentity(canvasId: string) {
   postTo(canvasId, { type: 'account', provider: readSettings().activeProvider, account, usage: null });
 }
 
+// ---- Claude API-key auth method (SecretStorage-backed; the key never enters settings.json / the webview) ----
+
+/** Load each provider's SecretStorage-backed API key into the sync cache (called on activate). */
+async function loadApiKeys(context: vscode.ExtensionContext) {
+  for (const p of PROVIDER_CATALOG) {
+    try { const k = await context.secrets.get(secretKey(p.id)); if (k) apiKeyCache[p.id] = k; }
+    catch (e: any) { console.error('[Braid] reading stored API key failed:', e?.message ?? e); }
+  }
+  for (const id of panels.keys()) pushApiKeyStatus(id); // refresh any already-open canvas
+}
+
+/** Push the secret-safe API-key status (stored? + hint; ambient env key? + hint) for the active provider. */
+function pushApiKeyStatus(canvasId: string) {
+  const provider = readSettings().activeProvider;
+  const stored = apiKeyCache[provider];
+  const envKey = process.env.ANTHROPIC_API_KEY;
+  postTo(canvasId, { type: 'apiKeyStatus', provider, stored: !!stored, hint: keyHint(stored), envDetected: !!envKey, envHint: keyHint(envKey) });
+}
+
+/** Persist a provider's authMethod into its `braid.providers` slice (mirrors applyConfig's provider write). */
+async function setProviderAuthMethod(provider: EngineId, method: 'subscription' | 'apiKey') {
+  const c = vscode.workspace.getConfiguration('braid');
+  const current = readProviderConfig(c, provider);
+  const providers = c.get<Record<string, ProviderConfig>>('providers', {});
+  await c.update('providers', { ...providers, [provider]: { ...current, authMethod: method } }, vscode.ConfigurationTarget.Global);
+}
+
+/** Store a provider's API key (SecretStorage + cache) and switch it to apiKey auth, then refresh the UI. */
+async function setApiKey(context: vscode.ExtensionContext, provider: EngineId, key: string) {
+  const trimmed = key.trim();
+  if (!trimmed) return;
+  try { await context.secrets.store(secretKey(provider), trimmed); }
+  catch (e: any) { console.error('[Braid] storing API key failed:', e?.message ?? e); return; }
+  apiKeyCache[provider] = trimmed;
+  await setProviderAuthMethod(provider, 'apiKey');
+  await afterApiKeyChange();
+}
+
+/** Adopt a key already present in the environment (ANTHROPIC_API_KEY) into SecretStorage + apiKey mode. */
+async function adoptEnvKey(context: vscode.ExtensionContext, provider: EngineId) {
+  const envKey = process.env.ANTHROPIC_API_KEY?.trim();
+  if (envKey) await setApiKey(context, provider, envKey);
+}
+
+/** Remove a provider's stored key (SecretStorage + cache). authMethod is left as-is (the card shows the
+ * empty "enter a key" state); the user can re-enter or toggle back to Subscription. */
+async function clearApiKey(context: vscode.ExtensionContext, provider: EngineId) {
+  try { await context.secrets.delete(secretKey(provider)); }
+  catch (e: any) { console.error('[Braid] deleting API key failed:', e?.message ?? e); }
+  delete apiKeyCache[provider];
+  await afterApiKeyChange();
+}
+
+/** After any key/mode change: rebroadcast config (authMethod may have flipped) + key status to every canvas. */
+async function afterApiKeyChange() {
+  await pushConfig();
+  for (const id of panels.keys()) pushApiKeyStatus(id);
+}
+
 /** Accounts panel opened → lazily create the account/usage control session, then push identity + usage. */
 async function openAccount(canvasId: string) {
+  pushApiKeyStatus(canvasId); // refresh the API-key face + adopt offer when the panel opens
   if (!accountControls.has(canvasId)) {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     const ctrl = await engineHost.getActive().accountControl(cwd);

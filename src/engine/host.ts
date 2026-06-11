@@ -24,6 +24,8 @@ export class EngineHost {
     readSettings(): BraidSettings;
     getSdkInstallDir?(): string | undefined;
     resolveBinary?(): string | undefined;
+    // Per-provider stored API key (host's SecretStorage cache). Consumed only when authMethod==='apiKey'.
+    getApiKey?(id: EngineId): string | undefined;
   }) {
     this.readSettings = deps.readSettings;
     this.engines.set('claude', new ClaudeAdapter({
@@ -31,6 +33,7 @@ export class EngineHost {
       // Each adapter is handed only its own provider's slice (host owns the provider→slice mapping).
       readProviderConfig: () => deps.readSettings().providers.claude ?? DEFAULT_PROVIDER_CONFIG,
       resolveBinary: deps.resolveBinary,
+      getApiKey: () => deps.getApiKey?.('claude'),
     }));
   }
 

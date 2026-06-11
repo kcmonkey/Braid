@@ -3601,29 +3601,53 @@ function App() {
     return () => clearTimeout(t);
   }, [sizeSig]);
 
-  // Detail-centering: when a board enters/leaves DETAIL its width jumps 320↔480. Left alone it would grow
-  // rightward from its left edge, then the measured→dagre relayout (above) would glide it back to centered —
-  // that settling slide read as the board "drifting horizontally". Fix: nudge each entering/leaving board by
-  // ±LOD_CENTER_SHIFT here in a LAYOUT effect — it runs after the detail class (→ CSS width) is committed to
-  // the DOM but BEFORE the browser paints, and `snapLod` suppresses the node transition for that one frame.
-  // So the board paints at its new width AND its recentered x in the SAME frame: symmetric grow, zero slide.
-  // The dagre relayout that follows keeps the simple top-left pin, so it preserves (never re-applies) this
-  // recenter. Two guards: (a) a freshly forked board (no `measured` yet) is born detail via autoLayout, not a
-  // far→detail transition, so skip it; (b) a zoom-band crossing flips many boards' width at once while the
-  // viewport is already scaling — re-sync the baseline without nudging, so we only animate selection-driven
-  // changes. Keyed on `wideSig` (the 480px-rendered set), NOT raw detailIds, so it fires exactly on real
-  // width changes. (Width constants mirror styles.css.)
+  // Detail-centering ("scale around the board's center"): when a board enters/leaves DETAIL it grows/shrinks
+  // BOTH wider (320↔480) and taller (far gist ↔ full body). Left alone it grows rightward + downward from its
+  // top-left corner, so its center — and the right-edge "+" branch button pinned to that center — drifts. Fix:
+  // nudge each changed board by -Δsize/2 on both axes so it scales symmetrically about its center (the "+"
+  // keeps its on-screen position). Done in a LAYOUT effect: it runs after React commits the new LOD content to
+  // the DOM but BEFORE the browser paints, and `snapLod` suppresses the node transition for that one frame, so
+  // the board paints at its new size AND recentered position in the SAME frame — symmetric grow, zero slide.
+  //  • width Δ is the fixed 320↔480 (LOD_CENTER_SHIFT, mirrors styles.css);
+  //  • height Δ is content-driven, so read the board's NEW height straight from the DOM here — measured.height
+  //    still holds the OLD height (React Flow's ResizeObserver only updates it post-paint), giving us the full
+  //    delta pre-paint. The dagre relayout that follows keeps its top-left pin, preserving this recenter.
+  // Guards: (a) a freshly forked board (no `measured` yet) is born detail via autoLayout, not a far→detail
+  // transition — skip it; (b) a zoom-band crossing flips many boards at once while the viewport is already
+  // scaling — re-sync the baseline without nudging. Keyed on `wideSig` (the 480px-rendered set), so it fires
+  // exactly on real width changes.
   useLayoutEffect(() => {
     const prevWide = prevWideRef.current;
     const zoomFlip = prevZoomComprRef.current !== zoomCompressed; // a zoom-band crossing, not a selection change
-    const shift = new Map<string, number>();
-    for (const id of wideIds) if (!prevWide.has(id)) shift.set(id, -LOD_CENTER_SHIFT); // entered detail width → move left
-    for (const id of prevWide) if (!wideIds.has(id)) shift.set(id, +LOD_CENTER_SHIFT);  // left detail width → move right
+    const entered: string[] = [], left: string[] = [];
+    for (const id of wideIds) if (!prevWide.has(id)) entered.push(id);   // far → detail (grew)
+    for (const id of prevWide) if (!wideIds.has(id)) left.push(id);      // detail → far (shrank)
     prevWideRef.current = wideIds;
-    if (zoomFlip || !shift.size) return;
+    if (zoomFlip || (!entered.length && !left.length)) return;
+    // Each changed board's CURRENT rendered height, straight from the DOM (this effect runs pre-paint, so the
+    // new LOD content is in the DOM but measured.height still holds the old height).
+    const domH = new Map<string, number>();
+    document.querySelectorAll<HTMLElement>('.react-flow__node').forEach((el) => {
+      const did = el.getAttribute('data-id');
+      if (did) domH.set(did, el.offsetHeight);
+    });
+    const byIdNow = new Map(nodes.map((n) => [n.id, n] as const));
+    const shift = new Map<string, { dx: number; dy: number }>();
+    const plan = (id: string, grew: boolean) => {
+      const oldH = byIdNow.get(id)?.measured?.height;
+      if (oldH == null) return; // born-detail fresh board (no prior size) — laid out by autoLayout, don't nudge
+      const newH = domH.get(id) ?? oldH; // DOM = new height; measured.height = old height
+      shift.set(id, {
+        dx: grew ? -LOD_CENTER_SHIFT : LOD_CENTER_SHIFT, // width Δ is fixed ±160 → ∓80 to keep center
+        dy: -(newH - oldH) / 2,                          // height Δ is content-driven → keep center
+      });
+    };
+    entered.forEach((id) => plan(id, true));
+    left.forEach((id) => plan(id, false));
+    if (!shift.size) return;
     setNodes((ns) => ns.map((n) => {
-      const dx = shift.get(n.id);
-      return dx !== undefined && n.measured ? { ...n, position: { x: n.position.x + dx, y: n.position.y } } : n;
+      const s = shift.get(n.id);
+      return s ? { ...n, position: { x: n.position.x + s.dx, y: n.position.y + s.dy } } : n;
     }));
     setSnapLod(true);
     const raf = requestAnimationFrame(() => setSnapLod(false));

@@ -11,6 +11,11 @@
 
 /** Per-provider engine settings. '' / empty / 0 mean "inherit / omit" (see buildSdkOptions). */
 export interface ProviderConfig {
+  // Auth method for reaching this provider's endpoint. 'subscription' (default) = the logged-in OAuth
+  // session (no ANTHROPIC_API_KEY — the project's billing invariant); 'apiKey' = the adapter injects the
+  // stored key (SecretStorage, never here) into the spawn env. Optional so existing config literals are
+  // unaffected; undefined ⇒ 'subscription'. The key VALUE never lives in config — only this selector does.
+  authMethod?: 'subscription' | 'apiKey';
   model: string;            // '' = inherit (omit)
   effort: string;           // '' = inherit (omit); else 'low'|'medium'|'high'|'xhigh'|'max'
   thinking: string;         // 'inherit' = omit; 'adaptive' → {type:'adaptive'}; 'disabled' → {type:'disabled'}
@@ -51,6 +56,7 @@ export type BraidConfig = ProviderConfig & CanvasConfig;
  * win over `readConfig`'s fallbacks) — notably effort='xhigh' and thinking='adaptive' — so moving to a single
  * `braid.providers` object setting (no per-key package defaults) preserves behavior for a fresh install. */
 export const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
+  authMethod: 'subscription', // subscription OAuth by default (the billing invariant); 'apiKey' is opt-in
   model: '',
   effort: 'xhigh',
   thinking: 'adaptive',
@@ -77,6 +83,7 @@ export const DEFAULT_CANVAS_CONFIG: CanvasConfig = {
 /** The legacy flat provider keys (pre-multi-provider `braid.model`, `braid.effort`, …) as read from config.
  * All optional → migrateLegacyConfig fills missing fields with DEFAULT_PROVIDER_CONFIG. */
 export interface LegacyFlatProviderConfig {
+  authMethod?: 'subscription' | 'apiKey';
   model?: string;
   effort?: string;
   thinking?: string;
@@ -95,6 +102,7 @@ export interface LegacyFlatProviderConfig {
  */
 export function migrateLegacyConfig(legacy: LegacyFlatProviderConfig): ProviderConfig {
   return {
+    authMethod: legacy.authMethod ?? DEFAULT_PROVIDER_CONFIG.authMethod,
     model: legacy.model ?? DEFAULT_PROVIDER_CONFIG.model,
     effort: legacy.effort ?? DEFAULT_PROVIDER_CONFIG.effort,
     thinking: legacy.thinking ?? DEFAULT_PROVIDER_CONFIG.thinking,
