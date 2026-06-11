@@ -12,6 +12,7 @@ scripts/**
 media/demo/**
 mockups/**
 CLAUDE.md
+AGENTS.md
 .git/**
 .gitignore
 .vscode/**
@@ -22,6 +23,10 @@ CLAUDE.md
 # never shipped in the vsix. (plans/Distributable)
 node_modules/@anthropic-ai/claude-agent-sdk/**
 node_modules/@anthropic-ai/claude-agent-sdk-*/**
+
+# Dev probes / scratch — investigation artifacts, never shipped
+probe-*
+tmp-codex-schema/**
 
 # Misc
 *.vsix
