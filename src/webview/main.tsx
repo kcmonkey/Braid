@@ -3615,8 +3615,7 @@ function App() {
   // width changes. (Width constants mirror styles.css.)
   useLayoutEffect(() => {
     const prevWide = prevWideRef.current;
-    const zoomFlip = prevZoomComprRef.current !== zoomCompressed;
-    prevZoomComprRef.current = zoomCompressed;
+    const zoomFlip = prevZoomComprRef.current !== zoomCompressed; // a zoom-band crossing, not a selection change
     const shift = new Map<string, number>();
     for (const id of wideIds) if (!prevWide.has(id)) shift.set(id, -LOD_CENTER_SHIFT); // entered detail width → move left
     for (const id of prevWide) if (!wideIds.has(id)) shift.set(id, +LOD_CENTER_SHIFT);  // left detail width → move right
@@ -3630,6 +3629,9 @@ function App() {
     const raf = requestAnimationFrame(() => setSnapLod(false));
     return () => cancelAnimationFrame(raf);
   }, [wideSig]);
+  // Track the zoom band separately so the effect above can always tell a zoom-band crossing from a selection
+  // change — even across crossings that don't alter `wideSig` (e.g. nothing selected), which wouldn't fire it.
+  useEffect(() => { prevZoomComprRef.current = zoomCompressed; }, [zoomCompressed]);
 
   // auto-direction: when the viewport aspect ratio crosses over (wide↔tall), flip dagre's flow
   // direction and re-lay out. Guard on `d === dirRef.current` so plain resizes within one orientation
