@@ -173,12 +173,14 @@ export class CodexAdapter implements Engine {
         stopWaiting: async () => { /* no async-continuation hold in v1 */ },
       });
 
-      // Turn loop: run the first turn, then drain any queued follow-ups as their own rounds.
+      // Turn loop: run the first turn, then drain any queued follow-ups as their own rounds. Each turn's
+      // input carries the prompt + any pasted/dropped images (written to temp files as Codex localImages).
       const effort = codexEffort(cfg.effort);
-      let input = req.prompt;
+      let built = buildUserInput(req.prompt, req.images);
+      allTemps.push(...built.temps);
       for (;;) {
         settled = false;
-        const turnParams: Record<string, unknown> = { threadId, input: textInput(input) };
+        const turnParams: Record<string, unknown> = { threadId, input: built.input };
         if (effort) turnParams.effort = effort;
         const turnEnd = new Promise<void>((res) => { resolveTurnEnd = res; });
         const started = await rpc.request('turn/start', turnParams).catch((e: any) => { sink.error(req.boardId, state.turnIndex, `Codex turn failed: ${e?.message ?? e}`); settle(true); return null; });
@@ -188,7 +190,8 @@ export class CodexAdapter implements Engine {
         if (ctl.abort.signal.aborted) break;
         const next = queue.shift();
         if (!next) break;
-        input = next.text;
+        built = buildUserInput(next.text, next.images);
+        allTemps.push(...built.temps);
         interrupted = false;
       }
       if (!settled) settle(ctl.abort.signal.aborted ? false : !codexView(state));
@@ -198,6 +201,8 @@ export class CodexAdapter implements Engine {
     } finally {
       ctl.abort.signal.removeEventListener('abort', onAbort);
       try { rpc?.dispose(); } catch { /* ignore */ }
+      // Images live only for the turn (like Claude's inline blocks) → delete the temp files now.
+      for (const t of allTemps) { try { fs.unlinkSync(t); } catch { /* best-effort */ } }
     }
   }
 
