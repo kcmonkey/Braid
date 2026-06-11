@@ -310,6 +310,53 @@ describe('ClaudeAdapter.runTurn — streaming + settle', () => {
       { b: 'b2', ti: 0, text: 'child' },
     ]);
   });
+
+  it('settles a still-queued cross-board continuation when the warm session is torn down (no hang)', async () => {
+    const pulledInput: any[] = [];
+    const out: any[] = [];
+    let outWake: (() => void) | null = null;
+    let outDone = false;
+    let promptIterable: AsyncIterable<any> | null = null;
+    const emit = (m: any) => { out.push(m); if (outWake) { const w = outWake; outWake = null; w(); } };
+    const finish = () => { outDone = true; if (outWake) { const w = outWake; outWake = null; w(); } };
+    const q: any = {
+      async *[Symbol.asyncIterator]() {
+        (async () => { try { for await (const msg of promptIterable as AsyncIterable<any>) pulledInput.push(msg); } catch { /* generator closed */ } })();
+        while (true) {
+          while (out.length) yield out.shift();
+          if (outDone) return;
+          await new Promise<void>((r) => { outWake = r; });
+        }
+      },
+      interrupt: async () => {},
+    };
+    const sdk = { query: (args: any) => { promptIterable = args.prompt; return q; } };
+    const adapter = new ClaudeAdapter({ loadSdk: async () => sdk, readProviderConfig: () => cfg });
+    const { sink, calls } = recordingSink();
+    let handle: TurnHandle | undefined;
+    const p = adapter.runTurn(req({ kind: 'fresh' }, { warmSession: true, warmIdleMs: 500 }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } });
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+
+    await tick();
+    emit(init);
+    emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'parent' }] } });
+    // Turn 1 has NOT settled (no `result`) → the gate stays closed; the pushed child stays QUEUED, not started.
+    handle!.push('child question', undefined, { boardId: 'b2', turnIndex: 0 });
+    await tick();
+    expect(pulledInput.length).toBe(1); // child was never yielded into the session
+
+    // Tear the warm session down (config-change dispose / delete) while the child is still queued.
+    await handle!.dispose();
+    finish();
+    await p;
+
+    // Parent settles from its partial; the stranded child surfaces an error on ITS OWN board (b2) rather than
+    // hanging in 'streaming'. (warm-chain teardown flush)
+    expect(calls.filter((c) => c.t === 'done').map((d) => ({ b: d.b, text: d.d.text }))).toEqual([{ b: 'b1', text: 'parent' }]);
+    const childErr = calls.find((c) => c.t === 'error' && c.b === 'b2');
+    expect(childErr).toBeTruthy();
+    expect(childErr.ti).toBe(0);
+  });
 });
 
 describe('ClaudeAdapter.runTurn — loadSdk failure', () => {
