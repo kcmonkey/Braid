@@ -14,6 +14,7 @@ import { CodexRpc } from './transport';
 import {
   reduceCodexNotification, buildCodexTurnDone, initCodexParseState, codexView, type CodexParseState,
 } from './reduce';
+import { CodexMcpControl, CodexAccountControl, codexSkillsToSlashCommands } from './control';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -90,6 +91,22 @@ export class CodexAdapter implements Engine {
     return rpc;
   }
 
+  /** Fork a thread, optionally truncated to a mid-point. Codex `thread/fork` copies the WHOLE thread (no
+   * anchor param), so to fork AT a board's turn (Lazy-Fork `at` = that board's last turnId, emitted as
+   * messageUuid) we fork then `thread/rollback` the trailing turns — keeping only history up to (and
+   * including) the fork point. Without this, a branch off a mid-conversation board inherits its sibling /
+   * later turns (context bleed). `at` absent or not found in the fork's `turns` → no rollback (whole-thread
+   * fork, the safe fallback; correct anyway when forking off the tail board). (probe-verified fork+rollback) */
+  private async forkAt(rpc: CodexRpc, threadId: string, at: string | undefined, startOpts: Record<string, unknown>): Promise<any> {
+    const forked = (await rpc.request('thread/fork', { threadId, ...startOpts }))?.thread;
+    if (!forked?.id || !at || !Array.isArray(forked.turns)) return forked;
+    const idx = forked.turns.findIndex((t: any) => t?.id === at);
+    const drop = idx >= 0 ? forked.turns.length - (idx + 1) : 0;
+    if (drop <= 0) return forked; // at = the last turn (tail fork) or not found → keep the whole fork
+    const rolled = (await rpc.request('thread/rollback', { threadId: forked.id, numTurns: drop }))?.thread;
+    return rolled ?? forked;
+  }
+
   // ---- main turn ----
   async runTurn(req: TurnRequest, sink: EventSink, pre: PreToolInterceptor, ctl: TurnControl): Promise<void> {
     const cfg = this.deps.readProviderConfig();
@@ -157,9 +174,13 @@ export class CodexAdapter implements Engine {
       const startOpts: Record<string, unknown> = { cwd: req.cwd, approvalPolicy, sandbox };
       if (cfg.model) startOpts.model = cfg.model;
       let thread: any;
-      if (attach.kind === 'resume') thread = (await rpc.request('thread/resume', { threadId: attach.session.raw, ...startOpts }))?.thread;
-      else if (attach.kind === 'fork') thread = (await rpc.request('thread/fork', { threadId: attach.session.raw, ...startOpts }))?.thread; // whole-thread (no mid-point anchor)
-      else thread = (await rpc.request('thread/start', startOpts))?.thread;
+      if (attach.kind === 'resume') {
+        thread = (await rpc.request('thread/resume', { threadId: attach.session.raw, ...startOpts }))?.thread;
+      } else if (attach.kind === 'fork') {
+        thread = await this.forkAt(rpc, attach.session.raw, attach.at, startOpts);
+      } else {
+        thread = (await rpc.request('thread/start', startOpts))?.thread;
+      }
       const threadId = thread?.id;
       if (!threadId) { sink.error(req.boardId, req.turnIndex, 'Codex: thread/start returned no thread id'); return; }
       state.threadId = threadId;
@@ -287,9 +308,29 @@ export class CodexAdapter implements Engine {
     return { text };
   }
 
-  // ---- MCP / account (v1: identity + auth probe only; control panels are a follow-up) ----
-  async mcpControl(_cwd: string): Promise<McpController | null> { return null; }
-  async accountControl(_cwd: string): Promise<AccountController | null> { return null; }
+  // ---- MCP control (over a kept-open RPC; host owns lazy create / poll / dispose) ----
+  async mcpControl(cwd: string): Promise<McpController | null> {
+    try {
+      return new CodexMcpControl(await this.open(cwd, {}));
+    } catch (e: any) {
+      console.error('[Braid] codex mcpControl failed to start:', e?.message ?? e);
+      return null;
+    }
+  }
+
+  // ---- Account/usage/auth control (twin of mcpControl; drives the Accounts panel + browser sign-in/out) ----
+  async accountControl(cwd: string): Promise<AccountController | null> {
+    try {
+      // Construct the controller first so the RPC's notification handler can route account/login/completed to
+      // it; attach the opened RPC afterward (notifications only arrive later, during sign-in).
+      const ctrl = new CodexAccountControl();
+      ctrl.attach(await this.open(cwd, { onNotification: (m, p) => ctrl.onNotification(m, p) }));
+      return ctrl;
+    } catch (e: any) {
+      console.error('[Braid] codex accountControl failed to start:', e?.message ?? e);
+      return null;
+    }
+  }
 
   async accountIdentity(cwd: string): Promise<ProviderAccount | null> {
     let rpc: CodexRpc | null = null;
@@ -307,7 +348,19 @@ export class CodexAdapter implements Engine {
     }
   }
 
-  async listSlashCommands(_cwd: string): Promise<SlashCommandSpec[]> { return []; }
+  // ---- composer slash-command autofill (Codex skills → command specs; one-shot, never throws → []) ----
+  async listSlashCommands(cwd: string): Promise<SlashCommandSpec[]> {
+    let rpc: CodexRpc | null = null;
+    try {
+      rpc = await this.open(cwd, {});
+      return codexSkillsToSlashCommands(await rpc.request('skills/list', { cwds: [cwd] }, 10_000));
+    } catch (e: any) {
+      console.error('[Braid] codex listSlashCommands failed:', e?.message ?? e);
+      return [];
+    } finally {
+      try { rpc?.dispose(); } catch { /* ignore */ }
+    }
+  }
 
   async checkAuth(cwd: string, abort: AbortController): Promise<AuthResult> {
     let rpc: CodexRpc | null = null;

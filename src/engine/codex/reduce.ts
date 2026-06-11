@@ -170,8 +170,8 @@ export function reduceCodexNotification(s: CodexParseState, method: string, para
   return out;
 }
 
-/** Build the turn's `done` payload from fold state, closing any still-open reasoning block. No messageUuid:
- * Codex fork is whole-thread (no mid-point anchor), so a Codex board never seeds a Lazy-Fork resumeAt. */
+/** Build the turn's `done` payload from fold state, closing any still-open reasoning block. `messageUuid` =
+ * the board's last turn id — the Lazy-Fork mid-point marker a branch forks+rolls-back to (see below). */
 export function buildCodexTurnDone(s: CodexParseState, isError: boolean, now: number) {
   if (s.thinkOpen >= 0 && s.thinkStart !== undefined) {
     s.thinks[s.thinkOpen] = { ...s.thinks[s.thinkOpen], ms: now - s.thinkStart, active: false };
@@ -179,6 +179,10 @@ export function buildCodexTurnDone(s: CodexParseState, isError: boolean, now: nu
   s.thinkOpen = -1; s.thinkStart = undefined;
   return {
     sessionId: s.threadId,
+    // Lazy-Fork mid-point marker = the board's last turn id. A branch off this board forks the thread then
+    // thread/rollback's the trailing turns back to this turn (CodexAdapter.runTurn), so it inherits only the
+    // history up to here — NOT sibling/later turns. (probe-verified fork+rollback)
+    messageUuid: s.lastTurnId,
     isError,
     text: codexView(s),
     thinking: s.thinking,

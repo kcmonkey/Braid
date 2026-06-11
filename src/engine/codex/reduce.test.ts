@@ -24,6 +24,7 @@ describe('reduceCodexNotification — turn boundary', () => {
     ]);
     expect(s.turnIndex).toBe(1);
     expect(s.answer).toBe(''); // cleared by the reset on the 2nd turn
+    expect(s.lastTurnId).toBe('t2'); // mid-point marker tracks the board's latest turn id
   });
 
   it('baseTurn=1: first turn/started → turnIndex 1, reset false (does NOT clear a resumed board)', () => {
@@ -98,7 +99,7 @@ describe('reduceCodexNotification — usage, rate limit, result', () => {
     expect(done.contextTokens).toBe(13067);
     expect(done.contextWindow).toBe(258400);
     expect(done.text).toBe('done');
-    // (buildCodexTurnDone's return type carries no messageUuid: codex fork is whole-thread → no Lazy-Fork marker.)
+    expect(done.messageUuid).toBe('t1'); // Lazy-Fork mid-point marker = the board's last turn id (fork+rollback)
   });
 
   it('account/rateLimits/updated → a rateLimit snapshot', () => {
