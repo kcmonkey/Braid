@@ -30,11 +30,13 @@
           "default": "claude",
           "enum": [
             "claude",
-            "codex"
+            "codex",
+            "deepseek"
           ],
           "enumDescriptions": [
             "Claude (Anthropic)",
-            "Codex (OpenAI)"
+            "Codex (OpenAI)",
+            "DeepSeek"
           ],
           "markdownDescription": "Legacy/default service provider for new or unmigrated canvases. The in-canvas provider spine now persists the active provider per canvas. Per-provider model/effort/thinking/permission/tool settings live under `braid.providers`."
         },

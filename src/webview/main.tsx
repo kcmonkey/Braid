@@ -19,6 +19,7 @@ import {
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
+  planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
@@ -780,6 +781,8 @@ const SignpostCtx = React.createContext<Map<string, string>>(new Map());
 // Same context pattern as DirCtx/MergeCtxHL (React Flow's node memo doesn't block context propagation).
 const FuseTargetCtx = React.createContext<string | null>(null);
 
+const CollapseCtx = React.createContext<{ expand: (id: string) => void }>({ expand: () => {} });
+
 // M7 gap3: pending editor-context attachment (the active/last-focused file's selection or whole file),
 // now keyed PER BOARD so a board's card and its ChatView composer share one chip while different boards
 // stay independent. Provided by App; onSend/sendFollowup prepend the board's attachment to the engine
@@ -851,6 +854,14 @@ interface AutofillData {
   fileResults: { query: string; files: string[] };
 }
 const AutofillCtx = React.createContext<AutofillData>({ commands: [], searchFiles: () => {}, fileResults: { query: '', files: [] } });
+
+// Active provider for composer-level quick switching. BoardNode instances are mounted by React Flow's
+// nodeTypes, so context is the narrowest way to expose canvas-local provider state without adding host API.
+interface ProviderSwitchState {
+  activeProvider: EngineId;
+  setActive: (id: EngineId) => void;
+}
+const ProviderCtx = React.createContext<ProviderSwitchState>({ activeProvider: 'claude', setActive: () => {} });
 
 // One row's display data, plus the exact text spliced in on accept (incl. the trigger char + trailing space).
 interface AutofillItem { insert: string; primary: string; secondary?: string; hint?: string }
@@ -1136,6 +1147,8 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // Compact-boundary card: whether the full raw /compact analysis is expanded under the condensed digest.
   const [showRawCompact, setShowRawCompact] = useState(false);
   const imgCtx = React.useContext(ImageCtx);
+  const provider = React.useContext(ProviderCtx);
+  const collapseCtx = React.useContext(CollapseCtx);
   const dir = React.useContext(DirCtx);
   const detailSet = React.useContext(DetailIdsCtx);
   // Ancestor of a merge-selected board (its context will be folded into the merge) but not itself
@@ -1153,11 +1166,13 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // This board has a tool awaiting permission approval (canUseTool) → 🔐 badge/ring + a compact approve
   // control in the body, so the user can allow/deny without opening the conversation.
   const needsPerm = hasPendingPermission(data);
+  const isCollapsedGraph = !!data.collapsedGraph;
+  const collapsedCount = (data.collapsedGraph?.hiddenIds.length ?? 0) + 1;
   const targetPos = dir === 'LR' ? Position.Left : Position.Top;
   const sourcePos = dir === 'LR' ? Position.Right : Position.Bottom;
   // A compact node is a boundary CHECKPOINT, not an input board (it takes no prompt of its own — you fork
   // to continue), so it is NOT "fresh": it collapses to a far gist like any normal node when unselected.
-  const isFresh = !data.prompt && data.status === 'idle' && !data.compact;
+  const isFresh = !data.prompt && data.status === 'idle' && !data.compact && !isCollapsedGraph;
   // Per-node LOD (fisheye): this board renders DETAIL when it's the selected board / an ancestor of it,
   // OR it's an idle compose board (always usable so you can type even when nothing is selected).
   // Otherwise it's a compact FAR gist. The graph reflows to these mixed heights (see App.autoLayout).
@@ -1168,7 +1183,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   //  • zoom ≥ COMPRESS_ZOOM     → 'detail' for the selected/ancestor/fresh boards, else 'far'.
   const zoomFarFar = useStore((s) => s.transform[2] < FARFAR_ZOOM);
   const zoomCompressed = useStore((s) => s.transform[2] < COMPRESS_ZOOM);
-  const lod: Lod = zoomFarFar ? 'far-far' : (!zoomCompressed && (detailSet.has(id) || isFresh) ? 'detail' : 'far');
+  const lod: Lod = isCollapsedGraph ? 'far' : (zoomFarFar ? 'far-far' : (!zoomCompressed && (detailSet.has(id) || isFresh) ? 'detail' : 'far'));
   const isDetail = lod === 'detail';
   // A just-triggered compact node, still running /compact (no prompt yet) → show the compacting spinner.
   // Once the user asks a question in it, prompt is set and it renders as a normal streaming turn.
@@ -1180,7 +1195,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
 
   // Board-kind badge: icon + tooltip (icon-only per memory). compact 🗜 / merge ⑃ (inverted fork =
   // confluence) / fork ⑂ (matches the branch UI) / root ◉. CSS already tints merge blue & compact green.
-  const turnBadge = data.compact
+  const turnBadge = isCollapsedGraph
+    ? { icon: 'H', title: `Collapsed history (${collapsedCount} board${collapsedCount === 1 ? '' : 's'})` }
+    : data.compact
     ? { icon: '🗜', title: 'Compacted-context node' }
     : data.merged
     ? { icon: '⑃', title: 'Merge · deduped context from the selected boards' }
@@ -1231,6 +1248,13 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
       onClick={(e) => { e.stopPropagation(); data.onCompact(id); }}
     >🗜</button>
   ) : null;
+  const expandCollapseBtn = isCollapsedGraph ? (
+    <button
+      className="board__collapse-expand nodrag nopan"
+      title="Expand collapsed history"
+      onClick={(e) => { e.stopPropagation(); collapseCtx.expand(id); }}
+    >Expand</button>
+  ) : null;
 
   return (
     <>
@@ -1238,7 +1262,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
     <div
-      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''}`}
+      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''} ${isCollapsedGraph ? 'collapsed-graph' : ''}`}
     >
       <Handle type="target" position={targetPos} />
       {/* Zoom-LOD content wrapper: keyed on `lod` so it remounts (and re-runs the dissolve) on a
@@ -1252,7 +1276,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
       )}
       {/* Digest tags: a strip at the TOP for detail/far. In 'far-far' they render INLINE in the head row
           (below the summary) instead. */}
-      {lod !== 'far-far' && <TagChips tags={data.tags} />}
+      {!isCollapsedGraph && lod !== 'far-far' && <TagChips tags={data.tags} />}
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
         {/* Per-board engine badge — gated to multi-provider (no-op today); reads board.engine, not the toolbar's
@@ -1270,7 +1294,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         {/* Title text by LOD: detail = the full question; far = the fused gist (clamped via CSS); far-far =
             nothing in the head (the branch label is the board BODY below; gist hidden). */}
         <span className="board__title">
-          {isDetail
+          {isCollapsedGraph
+            ? `Collapsed history (${collapsedCount} board${collapsedCount === 1 ? '' : 's'})`
+            : isDetail
             ? (data.prompt ? data.prompt : data.compact ? 'Compacted context' : 'New board')
             : lod === 'far'
               ? farGist
@@ -1290,7 +1316,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         {/* M11: context-usage badge (detail only — omitted at far/far-far where the card is just a gist/label). */}
         {isDetail && <ContextBadge tokens={data.contextTokens} window={data.contextWindow} />}
         {data.autoCompacted && <span className="board__autocompact" title="The engine auto-compacted context this turn">🗜</span>}
-        {compactBtn}
+        {isCollapsedGraph ? expandCollapseBtn : compactBtn}
         {stopBtn}
       </div>
 
@@ -1303,7 +1329,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
 
       {/* Body by LOD: far/far-far have NO body — the board is a thin bar (far = gist in head; far-far = just
           badge+tags, with the summary floating above). detail = the full body below. */}
-      {!isDetail ? null : compacting ? (
+      {!isDetail || isCollapsedGraph ? null : compacting ? (
         <div className="board__summary board__compacting"><span className="board__dot" /> 🗜 Compacting…</div>
       ) : data.compact && !data.prompt ? (
         // Compacted-boundary node: a context checkpoint, NOT an input board. Show the compacted summary
@@ -1364,7 +1390,10 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
             {af.menu}
             <AttachBar boardId={id} />
             <ImageBar boardId={id} />
-            <button className="btn primary" onClick={submit} title="Send (Enter)">↑</button>
+            <div className="compose__bar">
+              <ProviderQuickSwitch activeProvider={provider.activeProvider} onSetActive={provider.setActive} />
+              <button className="btn primary" onClick={submit} title="Send (Enter)">↑</button>
+            </div>
           </div>
         </div>
       ) : data.summary ? (
@@ -1748,6 +1777,7 @@ function ChatView({
           {af.menu}
           <div className="composer__bar">
             <div className="composer__left">
+              <ProviderQuickSwitch activeProvider={activeProvider} onSetActive={onSetActive} />
               {config && <SettingsControls config={config} onChange={onConfigChange} resolvedModel={resolvedModel} up onOpenMcp={onOpenMcp} showPerm activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActive} />}
               <AttachBar boardId={leafId} />
               <ImageBar boardId={leafId} />
@@ -2194,6 +2224,35 @@ function formatReset(iso?: string | null): string {
   return 'resets ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+// Direct provider selector for composers. This is intentionally about NEW turns only: historical boards keep
+// their stamped `BoardData.engine`, while sends/forks/merges read the current active provider at creation.
+function ProviderQuickSwitch({ activeProvider, onSetActive }: {
+  activeProvider: EngineId;
+  onSetActive: (id: EngineId) => void;
+}) {
+  if (PROVIDER_CATALOG.filter((p) => p.implemented).length < 2) return null;
+  return (
+    <div className="provider-switch nodrag nopan" role="group" aria-label="Provider for new turns" onMouseDown={(e) => e.stopPropagation()}>
+      {PROVIDER_CATALOG.map((p) => {
+        const on = activeProvider === p.id;
+        return (
+          <button
+            key={p.id}
+            type="button"
+            className={`provider-switch__btn ${on ? 'on' : ''}`}
+            disabled={!p.implemented}
+            title={p.implemented ? (on ? `${p.name} is active for new turns` : `Use ${p.name} for new turns`) : `${p.name} — coming soon`}
+            onClick={(e) => { e.stopPropagation(); if (p.implemented && !on) onSetActive(p.id); }}
+          >
+            <span className="provider-switch__dot" style={{ background: p.accent }} />
+            <span className="provider-switch__name">{p.name}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // Shared active-provider selector. Only implemented (registered) providers are selectable; unbuilt ones
 // render disabled (their engine doesn't exist yet). Switching posts `setActiveProvider`.
 function ProviderSpine({ activeProvider, onSetActive, onAccount }: {
@@ -2228,11 +2287,14 @@ function ProviderSpine({ activeProvider, onSetActive, onAccount }: {
   );
 }
 
-const API_KEY_PROVIDERS = new Set<EngineId>(['claude', 'codex']); // providers offering an API-key auth method (vs OAuth-only)
+const API_KEY_PROVIDERS = new Set<EngineId>(['claude', 'codex', 'deepseek']); // providers offering an API-key auth method (vs OAuth-only)
+const API_ONLY_PROVIDERS = new Set<EngineId>(['deepseek']);
 type ApiKeyStatus = { stored: boolean; hint?: string; envDetected: boolean; envHint?: string };
 
 function apiKeyMeta(id: EngineId) {
-  return id === 'codex'
+  return id === 'deepseek'
+    ? { env: 'DEEPSEEK_API_KEY', mask: 'sk-...', placeholder: 'sk-... paste your DeepSeek API key', account: 'DeepSeek API account', tier: 'pay-as-you-go | DeepSeek API', note: 'Billing runs through your DeepSeek API balance.' }
+    : id === 'codex'
     ? { env: 'OPENAI_API_KEY', mask: 'sk-...', placeholder: 'sk-... paste your OpenAI API key', account: 'OpenAI API account', tier: 'pay-as-you-go | OpenAI API', note: 'Billing runs through your OpenAI API account, not your ChatGPT subscription.' }
     : { env: 'ANTHROPIC_API_KEY', mask: 'sk-ant-...', placeholder: 'sk-ant-... paste your Anthropic API key', account: 'Anthropic API account', tier: 'pay-as-you-go | first-party | thinking text visible', note: 'Billing runs through your Anthropic API account, not your subscription.' };
 }
@@ -2293,7 +2355,8 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive, showAp
   const acct = snap?.account ?? null;
   const usage = snap?.usage ?? null;
   const busy = !!snap?.busy;
-  const apiMode = !!showApiKey && authMethod === 'apiKey';
+  const apiOnly = API_ONLY_PROVIDERS.has(p.id);
+  const apiMode = !!showApiKey && (authMethod === 'apiKey' || apiOnly);
   const signedIn = !!acct?.signedIn;
   const connected = apiMode ? !!keyStatus?.stored : signedIn; // "connected" = usable via the chosen method
   const isActive = active && connected;
@@ -2313,10 +2376,15 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive, showAp
           : apiMode && connected ? <span className="badge badge--meter">API key</span>
           : connected || loading ? null : <span className="badge badge--setup">not set up</span>}
       </div>
-      {showApiKey && onSetAuthMethod && (
+      {showApiKey && onSetAuthMethod && !apiOnly && (
         <div className="pcard__authseg">
           <button className={authMethod !== 'apiKey' ? 'on' : ''} onClick={() => onSetAuthMethod('subscription')}><span className="ico">👤</span>Subscription</button>
           <button className={authMethod === 'apiKey' ? 'on' : ''} onClick={() => onSetAuthMethod('apiKey')}><span className="ico">🔑</span>API key</button>
+        </div>
+      )}
+      {showApiKey && apiOnly && (
+        <div className="pcard__authseg pcard__authseg--single">
+          <button className="on" disabled><span className="ico">API</span>API key</button>
         </div>
       )}
       <div className="pcard__body">
@@ -3017,7 +3085,7 @@ function App() {
   // committed into `selectedIds` only when no box-select drag is in progress (`selecting` false) — the
   // effect skips committing while selecting. Single clicks (no drag) don't set `selecting`, so they
   // commit immediately. React Flow still draws its own selection highlight during the drag.
-  const liveSelectedIds = useMemo(() => nodes.filter((n) => n.selected).map((n) => n.id), [nodes]);
+  const liveSelectedIds = useMemo(() => nodes.filter((n) => n.selected && !n.hidden).map((n) => n.id), [nodes]);
   const [selecting, setSelecting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   useEffect(() => {
@@ -3055,6 +3123,11 @@ function App() {
   // (an opt-in toggle, default OFF) — their FULL ancestor lineage. Every other board stays a compact
   // FAR gist and the layout reflows to the mixed heights. Plain (non-boundary) ancestor walk — show the
   // whole visual lineage, not merge's cutoff. (isFresh idle boards also render detail; see BoardNode.)
+  const collapsePlans = useMemo(() => planCollapseSelection(nodes, edges, selectedIds), [nodes, edges, selectedIds]);
+  const collapseBoardCount = useMemo(
+    () => collapsePlans.reduce((sum, p) => sum + p.hiddenIds.length + 1, 0),
+    [collapsePlans],
+  );
   const expandAncestors = config?.expandAncestorsOnSelect === true; // default OFF (also before config loads)
   const detailIds = useMemo(() => {
     const s = new Set<string>(selectedIds);
@@ -3072,8 +3145,8 @@ function App() {
     const s = new Set<string>();
     if (zoomCompressed) return s; // every board is a far gist → none is detail-wide
     for (const n of nodes) {
-      const fresh = !n.data.prompt && n.data.status === 'idle' && !n.data.compact;
-      if (detailIds.has(n.id) || fresh) s.add(n.id);
+      const fresh = !n.data.prompt && n.data.status === 'idle' && !n.data.compact && !n.data.collapsedGraph;
+      if (!n.data.collapsedGraph && (detailIds.has(n.id) || fresh)) s.add(n.id);
     }
     return s;
   }, [nodes, detailIds, zoomCompressed]);
@@ -3204,6 +3277,31 @@ function App() {
     revealReqRef.current = { id: mid, focus: false, composer: true };
   }, [selectedIds, byId, onSend, onFork, onStop, onCompact]);
 
+  const doCollapseHistory = useCallback(() => {
+    const curNodes = nodesRef.current;
+    const curEdges = edgesRef.current;
+    const collapsed = collapseSelection(curNodes, curEdges, selectedIds);
+    if (!collapsed.changed) return;
+    const newEdges = syncHiddenEdges(collapsed.nodes, curEdges);
+    const laid = autoLayout(collapsed.nodes, newEdges);
+    nodesRef.current = laid;
+    edgesRef.current = newEdges;
+    setEdges(newEdges);
+    setNodes(laid);
+  }, [selectedIds, autoLayout]);
+
+  const expandCollapsed = useCallback((id: string) => {
+    const expanded = expandCollapsedGraph(nodesRef.current, id);
+    if (!expanded.changed) return;
+    const newEdges = syncHiddenEdges(expanded.nodes, edgesRef.current);
+    const laid = autoLayout(expanded.nodes, newEdges);
+    nodesRef.current = laid;
+    edgesRef.current = newEdges;
+    setEdges(newEdges);
+    setNodes(laid);
+  }, [autoLayout]);
+
+  const collapseState = useMemo(() => ({ expand: expandCollapsed }), [expandCollapsed]);
 
   // Start a brand-new conversation: drop a fresh parent-less root board onto the canvas.
   // No edges → dagre lays it out as its own tree; sending it (no parentSessionId) opens a new session.
@@ -3585,12 +3683,12 @@ function App() {
       // so the card doesn't show a "needs answer" prompt that can never be satisfied. (M4)
       data.steps = settleRestoredSteps(data.steps);
       if (data.turns) data.turns = data.turns.map((t) => ({ ...t, steps: settleRestoredSteps(t.steps) }));
-      return { id: sn.id, type: 'board' as const, position: sn.position, data };
+      return { id: sn.id, type: 'board' as const, position: sn.position, data, hidden: sn.hidden };
     });
     idRef.current = g.idCounter;
     seqRef.current = g.seqCounter;
     setNodes(nodes);
-    setEdges(g.edges.map((se) => makeEdge(se.source, se.target, se.kind)));
+    setEdges(syncHiddenEdges(nodes, g.edges.map((se) => makeEdge(se.source, se.target, se.kind))));
   }, [onSend, onFork, onStop, onCompact]);
 
   // mount: ask the host for the persisted graph + current settings (handled in the listener below)
@@ -3641,7 +3739,17 @@ function App() {
     setAccounts((prev) => ({ ...prev, [id]: { account: prev[id]?.account ?? null, usage: prev[id]?.usage ?? null, busy: true } }));
     post({ type: 'accountSignOut', provider: id });
   }, []);
-  const onSetActiveProvider = useCallback((id: EngineId) => post({ type: 'setActiveProvider', provider: id }), []);
+  const onSetActiveProvider = useCallback((id: EngineId) => {
+    if (activeProviderRef.current !== id) {
+      // Optimistic local switch so click-provider-then-send in the same breath stamps/routes the new engine.
+      // The host remains canonical and will echo the provider's flat config via `config`.
+      setResolvedModel(null);
+      setSlashCommands([]);
+      setActiveProviderState(id);
+      activeProviderRef.current = id;
+    }
+    post({ type: 'setActiveProvider', provider: id });
+  }, []);
   // Claude API-key auth method: switching mode writes the provider config (authMethod); the key value is
   // sent only on save (host → SecretStorage), never echoed back. (authMethod / billing invariant)
   const setAuthMethod = useCallback((m: 'subscription' | 'apiKey') => setConfigField({ authMethod: m }), [setConfigField]);
@@ -4041,6 +4149,9 @@ function App() {
     const gone = new Set(goneArr);
     const before = nodesRef.current;
     const beforeEdges = edgesRef.current;
+    for (const n of before) {
+      if (gone.has(n.id)) for (const id of n.data.collapsedGraph?.hiddenIds ?? []) gone.add(id);
+    }
     // Abort any in-flight stream on ANY removed board (incl. cascaded ones, not just the selection).
     for (const n of before) if (gone.has(n.id) && n.data.status === 'streaming') post({ type: 'abort', boardId: n.id });
     // Snapshot for undo BEFORE removing (from authoritative refs → keep latest streamed text).
@@ -4335,14 +4446,20 @@ function App() {
     () => ({ commands: slashCommands, searchFiles, fileResults }),
     [slashCommands, searchFiles, fileResults],
   );
+  const providerSwitchState = useMemo<ProviderSwitchState>(
+    () => ({ activeProvider, setActive: onSetActiveProvider }),
+    [activeProvider, onSetActiveProvider],
+  );
 
   return (
+    <ProviderCtx.Provider value={providerSwitchState}>
     <DirCtx.Provider value={dir}>
     <DetailIdsCtx.Provider value={detailIds}>
     <MergeCtxHL.Provider value={mergeCtxIds}>
     <SignpostCtx.Provider value={signpostLabels}>
     <RevealCtx.Provider value={revealedId}>
     <FuseTargetCtx.Provider value={fuseTarget}>
+    <CollapseCtx.Provider value={collapseState}>
     <AttachCtx.Provider value={attachState}>
     <ImageCtx.Provider value={imageState}>
     <DraftCtx.Provider value={draftState}>
@@ -4561,8 +4678,29 @@ function App() {
         />
       )}
 
+      {selectedIds.length === 1 && (
+        <div className="mergebar">
+          <span className="mergebar__count">
+            1 board selected
+            {collapsePlans.length > 0 && ` - collapse ${collapseBoardCount} prior board${collapseBoardCount === 1 ? '' : 's'}`}
+          </span>
+          <button
+            className="btn collapse"
+            onClick={doCollapseHistory}
+            disabled={collapsePlans.length === 0}
+            title={collapsePlans.length === 0 ? 'No previous visible boards to collapse' : 'Collapse selected history into a hidden subgraph'}
+          >Collapse history</button>
+        </div>
+      )}
+
       {selectedIds.length >= 2 && (
         <div className="mergebar">
+          <button
+            className="btn collapse"
+            onClick={doCollapseHistory}
+            disabled={collapsePlans.length === 0}
+            title={collapsePlans.length === 0 ? 'No previous visible boards to collapse' : `Collapse ${collapseBoardCount} prior board${collapseBoardCount === 1 ? '' : 's'} into hidden history`}
+          >Collapse history</button>
           {mLeaves.length >= 2 ? (
             selectionBusy ? (
               <span className="mergebar__count mergebar__warn">
@@ -4656,12 +4794,14 @@ function App() {
     </DraftCtx.Provider>
     </ImageCtx.Provider>
     </AttachCtx.Provider>
+    </CollapseCtx.Provider>
     </FuseTargetCtx.Provider>
     </RevealCtx.Provider>
     </SignpostCtx.Provider>
     </MergeCtxHL.Provider>
     </DetailIdsCtx.Provider>
     </DirCtx.Provider>
+    </ProviderCtx.Provider>
   );
 }
 

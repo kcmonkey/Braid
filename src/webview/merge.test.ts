@@ -4,6 +4,7 @@ import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
+  planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
@@ -456,6 +457,57 @@ describe('mergeLeaves', () => {
 
   it('keeps unrelated branches but drops the ancestor among them', () => {
     expect(mergeLeaves(['2', '3', '5'], edges)).toEqual(['3', '5']); // 2 subsumed by 3
+  });
+});
+
+describe('visual graph collapse', () => {
+  it('collapses a linear selected history into the selected board parent', () => {
+    const nodes = [node('a', 0), node('b', 1), node('c', 2)];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c')];
+    expect(planCollapseSelection(nodes, edges, ['c'])).toEqual([{ targetId: 'b', hiddenIds: ['a'] }]);
+
+    const out = collapseSelection(nodes, edges, ['c']);
+    expect(out.changed).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'b')!.data.collapsedGraph).toEqual({ hiddenIds: ['a'] });
+  });
+
+  it('uses the first shared ancestor for selected sibling leaves', () => {
+    const nodes = [node('root', 0), node('shared', 1), node('left', 2), node('right', 3)];
+    const edges = [forkEdge('root', 'shared'), forkEdge('shared', 'left'), forkEdge('shared', 'right')];
+    expect(planCollapseSelection(nodes, edges, ['left', 'right'])).toEqual([{ targetId: 'shared', hiddenIds: ['root'] }]);
+  });
+
+  it('moves the collapse target up to keep an unselected sibling branch connected', () => {
+    const nodes = [node('root', 0), node('shared', 1), node('spine', 2), node('leaf', 3), node('sibling', 4)];
+    const edges = [
+      forkEdge('root', 'shared'),
+      forkEdge('shared', 'spine'),
+      forkEdge('spine', 'leaf'),
+      forkEdge('shared', 'sibling'),
+    ];
+    expect(planCollapseSelection(nodes, edges, ['leaf'])).toEqual([{ targetId: 'shared', hiddenIds: ['root'] }]);
+  });
+
+  it('expands a collapsed representative and re-shows hidden nodes', () => {
+    const nodes = [
+      { ...node('a', 0), hidden: true },
+      node('b', 1, { collapsedGraph: { hiddenIds: ['a'] } }),
+      node('c', 2),
+    ];
+    const out = expandCollapsedGraph(nodes, 'b');
+    expect(out.changed).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'a')!.hidden).toBe(false);
+    expect(out.nodes.find((n) => n.id === 'b')!.data.collapsedGraph).toBeUndefined();
+  });
+
+  it('syncs edge visibility from hidden node endpoints and persists hidden nodes', () => {
+    const nodes = [{ ...node('a', 0), hidden: true }, node('b', 1)];
+    const edges = [forkEdge('a', 'b')];
+    expect(syncHiddenEdges(nodes, edges)[0].hidden).toBe(true);
+    const g = serializeGraph(nodes, edges, 2, 2);
+    expect(g.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
+    expect(g.nodes.find((n) => n.id === 'b')!.hidden).toBeUndefined();
   });
 });
 

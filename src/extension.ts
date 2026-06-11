@@ -221,7 +221,7 @@ function resolveClaudeBinary(): string | undefined {
 // webview — only presence + a last-4 hint do. (authMethod / billing invariant)
 const apiKeyCache: Partial<Record<EngineId, string>> = {};
 const secretKey = (id: EngineId) => `braid.apiKey.${id}`;
-const apiKeyEnvName = (id: EngineId) => id === 'codex' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+const apiKeyEnvName = (id: EngineId) => id === 'codex' ? 'OPENAI_API_KEY' : id === 'deepseek' ? 'DEEPSEEK_API_KEY' : 'ANTHROPIC_API_KEY';
 const apiKeyEnvValue = (id: EngineId): string | undefined => process.env[apiKeyEnvName(id)]?.trim() || undefined;
 /** Last-4 hint for a masked key display (never the full key). '' for too-short/empty. */
 const keyHint = (key: string | undefined): string | undefined => (key && key.length >= 4 ? key.slice(-4) : undefined);
@@ -1014,10 +1014,11 @@ function readLegacyFlatProviderConfig(c: vscode.WorkspaceConfiguration): LegacyF
 function readProviderConfig(c: vscode.WorkspaceConfiguration, id: string): ProviderConfig {
   const providers = c.get<Record<string, Partial<ProviderConfig>>>('providers', {});
   const stored = providers?.[id];
-  if (stored && Object.keys(stored).length) return { ...DEFAULT_PROVIDER_CONFIG, ...stored };
+  const defaults = id === 'deepseek' ? { ...DEFAULT_PROVIDER_CONFIG, authMethod: 'apiKey' as const } : DEFAULT_PROVIDER_CONFIG;
+  if (stored && Object.keys(stored).length) return { ...defaults, ...stored };
   // No stored slice → migrate from legacy flat keys (claude only; other providers default).
   if (id === 'claude') return migrateLegacyConfig(readLegacyFlatProviderConfig(c));
-  return { ...DEFAULT_PROVIDER_CONFIG };
+  return { ...defaults };
 }
 
 /** Read the live `braid.*` settings into the nested SSOT (re-read per query → no reload needed). */
@@ -1033,7 +1034,15 @@ function readSettings(canvasId?: string): BraidSettings {
     warmSessionEnabled: c.get<boolean>('warmSessionEnabled', DEFAULT_CANVAS_CONFIG.warmSessionEnabled),
     warmSessionIdleCapMin: c.get<number>('warmSessionIdleCapMin', DEFAULT_CANVAS_CONFIG.warmSessionIdleCapMin),
   };
-  return { activeProvider, providers: { claude: readProviderConfig(c, 'claude'), codex: readProviderConfig(c, 'codex') }, canvas };
+  return {
+    activeProvider,
+    providers: {
+      claude: readProviderConfig(c, 'claude'),
+      codex: readProviderConfig(c, 'codex'),
+      deepseek: readProviderConfig(c, 'deepseek'),
+    },
+    canvas,
+  };
 }
 
 /** Flat webview-facing view = the active provider's slice ∪ the canvas config (field set unchanged). */
@@ -1508,13 +1517,13 @@ async function runProvision(manifest: NonNullable<ReturnType<typeof loadManifest
  * engine's query stream is open) — matching the pre-refactor mid-loop liveQueries.set. (plans/Engine-Abstraction)
  */
 async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId: string) {
-  if (!(await ensureSdkReady())) {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  const runProvider = msg.engine && engineHost.has(msg.engine) ? msg.engine : DEFAULT_ACTIVE_PROVIDER;
+  if (runProvider === 'claude' && !(await ensureSdkReady())) {
     makeSink(canvasId).error(msg.boardId, msg.turnIndex ?? 0,
       'Claude SDK is not set up yet. Run “Braid: Check Environment” to download it, then resend.');
     return;
   }
-  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-  const runProvider = msg.engine && engineHost.has(msg.engine) ? msg.engine : DEFAULT_ACTIVE_PROVIDER;
   // Warm reuse is gated on the engine supporting it (route-aware push + hold-open). Engines without it (Codex)
   // never keep a warm session AND ignore the per-continuation route, so reusing one would misroute a spine
   // continuation's output to the parent board. (warmReuse capability — see ClaudeAdapter/CodexAdapter)

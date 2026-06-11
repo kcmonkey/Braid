@@ -14,7 +14,7 @@ export interface ImageInput {
 /** Service-provider id. SSOT lives here (shared by both bundles + the engine layer). The registry only
  * implements a subset (currently just 'claude'); `PROVIDER_CATALOG[i].implemented` marks which. The union
  * grows as engines are added; an unimplemented id is type+catalog only (UI placeholder, no engine). */
-export type EngineId = 'claude' | 'codex';
+export type EngineId = 'claude' | 'codex' | 'deepseek';
 
 /** One selectable model for a provider's model dropdown. `contextWindow` (when known) = that model's token
  * window, used as the TARGET-engine budget when a cross-engine seed must fit a model the boards never ran on
@@ -70,6 +70,18 @@ export const PROVIDER_CATALOG: ProviderDescriptor[] = [
       { value: '', label: 'Default model', contextWindow: 258_400 },
       { value: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 258_400 },
       { value: 'gpt-5.4', label: 'GPT-5.4', contextWindow: 258_400 },
+    ],
+  },
+  {
+    id: 'deepseek', name: 'DeepSeek', vendor: 'DeepSeek', accent: '#4f8cff', implemented: true,
+    // Official API docs (2026-06): v4-pro / v4-flash are the stable model ids, both with 1M context.
+    // deepseek-chat / deepseek-reasoner remain compatibility aliases until 2026-07-24 15:59 UTC.
+    models: [
+      { value: '', label: 'Default model', contextWindow: 1_000_000 },
+      { value: 'deepseek-v4-pro', label: 'V4 Pro', contextWindow: 1_000_000 },
+      { value: 'deepseek-v4-flash', label: 'V4 Flash', contextWindow: 1_000_000 },
+      { value: 'deepseek-chat', label: 'Chat (legacy alias)', contextWindow: 1_000_000 },
+      { value: 'deepseek-reasoner', label: 'Reasoner (legacy alias)', contextWindow: 1_000_000 },
     ],
   },
 ];

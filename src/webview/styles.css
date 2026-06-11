@@ -191,6 +191,14 @@ body {
 /* Post-done summary generation hint: pulsing dot + "Summarizing…", sits above the truncated answer
    until the structured summary arrives and replaces the whole body. */
 .board__summarizing { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; color: var(--accent); font-size: 12px; letter-spacing: .02em; }
+.board.collapsed-graph { width: 300px; border-style: dashed; border-color: #8a86f5; }
+.board.collapsed-graph .board__head { background: linear-gradient(180deg,#2c2b3d,var(--panel)); border-bottom: none; }
+.board.collapsed-graph .board__turn { color: #8a86f5; background: #25243a; }
+.board__collapse-expand {
+  font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+  color: #b7b4ff; background: #25243a; border: 1px solid #5b58a6; border-radius: 5px; padding: 3px 7px;
+}
+.board__collapse-expand:hover { background: #302f4a; color: var(--text); }
 
 .board__head {
   display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; cursor: pointer;
@@ -412,6 +420,8 @@ body {
 }
 .compose__input:focus { outline: none; border-color: var(--accent); }
 .compose__hint { font-size: 11px; color: var(--accent); line-height: 1.4; }
+.compose__bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.compose__bar .btn.primary { flex: none; }
 
 /* M7 gap3: editor-context attach button + removable chip (used in card compose & ChatView composer). */
 .attach { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; min-width: 0; max-width: 100%; }
@@ -463,6 +473,10 @@ body {
 .btn:hover { background: var(--panel); }
 .btn.primary { background: var(--accent-2); border-color: var(--accent-2); color: #fff; align-self: flex-end; }
 .btn.primary:hover { background: var(--accent); border-color: var(--accent); }
+.btn:disabled { opacity: .45; cursor: default; }
+.btn:disabled:hover { background: var(--bg-deep); }
+.btn.collapse { color: #b7b4ff; border-color: #5b58a6; background: #25243a; }
+.btn.collapse:hover:not(:disabled) { background: #302f4a; color: var(--text); }
 /* Graphical "+" pinned on a board's output handle to spawn a child conversation. Sibling of
    .board (outside its overflow:hidden), positioned against the React Flow node wrapper. */
 .board__add {
@@ -1181,6 +1195,23 @@ body {
 .settings__ta { resize: vertical; width: 100%; box-sizing: border-box; font-family: "Cascadia Code", Consolas, monospace; }
 .settings__warn { font-size: 11px; line-height: 1.45; color: var(--fork); }
 .settings__cur { color: var(--text); font-weight: 700; margin-left: 4px; }
+
+/* Direct provider selector in board + ChatView composers. This switches the canvas-local provider for NEW
+   turns; already-run boards keep their stamped engine badge/history. */
+.provider-switch {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 3px; min-width: 0; max-width: 100%;
+  padding: 2px; background: var(--bg-deep); border: 1px solid var(--border-sub); border-radius: 8px;
+}
+.provider-switch__btn {
+  font: inherit; font-size: 11.5px; font-weight: 700; line-height: 1; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px; max-width: 96px;
+  color: var(--muted); background: transparent; border: none; border-radius: 6px; padding: 5px 7px;
+}
+.provider-switch__btn:hover:not(:disabled) { color: var(--text); background: var(--panel-2); }
+.provider-switch__btn.on { color: var(--text); background: var(--panel); box-shadow: 0 0 0 1px var(--border); }
+.provider-switch__btn:disabled { cursor: not-allowed; opacity: .5; }
+.provider-switch__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.provider-switch__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Provider-scoped sectioned settings dropdown (provider spine + Generation/Permissions/Canvas sections) */
 .settings__panel--sectioned { width: 352px; gap: 10px; }

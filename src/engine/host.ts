@@ -5,6 +5,7 @@ import { DEFAULT_PROVIDER_CONFIG } from '../sdkOptions';
 import type { Engine, EngineId } from './types';
 import { ClaudeAdapter, loadClaudeSdk } from './claude/adapter';
 import { CodexAdapter } from './codex/adapter';
+import { DeepSeekAdapter } from './deepseek/adapter';
 
 /** Host-internal nested config SSOT. The webview only ever sees the flat `BraidConfig` view (the active
  * provider's slice ∪ canvas); the host translates between the two. `providers` is partial — a provider
@@ -45,6 +46,10 @@ export class EngineHost {
       resolveBinary: () => deps.resolveCodexBinary?.(),
       readProviderConfig: () => deps.readSettings().providers.codex ?? DEFAULT_PROVIDER_CONFIG,
       getApiKey: () => deps.getApiKey?.('codex'),
+    }));
+    this.engines.set('deepseek', new DeepSeekAdapter({
+      readProviderConfig: () => deps.readSettings().providers.deepseek ?? { ...DEFAULT_PROVIDER_CONFIG, authMethod: 'apiKey' },
+      getApiKey: () => deps.getApiKey?.('deepseek'),
     }));
   }
 

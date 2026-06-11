@@ -260,6 +260,10 @@ export interface Turn {
   done?: boolean;
 }
 
+export interface CollapsedGraph {
+  hiddenIds: string[];
+}
+
 export interface BoardData {
   prompt: string;
   answer: string;
@@ -323,6 +327,10 @@ export interface BoardData {
   // summary in its place. (knowledge.md "native /compact")
   compact?: boolean;
   compactSummary?: string;
+  // Visual-only graph collapse: this visible board is the representative for a hidden ancestor subgraph.
+  // The hidden boards stay in the React Flow graph (node.hidden=true) so merge/fork/focus ancestry remains
+  // exact; expanding this board simply unhides hiddenIds and clears this marker. Not engine compaction.
+  collapsedGraph?: CollapsedGraph;
   // M-MultiEngine (AD1): the engine that ran this board, stamped = the active provider at creation, IMMUTABLE.
   // A board's `sessionId` belongs to THIS engine, so it is the SSOT for "which engine owns this session" — the
   // turn router (host) and the engine-aware fork base read it via boardEngine(). Absent ⇒ 'claude' (legacy /
@@ -488,6 +496,145 @@ export function mergeLeaves(ids: string[], edges: Edge[]): string[] {
     return s;
   };
   return ids.filter((id) => !ids.some((other) => other !== id && anc(other).has(id)));
+}
+
+export interface CollapsePlan {
+  targetId: string;
+  hiddenIds: string[];
+}
+
+function visibleAncestorIds(id: string, edges: Edge[], byId: Map<string, BoardNodeT>): string[] {
+  return [...ancestorsOf(id, edges)].filter((a) => {
+    const n = byId.get(a);
+    return !!n && !n.hidden;
+  });
+}
+
+function deepest(ids: string[], byId: Map<string, BoardNodeT>): string | null {
+  if (!ids.length) return null;
+  return ids.reduce((best, id) => {
+    const b = byId.get(best)?.data.seq ?? 0;
+    const s = byId.get(id)?.data.seq ?? 0;
+    if (s !== b) return s > b ? id : best;
+    return id < best ? id : best;
+  });
+}
+
+function deepestCommonAncestor(ids: string[], edges: Edge[], byId: Map<string, BoardNodeT>): string | null {
+  if (ids.length < 2) return null;
+  const sets = ids.map((id) => new Set(visibleAncestorIds(id, edges, byId)));
+  if (!sets.length) return null;
+  const common = [...sets[0]].filter((id) => sets.every((s) => s.has(id)));
+  return deepest(common, byId);
+}
+
+function settledCollapseTarget(targetId: string, edges: Edge[], byId: Map<string, BoardNodeT>): string {
+  let target = targetId;
+  const guard = new Set<string>();
+  while (!guard.has(target)) {
+    guard.add(target);
+    const hidden = new Set(visibleAncestorIds(target, edges, byId));
+    const offenders = edges
+      .filter((e) => {
+        if (!hidden.has(e.source)) return false;
+        if (hidden.has(e.target) || e.target === target) return false;
+        const child = byId.get(e.target);
+        return !!child && !child.hidden;
+      })
+      .map((e) => e.source);
+    const next = deepest([...new Set(offenders)], byId);
+    if (!next) break;
+    target = next;
+  }
+  return target;
+}
+
+export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): CollapsePlan[] {
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const selected = selectedIds.filter((id) => {
+    const n = byId.get(id);
+    return !!n && !n.hidden;
+  });
+  const leaves = mergeLeaves(selected, edges);
+  if (!leaves.length) return [];
+
+  const initialTargets: string[] = [];
+  const common = deepestCommonAncestor(leaves, edges, byId);
+  if (common) {
+    initialTargets.push(common);
+  } else {
+    for (const leaf of leaves) {
+      const parent = deepest(visibleAncestorIds(leaf, edges, byId), byId);
+      if (parent) initialTargets.push(parent);
+    }
+  }
+
+  const plans = new Map<string, Set<string>>();
+  for (const initial of initialTargets) {
+    const targetId = settledCollapseTarget(initial, edges, byId);
+    const target = byId.get(targetId);
+    if (!target || target.hidden) continue;
+    const hiddenIds = visibleAncestorIds(targetId, edges, byId);
+    const set = plans.get(targetId) ?? new Set<string>();
+    for (const id of hiddenIds) set.add(id);
+    plans.set(targetId, set);
+  }
+
+  return [...plans.entries()]
+    .map(([targetId, ids]) => ({ targetId, hiddenIds: [...ids].sort((a, b) => (byId.get(a)?.data.seq ?? 0) - (byId.get(b)?.data.seq ?? 0)) }))
+    .filter((p) => {
+      const existing = byId.get(p.targetId)?.data.collapsedGraph?.hiddenIds ?? [];
+      return p.hiddenIds.some((id) => !existing.includes(id)) || !byId.get(p.targetId)?.data.collapsedGraph;
+    });
+}
+
+export function collapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): { nodes: BoardNodeT[]; plans: CollapsePlan[]; changed: boolean } {
+  const plans = planCollapseSelection(nodes, edges, selectedIds);
+  if (!plans.length) return { nodes, plans, changed: false };
+  const hide = new Set(plans.flatMap((p) => p.hiddenIds));
+  const byTarget = new Map(plans.map((p) => [p.targetId, p.hiddenIds] as const));
+  const out = nodes.map((n) => {
+    if (hide.has(n.id)) return { ...n, hidden: true, selected: false };
+    const add = byTarget.get(n.id);
+    if (!add) return n;
+    const old = n.data.collapsedGraph?.hiddenIds ?? [];
+    const hiddenIds = [...new Set([...old, ...add])].sort((a, b) => {
+      const as = nodes.find((x) => x.id === a)?.data.seq ?? 0;
+      const bs = nodes.find((x) => x.id === b)?.data.seq ?? 0;
+      return as - bs;
+    });
+    return { ...n, selected: false, data: { ...n.data, collapsedGraph: { hiddenIds } } };
+  });
+  return { nodes: out, plans, changed: true };
+}
+
+export function expandCollapsedGraph(nodes: BoardNodeT[], targetId: string): { nodes: BoardNodeT[]; changed: boolean } {
+  const target = nodes.find((n) => n.id === targetId);
+  const hiddenIds = target?.data.collapsedGraph?.hiddenIds ?? [];
+  if (!target?.data.collapsedGraph) return { nodes, changed: false };
+  const reveal = new Set(hiddenIds);
+  return {
+    changed: true,
+    nodes: nodes.map((n) => {
+      if (n.id === targetId) {
+        const { collapsedGraph, ...data } = n.data;
+        return { ...n, data };
+      }
+      return reveal.has(n.id) ? { ...n, hidden: false } : n;
+    }),
+  };
+}
+
+export function syncHiddenEdges(nodes: BoardNodeT[], edges: Edge[]): Edge[] {
+  const hidden = new Set(nodes.filter((n) => n.hidden).map((n) => n.id));
+  let changed = false;
+  const out = edges.map((e) => {
+    const shouldHide = hidden.has(e.source) || hidden.has(e.target);
+    if (!!e.hidden === shouldHide) return e;
+    changed = true;
+    return { ...e, hidden: shouldHide };
+  });
+  return changed ? out : edges;
 }
 
 /**
@@ -753,11 +900,12 @@ export function dropQueuedTurns(turns: Turn[]): Turn[] {
 // unmeasured / zero-area boards are never force-added. `box` and node positions are both in FLOW
 // coordinates. Overlap math mirrors @xyflow/system's getOverlappingArea (ceil). Pure → unit-tested.
 export function boxSelectedIds(
-  nodes: { id: string; position: { x: number; y: number }; measured?: { width?: number; height?: number } }[],
+  nodes: { id: string; position: { x: number; y: number }; measured?: { width?: number; height?: number }; hidden?: boolean }[],
   box: { x: number; y: number; width: number; height: number },
 ): string[] {
   const ids: string[] = [];
   for (const n of nodes) {
+    if (n.hidden) continue;
     const w = n.measured?.width, h = n.measured?.height;
     if (!w || !h) continue; // unmeasured / zero-area = exactly React Flow's force-include bug — never select
     const xOverlap = Math.max(0, Math.min(box.x + box.width, n.position.x + w) - Math.max(box.x, n.position.x));
@@ -1175,7 +1323,7 @@ export function mergeFit(
 // ---- Persistence (M3) ----
 export const GRAPH_VERSION = 1;
 export type SBoardData = Omit<BoardData, 'onSend' | 'onFork' | 'onStop' | 'onCompact'>;
-export interface SNode { id: string; position: { x: number; y: number }; data: SBoardData; }
+export interface SNode { id: string; position: { x: number; y: number }; data: SBoardData; hidden?: boolean; }
 export type EdgeKind = 'fork' | 'merge' | 'compact';
 export interface SEdge { id: string; source: string; target: string; kind: EdgeKind; }
 export interface SerializedGraph { version: number; nodes: SNode[]; edges: SEdge[]; idCounter: number; seqCounter: number; }
@@ -1222,7 +1370,7 @@ export function serializeGraph(nodes: BoardNodeT[], edges: Edge[], idCounter: nu
       // Async continuation (AD6): a board held open for async work can't still be waiting in a fresh session →
       // persist it as 'done' + a marker that its background/scheduled work was abandoned at reload.
       if (data.status === 'waiting') { data.status = 'done'; data.asyncAbandoned = true; }
-      return { id: n.id, position: n.position, data };
+      return { id: n.id, position: n.position, data, hidden: n.hidden || undefined };
     }),
     edges: edges.map((e) => ({
       id: e.id, source: e.source, target: e.target,

@@ -95,6 +95,8 @@ function layoutComponent(comp: BoardNodeT[], edges: Edge[], dir: LayoutDir): Map
  */
 export function layoutGraph(nodes: BoardNodeT[], edges: Edge[], dir: LayoutDir = 'TB'): BoardNodeT[] {
   if (!nodes.length) return nodes;
+  const visible = nodes.filter((n) => !n.hidden);
+  if (!visible.length) return nodes;
 
   // cross-axis = the axis perpendicular to flow. TB flows down → separate trees side by side (x).
   // LR flows right → separate trees stacked (y). Components advance along the cross-axis.
@@ -102,7 +104,7 @@ export function layoutGraph(nodes: BoardNodeT[], edges: Edge[], dir: LayoutDir =
   const placed = new Map<string, { x: number; y: number }>();
   let cursor = 0;
 
-  for (const comp of components(nodes, edges)) {
+  for (const comp of components(visible, edges.filter((e) => !e.hidden))) {
     const local = layoutComponent(comp, edges, dir);
     let crossExtent = 0;
     for (const n of comp) {
@@ -115,6 +117,7 @@ export function layoutGraph(nodes: BoardNodeT[], edges: Edge[], dir: LayoutDir =
   }
 
   return nodes.map((n) => {
+    if (n.hidden) return n;
     const p = placed.get(n.id);
     return p ? { ...n, position: p } : n;
   });
@@ -124,6 +127,7 @@ export function layoutGraph(nodes: BoardNodeT[], edges: Edge[], dir: LayoutDir =
 export function graphTopLeft(nodes: BoardNodeT[]): { x: number; y: number } {
   let x = Infinity, y = Infinity;
   for (const n of nodes) {
+    if (n.hidden) continue;
     if (n.position.x < x) x = n.position.x;
     if (n.position.y < y) y = n.position.y;
   }

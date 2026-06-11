@@ -52,6 +52,14 @@ describe('layoutGraph', () => {
     expect(out[0].position).not.toEqual({ x: 999, y: 999 });
   });
 
+  it('ignores hidden nodes while preserving their stored positions', () => {
+    const hidden = { ...node('a'), hidden: true, position: { x: 1234, y: 5678 } };
+    const visible = node('b');
+    const out = layoutGraph([hidden, visible], [makeEdge('a', 'b', 'fork')]);
+    expect(out.find((n) => n.id === 'a')!.position).toEqual({ x: 1234, y: 5678 });
+    expect(out.find((n) => n.id === 'b')!.position).not.toEqual({ x: 999, y: 999 });
+  });
+
   it('places a child to the right of its parent (LR)', () => {
     const nodes = [node('a'), node('b')];
     const edges: Edge[] = [makeEdge('a', 'b', 'fork')];
@@ -112,6 +120,13 @@ describe('graphTopLeft', () => {
       { ...node('b'), position: { x: 300, y: 40 } },
     ];
     expect(graphTopLeft(ns)).toEqual({ x: 10, y: 40 });
+  });
+  it('ignores hidden nodes', () => {
+    const ns = [
+      { ...node('hidden'), hidden: true, position: { x: -500, y: -500 } },
+      { ...node('visible'), position: { x: 20, y: 30 } },
+    ];
+    expect(graphTopLeft(ns)).toEqual({ x: 20, y: 30 });
   });
 });
 
