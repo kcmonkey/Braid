@@ -235,8 +235,8 @@ export type WebviewMessage =
   | { type: 'accountClose' }
   | { type: 'accountSignIn'; provider: EngineId }
   | { type: 'accountSignOut'; provider: EngineId }
-  // Provider spine: make `provider` the active engine for new turns (persists `braid.activeProvider`).
-  // Only implemented providers are selectable; the host rebroadcasts `config` with the new active + caps.
+  // Provider spine: make `provider` this canvas's active engine for new turns. Only implemented providers
+  // are selectable; the host rebroadcasts this canvas's `config` with the new active + caps.
   | { type: 'setActiveProvider'; provider: EngineId }
   // Claude API-key auth method. `setApiKey` stores a key (VS Code SecretStorage — never settings.json,
   // never synced) and switches that provider's authMethod→'apiKey'; `clearApiKey` removes it; `adoptEnvKey`

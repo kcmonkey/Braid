@@ -29,12 +29,14 @@
           "type": "string",
           "default": "claude",
           "enum": [
-            "claude"
+            "claude",
+            "codex"
           ],
           "enumDescriptions": [
-            "Claude (Anthropic) — the only provider available today"
+            "Claude (Anthropic)",
+            "Codex (OpenAI)"
           ],
-          "markdownDescription": "Which service provider drives new boards. Per-provider model/effort/thinking/permission/tool settings live under `braid.providers`. (More providers land in a future release.)"
+          "markdownDescription": "Legacy/default service provider for new or unmigrated canvases. The in-canvas provider spine now persists the active provider per canvas. Per-provider model/effort/thinking/permission/tool settings live under `braid.providers`."
         },
         "braid.providers": {
           "type": "object",

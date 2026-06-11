@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { mapMcpServers, toCodexAccount, mapCodexUsage, codexSkillsToSlashCommands } from './control';
+import { mapMcpServers, toCodexAccount, mapCodexUsage, codexSkillsToSlashCommands, CodexAccountControl } from './control';
 
 describe('mapMcpServers', () => {
   it('derives status from authStatus/serverInfo and flattens the tools map', () => {
@@ -71,5 +71,36 @@ describe('codexSkillsToSlashCommands', () => {
   it('malformed input → []', () => {
     expect(codexSkillsToSlashCommands(undefined)).toEqual([]);
     expect(codexSkillsToSlashCommands({ data: [{ skills: 'nope' }] })).toEqual([]);
+  });
+});
+
+describe('CodexAccountControl API-key sign-in', () => {
+  function ctrlWith(key: string | undefined) {
+    const calls: { method: string; params: any }[] = [];
+    const ctrl = new CodexAccountControl({
+      authMethod: () => 'apiKey',
+      getApiKey: () => key,
+    });
+    ctrl.attach({
+      request: async (method: string, params: any) => { calls.push({ method, params }); return { type: 'apiKey' }; },
+      dispose: () => {},
+    } as any);
+    return { ctrl, calls };
+  }
+
+  it('logs in via account/login/start {type:apiKey} without opening a browser', async () => {
+    const { ctrl, calls } = ctrlWith('sk-openai-test');
+    let opened = false;
+    const out = await ctrl.signIn(() => { opened = true; }, new AbortController().signal);
+    expect(out).toEqual({ ok: true });
+    expect(opened).toBe(false);
+    expect(calls).toEqual([{ method: 'account/login/start', params: { type: 'apiKey', apiKey: 'sk-openai-test' } }]);
+  });
+
+  it('fails cleanly when API-key mode has no stored key', async () => {
+    const { ctrl, calls } = ctrlWith(undefined);
+    const out = await ctrl.signIn(() => { throw new Error('should not open'); }, new AbortController().signal);
+    expect(out.ok).toBe(false);
+    expect(calls).toEqual([]);
   });
 });

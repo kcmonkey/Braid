@@ -44,6 +44,7 @@ export class EngineHost {
     this.engines.set('codex', new CodexAdapter({
       resolveBinary: () => deps.resolveCodexBinary?.(),
       readProviderConfig: () => deps.readSettings().providers.codex ?? DEFAULT_PROVIDER_CONFIG,
+      getApiKey: () => deps.getApiKey?.('codex'),
     }));
   }
 

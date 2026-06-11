@@ -150,7 +150,17 @@ export function reduceCodexNotification(s: CodexParseState, method: string, para
     case 'thread/tokenUsage/updated': {
       const u = params?.tokenUsage;
       if (u) {
-        if (typeof u.total?.totalTokens === 'number') s.contextTokens = u.total.totalTokens;
+        // Context-window OCCUPANCY = the LAST turn's footprint (`last`), NOT `total`. `total` is a cumulative
+        // running sum across EVERY turn of the thread — it only grows and never drops, not even after a
+        // compaction (probe C4/C5: `total` stays 39385 while `last` falls to 7838/5674). Using `total` pinned
+        // the % near/over 100% on long threads and re-triggered auto-compact every turn right after a
+        // compaction had already shrunk the real context. `last.totalTokens` = current window fill (the model
+        // re-reads the whole history each turn, so a single turn's input already covers it) and it resets
+        // after compact/fork — so the % correctly drops. Fall back to `total` only if `last` is absent.
+        const last = typeof u.last?.totalTokens === 'number' ? u.last.totalTokens : undefined;
+        const total = typeof u.total?.totalTokens === 'number' ? u.total.totalTokens : undefined;
+        const occ = last ?? total;
+        if (typeof occ === 'number') s.contextTokens = occ;
         if (typeof u.modelContextWindow === 'number') s.contextWindow = u.modelContextWindow;
       }
       break;

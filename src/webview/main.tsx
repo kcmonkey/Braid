@@ -2146,8 +2146,14 @@ function ProviderSpine({ activeProvider, onSetActive, onAccount }: {
   );
 }
 
-const API_KEY_PROVIDERS = new Set<EngineId>(['claude']); // providers offering an API-key auth method (vs OAuth-only)
+const API_KEY_PROVIDERS = new Set<EngineId>(['claude', 'codex']); // providers offering an API-key auth method (vs OAuth-only)
 type ApiKeyStatus = { stored: boolean; hint?: string; envDetected: boolean; envHint?: string };
+
+function apiKeyMeta(id: EngineId) {
+  return id === 'codex'
+    ? { env: 'OPENAI_API_KEY', mask: 'sk-...', placeholder: 'sk-... paste your OpenAI API key', account: 'OpenAI API account', tier: 'pay-as-you-go | OpenAI API', note: 'Billing runs through your OpenAI API account, not your ChatGPT subscription.' }
+    : { env: 'ANTHROPIC_API_KEY', mask: 'sk-ant-...', placeholder: 'sk-ant-... paste your Anthropic API key', account: 'Anthropic API account', tier: 'pay-as-you-go | first-party | thinking text visible', note: 'Billing runs through your Anthropic API account, not your subscription.' };
+}
 
 // API-key face of a provider card: a masked stored key + metered note, or an entry field + an "adopt the
 // key already in your environment" offer. The raw key is write-only (posted on save) — never read back.
@@ -2157,14 +2163,15 @@ function ApiKeyFace({ id, status, onSave, onAdopt }: {
   onAdopt: (id: EngineId) => void;
 }) {
   const [draft, setDraft] = useState('');
+  const meta = apiKeyMeta(id);
   if (status?.stored) {
     return (
       <>
-        <div className="keyline"><span className="keyline__glyph">🔑</span><span className="keymask">sk-ant-••••••••{status.hint ?? ''}</span></div>
-        <span className="keytier">pay-as-you-go · first-party · <span className="keytier__lit">thinking text visible</span></span>
+        <div className="keyline"><span className="keyline__glyph">🔑</span><span className="keymask">{meta.mask} {status.hint ?? ''}</span></div>
+        <span className="keytier">{meta.tier}</span>
         <div className="pcard__divider" />
         <div className="pcard__cost"><span>Session</span><b className="pcard__meter">metered</b><span>billed to your API key</span></div>
-        <div className="billnote"><span className="billnote__i">⚠</span><div>Billing runs through your <b>Anthropic API account</b>, not your subscription. The switch is explicit and applies on the next turn — existing boards are untouched.</div></div>
+        <div className="billnote"><span className="billnote__i">⚠</span><div>{meta.note} The switch is explicit and applies on the next turn; existing boards are untouched.</div></div>
       </>
     );
   }
@@ -2172,12 +2179,12 @@ function ApiKeyFace({ id, status, onSave, onAdopt }: {
     <>
       {status?.envDetected && (
         <div className="adoptnote">
-          <div>A key is set in your environment (<code>ANTHROPIC_API_KEY ••••{status.envHint ?? ''}</code>).</div>
+          <div>A key is set in your environment (<code>{meta.env} ...{status.envHint ?? ''}</code>).</div>
           <button className="btn primary" onClick={() => onAdopt(id)}>Adopt this key</button>
         </div>
       )}
       <div className="keyinput">
-        <input type="password" placeholder="sk-ant-…  paste your Anthropic API key" value={draft} onChange={(e) => setDraft(e.target.value)} />
+        <input type="password" placeholder={meta.placeholder} value={draft} onChange={(e) => setDraft(e.target.value)} />
         <button className="btn primary" disabled={!draft.trim()} onClick={() => { onSave(id, draft.trim()); setDraft(''); }}>Save</button>
       </div>
       <div className="billnote"><span className="billnote__i">⚠</span><div>Stored in VS Code <b>SecretStorage</b> (never settings.json, never synced). Enables <b>metered</b> API billing — your subscription stays untouched until you switch.</div></div>
@@ -2341,7 +2348,7 @@ function AccountsPanel({ accounts, activeProvider, authMethod, apiKeyStatus, onS
         </div>
         <div className="acct-panel__foot">
           {authMethod === 'apiKey'
-            ? 'API key stored in VS Code SecretStorage (never settings.json / never synced); billed per-token to your Anthropic API account. Switch back to Subscription anytime.'
+            ? 'API key stored in VS Code SecretStorage (never settings.json / never synced); billed per-token to the selected provider API account. Switch back to Subscription anytime.'
             : 'Subscription identity & plan-limit usage come from your signed-in account; sign-in opens your browser (OAuth, no API key). Or switch a provider to an API key above.'}
         </div>
       </div>
@@ -3570,6 +3577,11 @@ function App() {
           break;
         }
         case 'config':
+          if (m.activeProvider !== activeProviderRef.current) {
+            setRateLimit(null);
+            setResolvedModel(null);
+            setSlashCommands([]);
+          }
           setConfig(m.config); configRef.current = m.config;
           setActiveProviderState(m.activeProvider); activeProviderRef.current = m.activeProvider; setProviderCaps(m.capabilities);
           break;

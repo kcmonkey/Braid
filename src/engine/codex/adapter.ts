@@ -23,6 +23,7 @@ export interface CodexAdapterDeps {
   // Resolve the codex binary path (host-provided, like ClaudeAdapter.resolveBinary). undefined → bare 'codex'.
   resolveBinary(): string | undefined;
   readProviderConfig(): ProviderConfig;
+  getApiKey?(): string | undefined;
 }
 
 const CLIENT_INFO = { name: 'braid', title: 'Braid', version: '0.1' };
@@ -77,6 +78,8 @@ export class CodexAdapter implements Engine {
   constructor(private readonly deps: CodexAdapterDeps) {}
 
   private bin(): string { return this.deps.resolveBinary() || 'codex'; }
+  private authMethod(): 'subscription' | 'apiKey' { return this.deps.readProviderConfig().authMethod ?? 'subscription'; }
+  private apiKey(): string | undefined { return this.deps.getApiKey?.()?.trim() || undefined; }
 
   async capabilities(): Promise<EngineCapabilities> {
     const codex = PROVIDER_CATALOG.find((p) => p.id === 'codex');
@@ -89,6 +92,24 @@ export class CodexAdapter implements Engine {
     await rpc.request('initialize', { clientInfo: CLIENT_INFO, capabilities: { experimentalApi: true } }, 20_000);
     rpc.notify('initialized', {});
     return rpc;
+  }
+
+  /** Codex API-key mode is native app-server auth, not environment injection. For work-producing paths,
+   * explicitly log in with the stored OpenAI key when apiKey mode is selected. In subscription mode, refuse
+   * to run if the app-server is currently authenticated as apiKey, so switching back cannot silently keep
+   * billing the metered API key. Account-control paths intentionally do NOT call this; they must stay able
+   * to inspect/sign out/re-login regardless of current auth state. */
+  private async ensureWorkAuth(rpc: CodexRpc): Promise<void> {
+    if (this.authMethod() !== 'apiKey') {
+      const res = await rpc.request<any>('account/read', { refreshToken: false }, 10_000).catch(() => null);
+      if (res?.account?.type === 'apiKey') {
+        throw new Error('Codex is authenticated with an API key, but Braid is set to Subscription. Sign in to ChatGPT in Accounts, or switch Codex back to API-key mode.');
+      }
+      return;
+    }
+    const key = this.apiKey();
+    if (!key) throw new Error('Codex API-key mode is selected, but no OpenAI API key is stored. Add a key in Accounts or switch back to Subscription.');
+    await rpc.request('account/login/start', { type: 'apiKey', apiKey: key }, 30_000);
   }
 
   /** Fork a thread, optionally truncated to a mid-point. Codex `thread/fork` copies the WHOLE thread (no
@@ -165,6 +186,7 @@ export class CodexAdapter implements Engine {
     const onAbort = () => { try { rpc?.dispose(); } catch { /* ignore */ } };
     try {
       rpc = await this.open(req.cwd, { onNotification, onServerRequest });
+      await this.ensureWorkAuth(rpc);
       if (ctl.abort.signal.aborted) { settle(false); return; }
       ctl.abort.signal.addEventListener('abort', onAbort, { once: true });
 
@@ -237,6 +259,7 @@ export class CodexAdapter implements Engine {
         let resolveEnd: (() => void) | null = null;
         const onNotification = (method: string) => { if (method === 'turn/completed' && resolveEnd) { const r = resolveEnd; resolveEnd = null; r(); } };
         rpc = await this.open(req.cwd, { onNotification });
+        await this.ensureWorkAuth(rpc);
         // Fork so the source thread is untouched, then compact the fork (mirrors Claude's forked /compact).
         const fork = (await rpc.request('thread/fork', { threadId: req.resume, cwd: req.cwd }))?.thread;
         const threadId = fork?.id ?? req.resume;
@@ -269,6 +292,7 @@ export class CodexAdapter implements Engine {
         if (method === 'turn/completed') { if (resolveEnd) { const r = resolveEnd; resolveEnd = null; r(); } }
       };
       rpc = await this.open(cwd, { onNotification });
+      await this.ensureWorkAuth(rpc);
       const thread = (await rpc.request('thread/start', { cwd, ephemeral: true, sandbox: 'read-only', approvalPolicy: 'never', developerInstructions: system }))?.thread;
       const threadId = thread?.id;
       if (!threadId) return '';
@@ -323,7 +347,10 @@ export class CodexAdapter implements Engine {
     try {
       // Construct the controller first so the RPC's notification handler can route account/login/completed to
       // it; attach the opened RPC afterward (notifications only arrive later, during sign-in).
-      const ctrl = new CodexAccountControl();
+      const ctrl = new CodexAccountControl({
+        authMethod: () => this.authMethod(),
+        getApiKey: () => this.apiKey(),
+      });
       ctrl.attach(await this.open(cwd, { onNotification: (m, p) => ctrl.onNotification(m, p) }));
       return ctrl;
     } catch (e: any) {
@@ -366,6 +393,7 @@ export class CodexAdapter implements Engine {
     let rpc: CodexRpc | null = null;
     try {
       rpc = await this.open(cwd, {});
+      await this.ensureWorkAuth(rpc);
       if (abort.signal.aborted) return { ok: false, error: 'timed out or canceled' };
       const res = await rpc.request('account/read', { refreshToken: false }, 10_000);
       const acct = res?.account;

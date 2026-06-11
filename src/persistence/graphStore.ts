@@ -8,9 +8,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import type { SerializedGraph } from '../webview/merge';
+import type { EngineId } from '../protocol';
 
 /** A canvas registry entry (id + display name). SSOT for the type lives here (host-neutral, principle 13). */
-export interface Canvas { id: string; name: string }
+export interface Canvas { id: string; name: string; activeProvider?: EngineId }
 
 /** Root of Braid's user-level data, mirroring Claude Code's ~/.claude. Overridable via the BRAID_HOME env
  *  var (used by the future standalone build / tests to redirect storage). */

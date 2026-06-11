@@ -96,10 +96,20 @@ describe('reduceCodexNotification — usage, rate limit, result', () => {
       ['thread/tokenUsage/updated', { tokenUsage: { total: { totalTokens: 13067 }, last: {}, modelContextWindow: 258400 } }],
     ]);
     const done = buildCodexTurnDone(s, false, 2000);
-    expect(done.contextTokens).toBe(13067);
+    expect(done.contextTokens).toBe(13067); // last absent → falls back to total
     expect(done.contextWindow).toBe(258400);
     expect(done.text).toBe('done');
     expect(done.messageUuid).toBe('t1'); // Lazy-Fork mid-point marker = the board's last turn id (fork+rollback)
+  });
+
+  it('context occupancy uses the LAST turn footprint, not the cumulative total (so % drops after compaction)', () => {
+    // `total` is a running sum that never drops (probe: post-fork/compact it stays 39385 while `last` falls to
+    // 7838). Using `total` pinned the badge near 100% and re-triggered auto-compact every turn. Use `last`.
+    const { s } = run([
+      turnStarted(),
+      ['thread/tokenUsage/updated', { tokenUsage: { total: { totalTokens: 39385 }, last: { totalTokens: 7838 }, modelContextWindow: 258400 } }],
+    ]);
+    expect(buildCodexTurnDone(s, false, 2000).contextTokens).toBe(7838);
   });
 
   it('account/rateLimits/updated → a rateLimit snapshot', () => {

@@ -115,10 +115,10 @@ const accountAuthAborts = new Map<string, AbortController>();
 // and a non-active provider's card resolves instead of spinning "Checking subscription…" forever. (M-Codex)
 const acctKey = (canvasId: string, provider: EngineId) => `${canvasId}::${provider}`;
 
-// Composer autofill: the active provider's slash commands, cached for the workspace (cwd is fixed =
-// workspaceFolders[0]). Fetched lazily on the first `getSlashCommands`; replaced on a live `commands_changed`
-// (see makeSink.commands). null = not yet fetched. (Phase 1/2)
-let slashCommandsCache: SlashCommandSpec[] | null = null;
+// Composer autofill: slash commands are cached by provider because the active provider is canvas-local.
+// cwd is fixed = workspaceFolders[0]. Live commands_changed refreshes replace the current canvas provider's
+// entry (see makeSink.commands).
+const slashCommandsCache = new Map<EngineId, SlashCommandSpec[]>();
 
 // Where a runtime-provisioned SDK lives (globalStorage/sdk). Set in activate() once we have the
 // extension context; read lazily by the engine's SDK loader. Undefined until activate → dev/F5 falls
@@ -145,6 +145,8 @@ function resolveClaudeBinary(): string | undefined {
 // webview — only presence + a last-4 hint do. (authMethod / billing invariant)
 const apiKeyCache: Partial<Record<EngineId, string>> = {};
 const secretKey = (id: EngineId) => `braid.apiKey.${id}`;
+const apiKeyEnvName = (id: EngineId) => id === 'codex' ? 'OPENAI_API_KEY' : 'ANTHROPIC_API_KEY';
+const apiKeyEnvValue = (id: EngineId): string | undefined => process.env[apiKeyEnvName(id)]?.trim() || undefined;
 /** Last-4 hint for a masked key display (never the full key). '' for too-short/empty. */
 const keyHint = (key: string | undefined): string | undefined => (key && key.length >= 4 ? key.slice(-4) : undefined);
 
@@ -360,6 +362,32 @@ export function deactivate() {
 const getCanvases = (): Canvas[] => graphStore().listCanvases();
 const setCanvases = (list: Canvas[]): void => graphStore().saveCanvases(list);
 const newId = () => 'c' + Math.random().toString(36).slice(2, 9);
+const DEFAULT_ACTIVE_PROVIDER: EngineId = 'claude';
+const isEngineId = (v: unknown): v is EngineId =>
+  typeof v === 'string' && PROVIDER_CATALOG.some((p) => p.id === v);
+
+/** Legacy/global fallback for old installs and non-canvas commands. New canvas switches write to the canvas
+ * registry instead of this setting so one project/canvas cannot silently re-home another. */
+function configuredActiveProvider(): EngineId {
+  const v = vscode.workspace.getConfiguration('braid').get<EngineId>('activeProvider', DEFAULT_ACTIVE_PROVIDER);
+  return isEngineId(v) && engineHost.has(v) ? v : DEFAULT_ACTIVE_PROVIDER;
+}
+
+/** The provider selected for this canvas. Missing metadata falls back to the legacy/global setting so existing
+ * users keep their current provider until the first canvas-local switch persists it. */
+function canvasActiveProvider(canvasId?: string): EngineId {
+  if (canvasId) {
+    const v = getCanvases().find((c) => c.id === canvasId)?.activeProvider;
+    if (isEngineId(v) && engineHost.has(v)) return v;
+  }
+  return configuredActiveProvider();
+}
+
+function setCanvasActiveProvider(canvasId: string, provider: EngineId): void {
+  const list = getCanvases();
+  const next = list.map((c) => c.id === canvasId ? { ...c, activeProvider: provider } : c);
+  if (next.some((c, i) => c !== list[i])) setCanvases(next);
+}
 
 /** One-time migration: copy this project's canvases + graphs out of VS Code workspaceState into the file
  *  store. Idempotent — a no-op once the file store is initialized (canvases.json exists). Folds the pre-M5
@@ -379,7 +407,7 @@ function migrateWorkspaceStateToFiles(ctx: vscode.ExtensionContext, store: FileG
   const legacy = ctx.workspaceState.get<SerializedGraph>(LEGACY_GRAPH_KEY);
   if (legacy) {
     const id = newId();
-    store.saveCanvases([{ id, name: 'Canvas 1' }]);
+    store.saveCanvases([{ id, name: 'Canvas 1', activeProvider: configuredActiveProvider() }]);
     store.writeGraph(id, legacy);
   }
   // else: nothing to migrate — ensureCanvases seeds a fresh Canvas 1 into the file store.
@@ -392,7 +420,7 @@ async function ensureCanvases(ctx: vscode.ExtensionContext): Promise<Canvas[]> {
   const list = getCanvases();
   if (list.length) return list;
   const id = newId();
-  const seeded: Canvas[] = [{ id, name: 'Canvas 1' }];
+  const seeded: Canvas[] = [{ id, name: 'Canvas 1', activeProvider: configuredActiveProvider() }];
   setCanvases(seeded);
   treeProvider?.refresh();
   return seeded;
@@ -471,7 +499,7 @@ async function openDefault(context: vscode.ExtensionContext) {
 async function newCanvas(context: vscode.ExtensionContext) {
   const list = getCanvases();
   const id = newId();
-  setCanvases([...list, { id, name: `Canvas ${list.length + 1}` }]);
+  setCanvases([...list, { id, name: `Canvas ${list.length + 1}`, activeProvider: configuredActiveProvider() }]);
   treeProvider.refresh();
   openCanvas(context, id);
 }
@@ -591,17 +619,23 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       await pushConfig(canvasId);
       break;
     case 'setActiveProvider': {
-      // Provider spine: switch the active engine (only implemented providers are offered by the UI). The
-      // onDidChangeConfiguration listener rebroadcasts the enriched config to all panels.
+      // Provider spine: switch only THIS canvas's default engine for new boards. Existing boards keep their
+      // persisted BoardData.engine, and other projects/canvases keep their own active provider.
       if (engineHost.has(msg.provider)) {
-        await vscode.workspace.getConfiguration('braid').update('activeProvider', msg.provider, vscode.ConfigurationTarget.Global);
+        setCanvasActiveProvider(canvasId, msg.provider);
+        slashCommandsCache.delete(msg.provider);
+        closeMcp(canvasId); // any open MCP control session belonged to the previous canvas provider.
+        postTo(canvasId, { type: 'mcpServers', servers: [], busy: [] });
+        await pushConfig(canvasId);
+        pushApiKeyStatus(canvasId);
+        void pushAccountIdentity(canvasId);
       }
       break;
     }
     case 'setConfig':
       // UI changed a setting → write back to global VS Code settings (SSOT). The
       // onDidChangeConfiguration listener then broadcasts the new config to all panels.
-      await applyConfig(msg.patch);
+      await applyConfig(msg.patch, canvasId);
       break;
     case 'getEditorContext':
       // User clicked "attach file/selection" → read the active (or last-focused) file editor.
@@ -761,12 +795,13 @@ async function openFile(filePath: string, line?: number) {
  * cwd is fixed (workspaceFolders[0]), so one cache serves every canvas. Live `commands_changed` refreshes
  * replace the cache via makeSink.commands. Never throws (engine returns [] on failure). */
 async function serveSlashCommands(canvasId: string) {
-  if (!slashCommandsCache) {
+  const provider = canvasActiveProvider(canvasId);
+  if (!slashCommandsCache.has(provider)) {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    try { slashCommandsCache = await engineHost.getActive().listSlashCommands(cwd); }
-    catch (e: any) { console.error('[Braid] listSlashCommands failed:', e?.message ?? e); slashCommandsCache = []; }
+    try { slashCommandsCache.set(provider, await engineHost.get(provider).listSlashCommands(cwd)); }
+    catch (e: any) { console.error('[Braid] listSlashCommands failed:', e?.message ?? e); slashCommandsCache.set(provider, []); }
   }
-  postTo(canvasId, { type: 'slashCommands', commands: slashCommandsCache });
+  postTo(canvasId, { type: 'slashCommands', commands: slashCommandsCache.get(provider) ?? [] });
 }
 
 const MAX_FILE_RESULTS = 30;
@@ -906,9 +941,9 @@ function readProviderConfig(c: vscode.WorkspaceConfiguration, id: string): Provi
 }
 
 /** Read the live `braid.*` settings into the nested SSOT (re-read per query → no reload needed). */
-function readSettings(): BraidSettings {
+function readSettings(canvasId?: string): BraidSettings {
   const c = vscode.workspace.getConfiguration('braid');
-  const activeProvider = c.get<BraidSettings['activeProvider']>('activeProvider', 'claude');
+  const activeProvider = canvasActiveProvider(canvasId);
   const canvas: CanvasConfig = {
     autoCompactEnabled: c.get<boolean>('autoCompactEnabled', DEFAULT_CANVAS_CONFIG.autoCompactEnabled),
     autoCompactThreshold: c.get<number>('autoCompactThreshold', DEFAULT_CANVAS_CONFIG.autoCompactThreshold),
@@ -920,8 +955,8 @@ function readSettings(): BraidSettings {
 }
 
 /** Flat webview-facing view = the active provider's slice ∪ the canvas config (field set unchanged). */
-function readConfigView(): BraidConfig {
-  const s = readSettings();
+function readConfigView(canvasId?: string): BraidConfig {
+  const s = readSettings(canvasId);
   return { ...(s.providers[s.activeProvider] ?? DEFAULT_PROVIDER_CONFIG), ...s.canvas };
 }
 
@@ -940,18 +975,21 @@ async function readCapabilities(): Promise<Partial<Record<EngineId, ProviderCapa
 
 /** Push the enriched `config` (flat view + active provider + capabilities) to one canvas or all open ones. */
 async function pushConfig(canvasId?: string) {
-  const config = readConfigView();
-  const activeProvider = readSettings().activeProvider;
+  if (!canvasId) {
+    await Promise.all([...panels.keys()].map((id) => pushConfig(id)));
+    return;
+  }
+  const config = readConfigView(canvasId);
+  const activeProvider = readSettings(canvasId).activeProvider;
   const capabilities = await readCapabilities();
   const msg = { type: 'config' as const, config, activeProvider, capabilities };
-  if (canvasId) postTo(canvasId, msg);
-  else for (const id of panels.keys()) postTo(id, msg);
+  postTo(canvasId, msg);
 }
 
 /** Write a partial flat-view change back to global VS Code settings (the in-canvas UI is just an editor).
  * Canvas keys go to their flat `braid.*` settings; provider keys merge into the active provider's slice in
  * `braid.providers` (which also persists the legacy migration on first edit). */
-async function applyConfig(patch: Partial<BraidConfig>) {
+async function applyConfig(patch: Partial<BraidConfig>, canvasId?: string) {
   const c = vscode.workspace.getConfiguration('braid');
   const canvasKeys = new Set<string>(CANVAS_KEYS as string[]);
   const providerPatch: Partial<ProviderConfig> = {};
@@ -965,7 +1003,7 @@ async function applyConfig(patch: Partial<BraidConfig>) {
     }
   }
   if (touchedProvider) {
-    const active = c.get<string>('activeProvider', 'claude');
+    const active = canvasActiveProvider(canvasId);
     const current = readProviderConfig(c, active); // migrated baseline → legacy values preserved
     const providers = c.get<Record<string, ProviderConfig>>('providers', {});
     const next = { ...providers, [active]: { ...current, ...providerPatch } };
@@ -977,7 +1015,7 @@ async function applyConfig(patch: Partial<BraidConfig>) {
 async function openMcp(canvasId: string) {
   if (!mcpControls.has(canvasId)) {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    const ctrl = await engineHost.getActive().mcpControl(cwd);
+    const ctrl = await engineHost.get(canvasActiveProvider(canvasId)).mcpControl(cwd);
     if (!ctrl) { postTo(canvasId, { type: 'mcpServers', servers: [], busy: [] }); return; }
     // The panel may have closed (mcpClose / dispose) during the async create — don't leak.
     if (!panels.has(canvasId)) { ctrl.dispose(); return; }
@@ -1029,11 +1067,11 @@ function closeMcp(canvasId: string) {
 /** Fast identity-only push (no control session) — used on canvas load so the toolbar avatar reflects the
  * signed-in account without the user opening the Accounts panel. Usage fills in later via openAccount. */
 async function pushAccountIdentity(canvasId: string) {
-  const active = readSettings().activeProvider;
+  const active = canvasActiveProvider(canvasId);
   if (accountControls.has(acctKey(canvasId, active))) return; // panel already open → its refresh owns identity + usage
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   let account: ProviderAccount | null = null;
-  try { account = await engineHost.getActive().accountIdentity(cwd); }
+  try { account = await engineHost.get(active).accountIdentity(cwd); }
   catch (e: any) { console.error('[Braid] account identity fetch failed:', e?.message ?? e); }
   if (!panels.has(canvasId) || accountControls.has(acctKey(canvasId, active))) return; // closed / panel opened mid-fetch
   postTo(canvasId, { type: 'account', provider: active, account, usage: null });
@@ -1052,9 +1090,9 @@ async function loadApiKeys(context: vscode.ExtensionContext) {
 
 /** Push the secret-safe API-key status (stored? + hint; ambient env key? + hint) for the active provider. */
 function pushApiKeyStatus(canvasId: string) {
-  const provider = readSettings().activeProvider;
+  const provider = canvasActiveProvider(canvasId);
   const stored = apiKeyCache[provider];
-  const envKey = process.env.ANTHROPIC_API_KEY;
+  const envKey = apiKeyEnvValue(provider);
   postTo(canvasId, { type: 'apiKeyStatus', provider, stored: !!stored, hint: keyHint(stored), envDetected: !!envKey, envHint: keyHint(envKey) });
 }
 
@@ -1077,9 +1115,9 @@ async function setApiKey(context: vscode.ExtensionContext, provider: EngineId, k
   await afterApiKeyChange();
 }
 
-/** Adopt a key already present in the environment (ANTHROPIC_API_KEY) into SecretStorage + apiKey mode. */
+/** Adopt a provider-specific key already present in the environment into SecretStorage + apiKey mode. */
 async function adoptEnvKey(context: vscode.ExtensionContext, provider: EngineId) {
-  const envKey = process.env.ANTHROPIC_API_KEY?.trim();
+  const envKey = apiKeyEnvValue(provider);
   if (envKey) await setApiKey(context, provider, envKey);
 }
 
@@ -1102,7 +1140,7 @@ async function afterApiKeyChange() {
 async function openAccount(canvasId: string) {
   pushApiKeyStatus(canvasId); // refresh the API-key face + adopt offer when the panel opens
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-  const active = readSettings().activeProvider;
+  const active = canvasActiveProvider(canvasId);
   // Resolve EVERY non-active implemented provider's card with a lazy control session + identity/usage refresh
   // (NOT identity-only) — so a non-active provider (e.g. Codex while Claude is active) shows BOTH its identity
   // AND its plan-usage bars, not just identity. `refreshAccount` pushes identity first (fast) then polls usage,
@@ -1132,7 +1170,7 @@ async function openAccount(canvasId: string) {
   }
   // The ACTIVE provider gets a persistent control session (identity + usage windows + sign-in/out).
   if (!accountControls.has(acctKey(canvasId, active))) {
-    const ctrl = await engineHost.getActive().accountControl(cwd);
+    const ctrl = await engineHost.get(active).accountControl(cwd);
     if (!ctrl) { postTo(canvasId, { type: 'account', provider: active, account: null, usage: null }); return; }
     if (!panels.has(canvasId)) { ctrl.dispose(); return; } // panel closed during the async create — don't leak
     accountControls.set(acctKey(canvasId, active), ctrl);
@@ -1223,7 +1261,7 @@ function makeSink(canvasId: string): EventSink {
     rateLimit: (snapshot) => postTo(canvasId, { type: 'rateLimit', snapshot }),
     // Live slash-command refresh (commands_changed) → update the host cache + push to this canvas. The
     // cold-start list is served by the getSlashCommands handler (Phase 2).
-    commands: (commands) => { slashCommandsCache = commands; postTo(canvasId, { type: 'slashCommands', commands }); },
+    commands: (commands) => { slashCommandsCache.set(canvasActiveProvider(canvasId), commands); postTo(canvasId, { type: 'slashCommands', commands }); },
     // Async continuation (异步续接): a board held open for background tasks / scheduled wakeups, and the
     // folded task lifecycle events for chip display. The webview renders the 'waiting' state + chips.
     waiting: (boardId, turnIndex, pending) => postTo(canvasId, { type: 'waiting', boardId, turnIndex, pending }),

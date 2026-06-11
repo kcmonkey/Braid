@@ -94,6 +94,11 @@ export class CodexAccountControl implements AccountController {
   // Set while a browser sign-in is pending; the `account/login/completed` notification resolves it.
   private loginResolve: ((n: { success: boolean; error?: string }) => void) | null = null;
 
+  constructor(private readonly auth: {
+    authMethod(): 'subscription' | 'apiKey';
+    getApiKey(): string | undefined;
+  } = { authMethod: () => 'subscription', getApiKey: () => undefined }) {}
+
   /** Bind the opened RPC (set after `open()` so the notification handler can already reference this ctrl). */
   attach(rpc: CodexRpc) { this.rpc = rpc; }
 
@@ -124,6 +129,13 @@ export class CodexAccountControl implements AccountController {
   async signIn(openUrl: (url: string) => void, signal: AbortSignal): Promise<AuthOutcome> {
     if (this.disposed) return { ok: false, error: 'Account session closed' };
     try {
+      if (this.auth.authMethod() === 'apiKey') {
+        const apiKey = this.auth.getApiKey()?.trim();
+        if (!apiKey) return { ok: false, error: 'No OpenAI API key is stored for Codex' };
+        await this.rpc.request('account/login/start', { type: 'apiKey', apiKey }, 30_000);
+        return { ok: true };
+      }
+
       const cur = await this.info();
       if (cur?.signedIn) return { ok: true }; // already signed in → no dangling flow
       const res = await this.rpc.request<any>('account/login/start', { type: 'chatgpt' }, 30_000);
