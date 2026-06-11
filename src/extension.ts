@@ -495,6 +495,9 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // webview mounted → hand back this canvas's persisted graph (or null if none).
       const graph = context.workspaceState.get<SerializedGraph>(graphKey(canvasId)) ?? null;
       postTo(canvasId, { type: 'restored', graph });
+      // Proactively populate the toolbar avatar/identity (fast `claude auth status`, no control session) so
+      // the account shows on load — the user shouldn't have to open the Accounts panel to see who's signed in.
+      void pushAccountIdentity(canvasId);
       break;
     }
     case 'persist': {
@@ -929,6 +932,18 @@ async function reconnectMcp(canvasId: string, name: string) {
 function closeMcp(canvasId: string) {
   const ctrl = mcpControls.get(canvasId);
   if (ctrl) { ctrl.dispose(); mcpControls.delete(canvasId); }
+}
+
+/** Fast identity-only push (no control session) — used on canvas load so the toolbar avatar reflects the
+ * signed-in account without the user opening the Accounts panel. Usage fills in later via openAccount. */
+async function pushAccountIdentity(canvasId: string) {
+  if (accountControls.has(canvasId)) return; // panel already open → its refresh owns identity + usage
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  let account: ProviderAccount | null = null;
+  try { account = await engineHost.getActive().accountIdentity(cwd); }
+  catch (e: any) { console.error('[Braid] account identity fetch failed:', e?.message ?? e); }
+  if (!panels.has(canvasId) || accountControls.has(canvasId)) return; // closed / panel opened mid-fetch
+  postTo(canvasId, { type: 'account', provider: readSettings().activeProvider, account, usage: null });
 }
 
 /** Accounts panel opened → lazily create the account/usage control session, then push identity + usage. */

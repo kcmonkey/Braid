@@ -5,14 +5,14 @@
 // maps / UI and drives this via the neutral Engine contract. (plans/Engine-Abstraction Phase 1+2)
 import type { ProviderConfig } from '../../sdkOptions';
 import { buildSdkOptions } from '../../sdkOptions';
-import type { ImageInput, McpServerInfo, SlashCommandSpec } from '../../protocol';
+import type { ImageInput, McpServerInfo, SlashCommandSpec, ProviderAccount } from '../../protocol';
 import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle,
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
   AsyncPending, BranchSummarizeRequest,
 } from '../types';
-import { ClaudeAccountControl } from './account';
+import { ClaudeAccountControl, claudeAccountIdentity } from './account';
 import { pathToFileURL } from 'url';
 import {
   reduceClaudeMessage, buildTurnDone, initParseState, turnView, extractText, toSlashCommandSpec,
@@ -462,6 +462,13 @@ export class ClaudeAdapter implements Engine {
       catch (e: any) { if (!ctrl._disposed) console.error('[Braid] account control drain ended:', e?.message ?? e); }
     })();
     return ctrl;
+  }
+
+  // ---- fast identity (no control session) ----
+  // Spawns `claude auth status` (~250ms) so the host can show the avatar on canvas load without opening the
+  // panel or spinning up the streaming control session. Never throws (null on unavailable / not signed in).
+  async accountIdentity(_cwd: string): Promise<ProviderAccount | null> {
+    return claudeAccountIdentity(this.deps.resolveBinary?.());
   }
 
   // ---- slash-command list (composer autofill cold-start) ----
