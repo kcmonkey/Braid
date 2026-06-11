@@ -14,6 +14,7 @@ import { toCapabilitiesView } from './engine/capabilities';
 import { PROVIDER_CATALOG } from './protocol';
 import type { EngineId, ProviderCapabilitiesView, ProviderAccount } from './protocol';
 import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry, resolveClaudeBinaryFromEntry } from './runtime/sdk-provision';
+import { resolveCodexBinary } from './runtime/codex-bin';
 import { ensureSdkInstalled } from './runtime/sdk-download';
 import type { EventSink, PreToolInterceptor, PreToolDecision, PermissionVerdict, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
 
@@ -147,6 +148,7 @@ const engineHost = new EngineHost({
   readSettings,
   getSdkInstallDir: () => provisionedSdkDir,
   resolveBinary: resolveClaudeBinary,
+  resolveCodexBinary, // OpenAI Codex binary (env override / bundled VS Code extension) — M-Codex
   getApiKey: (id) => apiKeyCache[id],
 });
 
@@ -910,7 +912,7 @@ function readSettings(): BraidSettings {
     asyncContinuationEnabled: c.get<boolean>('asyncContinuationEnabled', DEFAULT_CANVAS_CONFIG.asyncContinuationEnabled),
     asyncContinuationIdleCapMin: c.get<number>('asyncContinuationIdleCapMin', DEFAULT_CANVAS_CONFIG.asyncContinuationIdleCapMin),
   };
-  return { activeProvider, providers: { claude: readProviderConfig(c, 'claude') }, canvas };
+  return { activeProvider, providers: { claude: readProviderConfig(c, 'claude'), codex: readProviderConfig(c, 'codex') }, canvas };
 }
 
 /** Flat webview-facing view = the active provider's slice ∪ the canvas config (field set unchanged). */

@@ -4,6 +4,7 @@ import type { ProviderConfig, CanvasConfig } from '../sdkOptions';
 import { DEFAULT_PROVIDER_CONFIG } from '../sdkOptions';
 import type { Engine, EngineId } from './types';
 import { ClaudeAdapter, loadClaudeSdk } from './claude/adapter';
+import { CodexAdapter } from './codex/adapter';
 
 /** Host-internal nested config SSOT. The webview only ever sees the flat `BraidConfig` view (the active
  * provider's slice ∪ canvas); the host translates between the two. `providers` is partial — a provider
@@ -24,6 +25,8 @@ export class EngineHost {
     readSettings(): BraidSettings;
     getSdkInstallDir?(): string | undefined;
     resolveBinary?(): string | undefined;
+    // Resolve the OpenAI Codex binary path for the CodexAdapter (host-provided, like resolveBinary). (M-Codex)
+    resolveCodexBinary?(): string | undefined;
     // Per-provider stored API key (host's SecretStorage cache). Consumed only when authMethod==='apiKey'.
     getApiKey?(id: EngineId): string | undefined;
   }) {
@@ -34,6 +37,13 @@ export class EngineHost {
       readProviderConfig: () => deps.readSettings().providers.claude ?? DEFAULT_PROVIDER_CONFIG,
       resolveBinary: deps.resolveBinary,
       getApiKey: () => deps.getApiKey?.('claude'),
+    }));
+    // Codex engine: driven via `codex app-server` JSON-RPC. Registered unconditionally — if no codex binary
+    // is installed, turns surface a clear error (graceful), but the adapter exists so `getActive()` routes to
+    // it once the user selects Codex. (plans/M-Codex Phase 5)
+    this.engines.set('codex', new CodexAdapter({
+      resolveBinary: () => deps.resolveCodexBinary?.(),
+      readProviderConfig: () => deps.readSettings().providers.codex ?? DEFAULT_PROVIDER_CONFIG,
     }));
   }
 

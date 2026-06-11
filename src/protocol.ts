@@ -62,11 +62,14 @@ export const PROVIDER_CATALOG: ProviderDescriptor[] = [
     ],
   },
   {
-    id: 'codex', name: 'Codex', vendor: 'OpenAI', accent: '#10a37f', implemented: false,
+    id: 'codex', name: 'Codex', vendor: 'OpenAI', accent: '#10a37f', implemented: true,
+    // Models + contextWindow probe-confirmed via `codex app-server model/list` (gpt-5.5 default, ChatGPT Plus
+    // window 258,400). contextWindow is only a cross-engine budget fallback — boards measure their own window
+    // per-turn from `thread/tokenUsage/updated.modelContextWindow`. (knowledge.md "Codex app-server v2")
     models: [
-      { value: 'gpt-5-codex', label: 'GPT-5 Codex' },
-      { value: 'o4', label: 'o4' },
-      { value: 'o4-mini', label: 'o4-mini' },
+      { value: '', label: 'Default model', contextWindow: 258_400 },
+      { value: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 258_400 },
+      { value: 'gpt-5.4', label: 'GPT-5.4', contextWindow: 258_400 },
     ],
   },
 ];
