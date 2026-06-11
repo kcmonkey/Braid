@@ -8,12 +8,15 @@ import type {
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
   BranchSummarizeRequest, PermissionVerdict,
 } from '../types';
-import type { ProviderAccount, SlashCommandSpec, EngineId } from '../../protocol';
+import type { ProviderAccount, SlashCommandSpec, EngineId, ImageInput } from '../../protocol';
 import { PROVIDER_CATALOG, TAG_VOCAB } from '../../protocol';
 import { CodexRpc } from './transport';
 import {
   reduceCodexNotification, buildCodexTurnDone, initCodexParseState, codexView, type CodexParseState,
 } from './reduce';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 export interface CodexAdapterDeps {
   // Resolve the codex binary path (host-provided, like ClaudeAdapter.resolveBinary). undefined → bare 'codex'.
@@ -40,6 +43,32 @@ function codexEffort(effort: string): string | undefined {
 
 function textInput(text: string) {
   return [{ type: 'text', text, text_elements: [] }];
+}
+
+/** Guess a file extension from a `mediaType` (e.g. 'image/png' → 'png'); falls back to 'png'. */
+function imageExt(mediaType: string): string {
+  const m = /image\/([a-z0-9.+-]+)/i.exec(mediaType || '');
+  const sub = (m ? m[1] : 'png').toLowerCase();
+  return sub === 'jpeg' ? 'jpg' : sub.replace(/[^a-z0-9]/g, '') || 'png';
+}
+
+/** Build a Codex turn `input: UserInput[]` from prompt + images. Codex's input accepts `localImage` (a file
+ * path) but NOT inline base64 (unlike Claude), so each pasted/dropped image is written to a temp file and
+ * referenced by path. Returns the input plus the temp paths to delete once the turn(s) finish. */
+function buildUserInput(prompt: string, images?: ImageInput[]): { input: any[]; temps: string[] } {
+  const input: any[] = [{ type: 'text', text: prompt, text_elements: [] }];
+  const temps: string[] = [];
+  for (const img of images ?? []) {
+    try {
+      const file = path.join(os.tmpdir(), `braid-codex-${Date.now()}-${Math.random().toString(36).slice(2)}.${imageExt(img.mediaType)}`);
+      fs.writeFileSync(file, Buffer.from(img.data, 'base64'));
+      temps.push(file);
+      input.push({ type: 'localImage', path: file }); // Codex reads the bytes off disk for this turn
+    } catch (e: any) {
+      console.error('[Braid] codex image temp write failed (dropping this image):', e?.message ?? e);
+    }
+  }
+  return { input, temps };
 }
 
 export class CodexAdapter implements Engine {
@@ -69,7 +98,8 @@ export class CodexAdapter implements Engine {
     let interrupted = false;
     let currentTurnId: string | undefined;
     let resolveTurnEnd: (() => void) | null = null;
-    const queue: { text: string }[] = [];
+    const queue: { text: string; images?: ImageInput[] }[] = [];
+    const allTemps: string[] = []; // temp image files written this burst → deleted in `finally`
 
     const settle = (isError: boolean) => {
       if (settled) return;
@@ -138,7 +168,7 @@ export class CodexAdapter implements Engine {
 
       // Register the live handle (push/interrupt/stopWaiting) the instant the thread is ready.
       ctl.onLive({
-        push: (text) => { queue.push({ text }); },
+        push: (text, images) => { queue.push({ text, images }); },
         interrupt: async () => { interrupted = true; if (currentTurnId) { try { await rpc!.request('turn/interrupt', { threadId, turnId: currentTurnId }); } catch (e: any) { console.error('[Braid] codex interrupt failed:', e?.message ?? e); } } },
         stopWaiting: async () => { /* no async-continuation hold in v1 */ },
       });
