@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { toCapabilitiesView } from './capabilities';
 import { ClaudeAdapter } from './claude/adapter';
+import { DeepSeekAdapter } from './deepseek/adapter';
 import { PROVIDER_CATALOG } from '../protocol';
 import { DEFAULT_PROVIDER_CONFIG } from '../sdkOptions';
 
@@ -8,6 +9,7 @@ import { DEFAULT_PROVIDER_CONFIG } from '../sdkOptions';
 // adapter can be built with a stub loadSdk that is never called.
 const adapter = () => new ClaudeAdapter({ loadSdk: async () => null, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
 const claudeModels = PROVIDER_CATALOG.find((p) => p.id === 'claude')!.models;
+const deepSeekModels = PROVIDER_CATALOG.find((p) => p.id === 'deepseek')!.models;
 
 describe('toCapabilitiesView', () => {
   it('maps the Claude engine to the neutral view (compact derived from compact.mode=native)', async () => {
@@ -35,5 +37,21 @@ describe('toCapabilitiesView', () => {
       { value: 'sonnet', label: 'Sonnet', contextWindow: 1_000_000 },
       { value: 'haiku', label: 'Haiku', contextWindow: 200_000 },
     ]);
+  });
+
+  it('maps the DeepSeek engine to the neutral view', async () => {
+    const view = await toCapabilitiesView(new DeepSeekAdapter({
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG, authMethod: 'apiKey' }),
+      getApiKey: () => 'sk-deepseek-test',
+      fetchImpl: async () => new Response('{}'),
+    }));
+    expect(view).toEqual({
+      id: 'deepseek',
+      reasoning: true,
+      steer: true,
+      compact: true,
+      images: false,
+      models: deepSeekModels,
+    });
   });
 });

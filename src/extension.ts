@@ -336,90 +336,93 @@ const getOutput = (): vscode.OutputChannel =>
 
 const ENV_CHECK_TIMEOUT_MS = 60_000; // give the bundled CLI room to cold-start + auth
 
-/**
- * Subscription-auth self-check (onboarding). Subscription users are the primary audience, so this
- * confirms the happy path is wired up: (1) warn if ANTHROPIC_API_KEY is set (it silently switches
- * billing from the subscription to the metered API), (2) run a minimal query to prove the bundled
- * CLI can actually reach Claude. (knowledge.md: subscription auth requires no ANTHROPIC_API_KEY.)
- */
+/** Provider-neutral self-check for the currently active engine. */
 async function checkEnvironment() {
   const out = getOutput();
   out.clear();
   out.show(true);
-  out.appendLine('Braid · Environment check');
+  out.appendLine('Braid - Environment check');
   out.appendLine('================================');
 
-  const apiKeyMode = (readSettings().providers.claude?.authMethod ?? 'subscription') === 'apiKey';
-  const hasEnvKey = !!process.env.ANTHROPIC_API_KEY;
-  const hasStoredKey = !!apiKeyCache.claude;
-  if (apiKeyMode) {
-    out.appendLine(`• Auth method: API key (metered, billed to your Anthropic API account) ${hasStoredKey || hasEnvKey ? '✓' : '⚠️'}`);
-    out.appendLine(hasStoredKey
-      ? '• API key: stored in SecretStorage ✓  (injected into the spawn; never written to settings.json)'
-      : hasEnvKey
-        ? '• API key: present in the environment (ANTHROPIC_API_KEY) ✓  — adopt it in Accounts to manage it here.'
-        : '• API key: none ⚠️  Add a key in the Accounts panel, or switch back to Subscription.');
-  } else {
-    out.appendLine('• Auth method: subscription (OAuth) ✓');
-    out.appendLine(hasEnvKey
-      ? '• ANTHROPIC_API_KEY: set ⚠️  In subscription mode this silently bills the metered API — clear it, or adopt it as an API-key account in Accounts.'
-      : '• ANTHROPIC_API_KEY: unset ✓  (using subscription auth)');
-  }
+  const settings = readSettings();
+  const provider = settings.activeProvider;
+  const providerName = PROVIDER_CATALOG.find((p) => p.id === provider)?.name ?? provider;
+  const cfg = settings.providers[provider] ?? DEFAULT_PROVIDER_CONFIG;
+  const envName = apiKeyEnvName(provider);
+  const envKey = apiKeyEnvValue(provider);
+  const storedKey = apiKeyCache[provider];
+  const apiKeyMode = provider === 'deepseek' || (cfg.authMethod ?? 'subscription') === 'apiKey';
 
-  // Claude SDK provisioning (Shape 2): the SDK is downloaded from Anthropic's official npm registry into
-  // this extension's global storage — never bundled. Report where/which version, then make sure it's ready.
-  if (isDevMode) {
-    out.appendLine('• Claude SDK: bundled (development host) ✓');
-  } else if (provisionedSdkDir && extensionPathForSdk) {
-    const manifest = loadManifest(extensionPathForSdk);
-    const target = manifest?.version ?? '(manifest missing)';
-    const current = readCurrentVersion(provisionedSdkDir);
-    if (manifest && isProvisioned(provisionedSdkDir, manifest.version)) {
-      out.appendLine(`• Claude SDK: installed ✓  v${current} at ${provisionedSdkDir}`);
-    } else if (current) {
-      out.appendLine(`• Claude SDK: v${current} installed; will update to v${target} in the background.`);
-    } else {
-      out.appendLine(`• Claude SDK: not installed yet (target v${target}) — fetched from Anthropic's official registry on first use.`);
+  out.appendLine(`- Active provider: ${providerName}`);
+  if (apiKeyMode) {
+    out.appendLine(`- Auth method: API key ${storedKey || envKey ? 'OK' : 'missing'}`);
+    out.appendLine(storedKey
+      ? '- API key: stored in SecretStorage'
+      : envKey
+        ? `- API key: present in environment (${envName}); adopt it in Accounts to manage it here.`
+        : `- API key: none. Add one in Accounts or set ${envName}.`);
+  } else {
+    out.appendLine('- Auth method: subscription/OAuth');
+    if (provider === 'claude') {
+      out.appendLine(envKey
+        ? `- ${envName}: set. In subscription mode this can switch billing to metered API; clear it or adopt it in Accounts.`
+        : `- ${envName}: unset`);
     }
   }
-  const sdkOk = await ensureSdkReady();
-  if (!sdkOk) {
-    out.appendLine('• Claude SDK: setup was declined or failed ✗  Cannot test the connection.');
-    vscode.window.showWarningMessage('Braid: the Claude SDK is not set up yet. Run "Braid: Check Environment" again to download it.');
-    return;
+
+  if (provider === 'claude') {
+    if (isDevMode) {
+      out.appendLine('- Claude SDK: bundled in development host');
+    } else if (provisionedSdkDir && extensionPathForSdk) {
+      const manifest = loadManifest(extensionPathForSdk);
+      const target = manifest?.version ?? '(manifest missing)';
+      const current = readCurrentVersion(provisionedSdkDir);
+      if (manifest && isProvisioned(provisionedSdkDir, manifest.version)) {
+        out.appendLine(`- Claude SDK: installed v${current} at ${provisionedSdkDir}`);
+      } else if (current) {
+        out.appendLine(`- Claude SDK: v${current} installed; will update to v${target} in the background.`);
+      } else {
+        out.appendLine(`- Claude SDK: not installed yet (target v${target}); fetched on first Claude use.`);
+      }
+    }
+    const sdkOk = await ensureSdkReady();
+    if (!sdkOk) {
+      out.appendLine('- Claude SDK: setup was declined or failed. Cannot test the connection.');
+      vscode.window.showWarningMessage('Braid: the Claude SDK is not set up yet. Run "Braid: Check Environment" again to download it.');
+      return;
+    }
+  } else {
+    out.appendLine(`- Claude SDK: not required for ${providerName}.`);
   }
 
   await vscode.window.withProgress(
-    { location: vscode.ProgressLocation.Notification, title: 'Braid: testing connection…', cancellable: true },
+    { location: vscode.ProgressLocation.Notification, title: `Braid: testing ${providerName} connection...`, cancellable: true },
     async (_progress, token) => {
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), ENV_CHECK_TIMEOUT_MS);
       token.onCancellationRequested(() => ctrl.abort());
       const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-      const r = await engineHost.getActive().checkAuth(cwd, ctrl);
+      const r = await engineHost.get(provider).checkAuth(cwd, ctrl);
       clearTimeout(timer);
 
       if (r.sdkFailed) {
-        out.appendLine('• SDK: failed to load ✗  Cannot run a test connection.');
-        vscode.window.showWarningMessage('Braid: could not load the Claude Agent SDK; test connection failed. See "Output → Braid" for details.');
+        out.appendLine('- SDK: failed to load. Cannot run a test connection.');
+        vscode.window.showWarningMessage(`Braid: could not load the ${providerName} engine. See "Output > Braid" for details.`);
         return;
       }
       const ok = r.ok;
       const model = r.model ?? '';
-      const errText = r.error ?? '';
-
-      out.appendLine(ok
-        ? `• Test connection: success ✓${model ? `  (model: ${model})` : ''}`
-        : `• Test connection: failed ✗  ${errText}`);
+      const suffix = model ? ` (model: ${model})` : '';
+      out.appendLine(ok ? `- Test connection: success${suffix}` : `- Test connection: failed ${r.error ?? ''}`);
 
       if (ok && apiKeyMode) {
-        vscode.window.showInformationMessage(`Braid: API-key auth works ✅${model ? ` (model: ${model})` : ''} — metered billing.`);
-      } else if (ok && !hasEnvKey) {
-        vscode.window.showInformationMessage(`Braid: subscription auth works ✅${model ? ` (model: ${model})` : ''}`);
-      } else if (ok && hasEnvKey) {
-        vscode.window.showWarningMessage('Braid: connected, but ANTHROPIC_API_KEY is set in subscription mode → currently billing the metered API. Clear that env var, or adopt it as an API-key account in Accounts.');
+        vscode.window.showInformationMessage(`Braid: ${providerName} API-key auth works${suffix}.`);
+      } else if (ok && provider === 'claude' && envKey) {
+        vscode.window.showWarningMessage(`Braid: ${providerName} connected, but ${envName} is set in subscription mode. Clear it or adopt it in Accounts.`);
+      } else if (ok) {
+        vscode.window.showInformationMessage(`Braid: ${providerName} auth works${suffix}.`);
       } else {
-        vscode.window.showWarningMessage('Braid: connection failed. Run `claude login` (subscription), or add an API key in the Accounts panel. See "Output → Braid" for details.');
+        vscode.window.showWarningMessage(`Braid: ${providerName} connection failed. See "Output > Braid" for details.`);
       }
     },
   );

@@ -134,7 +134,7 @@
       },
       {
         "command": "braid.checkEnvironment",
-        "title": "Braid: Check Environment (subscription auth)",
+        "title": "Braid: Check Environment",
         "icon": "$(plug)"
       }
     ],

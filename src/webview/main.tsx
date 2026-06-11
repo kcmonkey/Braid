@@ -1826,7 +1826,7 @@ function ChatView({
 const MODEL_OPTS: { value: string; label: string }[] =
   PROVIDER_CATALOG.find((p) => p.id === 'claude')?.models ?? [];
 const PERM_OPTS: { value: string; label: string }[] = [
-  { value: 'inherit', label: 'Inherit .claude' },
+  { value: 'inherit', label: 'Inherit provider' },
   { value: 'default', label: 'default · prompt for approval' },
   { value: 'acceptEdits', label: 'acceptEdits · auto-accept edits' },
   { value: 'plan', label: 'plan · no tool execution' },
