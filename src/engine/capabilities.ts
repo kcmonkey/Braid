@@ -11,6 +11,7 @@ export async function toCapabilitiesView(engine: Engine): Promise<ProviderCapabi
     reasoning: caps.reasoning,
     steer: caps.steer,
     compact: engine.compact.mode !== 'none',
+    images: caps.images,
     models: caps.models,
   };
 }

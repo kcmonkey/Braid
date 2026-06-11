@@ -112,7 +112,7 @@ export class ClaudeAdapter implements Engine {
     // Model list is sourced from the catalog (SSOT) — returned by reference so consumers + tests can
     // assert identity. (compact support is expressed separately via `this.compact.mode`.)
     const claude = PROVIDER_CATALOG.find((p) => p.id === 'claude');
-    return { fork: 'native', steer: true, reasoning: true, models: claude?.models ?? [] };
+    return { fork: 'native', steer: true, reasoning: true, images: true, models: claude?.models ?? [] };
   }
 
   // ---- main turn (was runQuery) ----

@@ -16,8 +16,10 @@ export interface ImageInput {
  * grows as engines are added; an unimplemented id is type+catalog only (UI placeholder, no engine). */
 export type EngineId = 'claude' | 'codex';
 
-/** One selectable model for a provider's model dropdown. */
-export interface ModelOption { value: string; label: string }
+/** One selectable model for a provider's model dropdown. `contextWindow` (when known) = that model's token
+ * window, used as the TARGET-engine budget when a cross-engine seed must fit a model the boards never ran on
+ * (a never-run engine has no measured `BoardData.contextWindow`). (M-MultiEngine AD5) */
+export interface ModelOption { value: string; label: string; contextWindow?: number }
 
 /** Neutral, display-side descriptor of one slash command for the composer autocomplete menu. SSOT lives
  * here (shared by both bundles): each engine exposes its own command set via `Engine.listSlashCommands`
@@ -48,12 +50,15 @@ export interface ProviderDescriptor {
 export const PROVIDER_CATALOG: ProviderDescriptor[] = [
   {
     id: 'claude', name: 'Claude', vendor: 'Anthropic', accent: '#d97757', implemented: true,
+    // contextWindow = the model's token window (knowledge.md: default opus/sonnet/fable resolve to 1M today,
+    // haiku 200K). Used only as the cross-engine budget target (M-MultiEngine AD5); same-engine merges still
+    // budget against each board's measured contextWindow.
     models: [
-      { value: '', label: 'Default model' },
-      { value: 'claude-fable-5', label: 'Fable 5' },
-      { value: 'opus', label: 'Opus' },
-      { value: 'sonnet', label: 'Sonnet' },
-      { value: 'haiku', label: 'Haiku' },
+      { value: '', label: 'Default model', contextWindow: 1_000_000 },
+      { value: 'claude-fable-5', label: 'Fable 5', contextWindow: 1_000_000 },
+      { value: 'opus', label: 'Opus', contextWindow: 1_000_000 },
+      { value: 'sonnet', label: 'Sonnet', contextWindow: 1_000_000 },
+      { value: 'haiku', label: 'Haiku', contextWindow: 200_000 },
     ],
   },
   {
@@ -74,6 +79,9 @@ export interface ProviderCapabilitiesView {
   reasoning: boolean;
   compact: boolean;
   steer: boolean;
+  // Whether this provider accepts image content blocks. Drives gating of paste/drop image attachments per the
+  // active provider (a no-vision provider rejects images). Claude = true. (M-MultiEngine)
+  images: boolean;
   models: ModelOption[];
 }
 
@@ -172,23 +180,26 @@ export type WebviewMessage =
   // M11: `turnIndex` (default 0) = which turn slot this send writes. 0 = the board's top-level
   // prompt/answer; ≥1 = a post-settle follow-up re-opening a turn into the SAME board via resume
   // (writes followups[turnIndex-1]). During-generation follow-ups don't use `send` — they use `followup`.
-  | { type: 'send'; boardId: string; prompt: string; resume?: string; fork?: boolean; resumeAt?: string; images?: ImageInput[]; turnIndex?: number }
+  // `engine` = the board's owning engine (M-MultiEngine AD2): the host routes the turn to THIS engine, not the
+  // global active provider, so continuing/forking a board never hands its session id to a different engine.
+  // Omitted ⇒ 'claude' (legacy / no-op while one engine is registered).
+  | { type: 'send'; boardId: string; prompt: string; resume?: string; fork?: boolean; resumeAt?: string; images?: ImageInput[]; turnIndex?: number; engine?: EngineId }
   // M11 follow-up during generation: inject a follow-up into the board's OPEN streaming-input query (sent while the board
   // is streaming). interrupt=false → the engine queues it, running after the current turn finishes;
   // interrupt=true → the host calls q.interrupt() first, cutting the current turn (partial kept) so the
   // follow-up steers immediately. Same session, no fork — it becomes the next turn IN THE SAME board.
   // `resume`/`turnIndex` are a self-heal fallback: if the query already closed (settled + grace expired
   // in the race window), the host runs this as a `send`+resume into the same board instead of dropping it.
-  | { type: 'followup'; boardId: string; text: string; interrupt: boolean; resume?: string; turnIndex?: number; images?: ImageInput[] }
-  | { type: 'summarize'; boardId: string; prompt: string; answer: string }
+  | { type: 'followup'; boardId: string; text: string; interrupt: boolean; resume?: string; turnIndex?: number; images?: ImageInput[]; engine?: EngineId }
+  | { type: 'summarize'; boardId: string; prompt: string; answer: string; engine?: EngineId }
   // Branch-Signposts: synthesize a one-line "this branch explores X" label for a signpost node. `text` =
   // the segment's concatenated Q/A (built webview-side from branchSegment); `boardId` = the signpost to
   // store the result on. The host runs a single Haiku one-shot (Engine.branchSummary) and replies with
   // `branchSummary`. Orthogonal to `summarize` (which describes one round).
-  | { type: 'branchSummarize'; boardId: string; text: string }
+  | { type: 'branchSummarize'; boardId: string; text: string; engine?: EngineId }
   // M9 compact: run native /compact on `resume` (a done board's sessionId), forking so the original
   // session is untouched. `boardId` = the new compact node to settle when done.
-  | { type: 'compact'; boardId: string; resume: string }
+  | { type: 'compact'; boardId: string; resume: string; engine?: EngineId }
   | { type: 'abort'; boardId: string }
   // Async continuation: the user clicked Stop-waiting on a board held open for background tasks / wakeups
   // (or deleted it). The host calls the board's live TurnHandle.stopWaiting() → stop in-flight tasks +

@@ -188,6 +188,9 @@ export interface EngineCapabilities {
   fork: 'native' | 'replay';
   steer: boolean;
   reasoning: boolean;
+  // Whether the engine accepts image content blocks (vision). Claude = true; a text-only provider returns
+  // false so the webview can gate image paste/drop per the active provider. (M-MultiEngine)
+  images: boolean;
   // The provider's selectable models (SSOT = PROVIDER_CATALOG). Drives the model dropdown; surfaced to the
   // webview via ProviderCapabilitiesView. ('compact' support is NOT here — it's derived from `compact.mode`.)
   models: ModelOption[];
