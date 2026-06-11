@@ -59,6 +59,22 @@ export class FileGraphStore {
   }
 }
 
+/**
+ * Resolve a canvas graph from the new file store with a legacy fallback. `file` = the file-store read (null
+ * if absent); `legacy` = the old VS Code workspaceState copy (undefined/null if absent). Prefers the file
+ * store; falls back to the legacy copy and flags `healFromLegacy` so the caller can write it through
+ * (self-heal) — closing the gap where a partial bulk migration left a graph only in workspaceState. Pure
+ * (no I/O, no vscode) → unit-testable; the host owns the actual reads + the write-through. (Persistence-Store)
+ */
+export function resolveGraphFallback(
+  file: SerializedGraph | null,
+  legacy: SerializedGraph | null | undefined,
+): { graph: SerializedGraph | null; healFromLegacy: boolean } {
+  if (file) return { graph: file, healFromLegacy: false };
+  if (legacy) return { graph: legacy, healFromLegacy: true };
+  return { graph: null, healFromLegacy: false };
+}
+
 /** Read + parse JSON, or null if the file is missing. A parse failure (disk corruption / hand-edit) is
  *  preserved by renaming the bad file to `<file>.corrupt` so nothing is silently destroyed, then returns null. */
 function readJson<T>(file: string): T | null {

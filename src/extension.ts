@@ -8,7 +8,7 @@ import type { BraidConfig, ProviderConfig, CanvasConfig, LegacyFlatProviderConfi
 import { DEFAULT_PROVIDER_CONFIG, DEFAULT_CANVAS_CONFIG, migrateLegacyConfig } from './sdkOptions';
 import type { BraidSettings } from './engine/host';
 import { EngineHost } from './engine/host';
-import { FileGraphStore } from './persistence/graphStore';
+import { FileGraphStore, resolveGraphFallback } from './persistence/graphStore';
 import type { Canvas } from './persistence/graphStore';
 import { toCapabilitiesView } from './engine/capabilities';
 import { PROVIDER_CATALOG } from './protocol';
@@ -35,6 +35,19 @@ function projectCwd(): string {
 /** The file-backed graph store for the current project (under ~/.braid). */
 function graphStore(): FileGraphStore {
   return FileGraphStore.forProject(projectCwd());
+}
+
+/** Read a canvas's graph from the file store, falling back to the legacy VS Code workspaceState copy when
+ *  the file store has none — and writing it through to the file store (self-heal) so the dependency on the
+ *  old storage clears as canvases are opened. Compatibility net for a partially-completed bulk migration. */
+function readGraphFor(ctx: vscode.ExtensionContext, canvasId: string): SerializedGraph | null {
+  const store = graphStore();
+  const { graph, healFromLegacy } = resolveGraphFallback(
+    store.readGraph(canvasId),
+    ctx.workspaceState.get<SerializedGraph>(graphKey(canvasId)),
+  );
+  if (healFromLegacy && graph) store.writeGraph(canvasId, graph); // copy old → new
+  return graph;
 }
 
 // One webview panel per open canvas, and in-flight queries keyed by canvas+board so a board id
@@ -552,8 +565,9 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       break;
     }
     case 'ready': {
-      // webview mounted → hand back this canvas's persisted graph (or null if none).
-      const graph = graphStore().readGraph(canvasId);
+      // webview mounted → hand back this canvas's persisted graph (file store, with a legacy workspaceState
+      // fallback that self-heals into the file store — see readGraphFor). null if neither has it.
+      const graph = readGraphFor(context, canvasId);
       postTo(canvasId, { type: 'restored', graph });
       // Proactively populate the toolbar avatar/identity (fast `claude auth status`, no control session) so
       // the account shows on load — the user shouldn't have to open the Accounts panel to see who's signed in.

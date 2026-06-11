@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { FileGraphStore, encodeProjectKey, braidHome, type Canvas } from './graphStore';
+import { FileGraphStore, encodeProjectKey, braidHome, resolveGraphFallback, type Canvas } from './graphStore';
 import { GRAPH_VERSION } from '../webview/merge';
 import type { SerializedGraph } from '../webview/merge';
 
@@ -82,5 +82,25 @@ describe('FileGraphStore', () => {
     const s = store('/work/proj');
     s.saveCanvases([{ id: 'c1', name: 'Canvas 1' }]);
     expect(fs.existsSync(path.join(home, 'projects', encodeProjectKey('/work/proj'), 'canvases.json'))).toBe(true);
+  });
+});
+
+describe('resolveGraphFallback', () => {
+  const file = g(1);
+  const legacy = g(2);
+
+  it('prefers the file store and does not heal when the file copy exists', () => {
+    expect(resolveGraphFallback(file, undefined)).toEqual({ graph: file, healFromLegacy: false });
+    // even if a legacy copy also exists, the file store wins (no rewrite)
+    expect(resolveGraphFallback(file, legacy)).toEqual({ graph: file, healFromLegacy: false });
+  });
+
+  it('falls back to the legacy copy and flags a heal when the file store has none', () => {
+    expect(resolveGraphFallback(null, legacy)).toEqual({ graph: legacy, healFromLegacy: true });
+  });
+
+  it('returns null with no heal when neither copy exists', () => {
+    expect(resolveGraphFallback(null, undefined)).toEqual({ graph: null, healFromLegacy: false });
+    expect(resolveGraphFallback(null, null)).toEqual({ graph: null, healFromLegacy: false });
   });
 });
