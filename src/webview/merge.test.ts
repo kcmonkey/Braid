@@ -1092,71 +1092,86 @@ describe('settleRestoredSteps (M4 expire unanswered asks)', () => {
   });
 });
 
-describe('pickForkBase (Merge-LCA-Fork)', () => {
-  it('forks from the deepest sessioned shared node; a single-chain shared set leaves nothing uncovered', () => {
-    // root → 1 → 2 (branch A); root → 1 → 3 (branch B). shared = [root, 1] (a single chain).
+describe('pickForkBase (heaviest engine-compatible fork base — M-MultiEngine AD8)', () => {
+  // Now takes the MergeResult + turnEngine and returns { baseId, covered }: the HEAVIEST engine-compatible node
+  // in the selected lineage union (max contextTokens), not the deepest shared ancestor.
+  it('forks from the heaviest engine-compatible node (a branch leaf), covering its lineage', () => {
+    // root → 1 → 2 (branch A); root → 1 → 3 (branch B). '2' is the heaviest sessioned node.
     const nodes = [
-      node('root', 0, { sessionId: 'sroot' }), node('1', 1, { sessionId: 's1' }),
-      node('2', 2, { sessionId: 's2' }), node('3', 3, { sessionId: 's3' }),
+      node('root', 0, { sessionId: 'sroot', contextTokens: 100 }),
+      node('1', 1, { sessionId: 's1', contextTokens: 200 }),
+      node('2', 2, { sessionId: 's2', contextTokens: 999 }),
+      node('3', 3, { sessionId: 's3', contextTokens: 300 }),
     ];
     const edges = [forkEdge('root', '1'), forkEdge('1', '2'), forkEdge('1', '3')];
     const byId = byIdOf(nodes);
-    const shared = computeMerge(['2', '3'], edges, byId).shared;
-    expect(shared).toEqual(['root', '1']);
-    expect(pickForkBase(shared, byId, edges)).toEqual({ lcaId: '1', uncoveredShared: [] });
+    const base = pickForkBase(computeMerge(['2', '3'], edges, byId), byId, edges);
+    expect(base?.baseId).toBe('2');
+    expect([...(base?.covered ?? [])].sort()).toEqual(['1', '2', 'root']); // ancestorsOf('2') ∪ {2}
   });
 
-  it('skips shared nodes without a sessionId and forks from the deepest one that has one', () => {
-    // '1' never produced a session (e.g. interrupted) → can't fork from it; fall back to 'root'.
+  it('skips a foreign-engine candidate even if it is heavier (can not fork another engine\'s session)', () => {
+    // '2' (codex) is heaviest, but the turn runs on claude → choose the heaviest CLAUDE node ('3').
     const nodes = [
-      node('root', 0, { sessionId: 'sroot' }), node('1', 1), // no sessionId
-      node('2', 2, { sessionId: 's2' }), node('3', 3, { sessionId: 's3' }),
+      node('root', 0, { sessionId: 'sroot', contextTokens: 100 }),
+      node('1', 1, { sessionId: 's1', contextTokens: 200 }),
+      node('2', 2, { sessionId: 's2', contextTokens: 999, engine: 'codex' }),
+      node('3', 3, { sessionId: 's3', contextTokens: 300 }),
     ];
     const edges = [forkEdge('root', '1'), forkEdge('1', '2'), forkEdge('1', '3')];
     const byId = byIdOf(nodes);
-    const shared = computeMerge(['2', '3'], edges, byId).shared; // [root, 1]
-    // fork from root; '1' is not in root's lineage → must still be injected as text.
-    expect(pickForkBase(shared, byId, edges)).toEqual({ lcaId: 'root', uncoveredShared: ['1'] });
+    expect(pickForkBase(computeMerge(['2', '3'], edges, byId), byId, edges, 'claude')?.baseId).toBe('3');
   });
 
-  it('on a merge-DAG with two incomparable shared ancestors, forks from the deepest and leaves the other uncovered', () => {
-    // X and Y are BOTH common ancestors of leaf1 and leaf2, but neither is an ancestor of the other.
+  it('breaks weight ties by deeper seq (deterministic)', () => {
+    // root → A (seq 1) and root → B (seq 2), equal weight → deeper seq (B) wins.
     const nodes = [
-      node('X', 0, { sessionId: 'sX' }), node('Y', 1, { sessionId: 'sY' }),
-      node('leaf1', 2), node('leaf2', 3),
+      node('root', 0, { sessionId: 'sr', contextTokens: 100 }),
+      node('A', 1, { sessionId: 'sa', contextTokens: 500 }),
+      node('B', 2, { sessionId: 'sb', contextTokens: 500 }),
     ];
-    const edges = [
-      forkEdge('X', 'leaf1'), forkEdge('Y', 'leaf1'),
-      forkEdge('X', 'leaf2'), forkEdge('Y', 'leaf2'),
-    ];
+    const edges = [forkEdge('root', 'A'), forkEdge('root', 'B')];
     const byId = byIdOf(nodes);
-    const shared = computeMerge(['leaf1', 'leaf2'], edges, byId).shared;
-    expect(shared).toEqual(['X', 'Y']);
-    expect(pickForkBase(shared, byId, edges)).toEqual({ lcaId: 'Y', uncoveredShared: ['X'] });
+    expect(pickForkBase(computeMerge(['A', 'B'], edges, byId), byId, edges)?.baseId).toBe('B');
   });
 
-  it('returns null when no shared node has a session, or the shared set is empty', () => {
-    const nodes = [node('root', 0), node('1', 1), node('2', 2), node('3', 3)];
+  it('a compact node is forkable via its parentSessionId (the compacted session)', () => {
+    // root → K(compact) → A, K → B. K is heaviest and forkable through its parentSessionId.
+    const nodes = [
+      node('root', 0, { sessionId: 'sr', contextTokens: 100 }),
+      node('K', 1, { compact: true, parentSessionId: 'compacted', contextTokens: 800 }),
+      node('A', 2, { sessionId: 'sa', contextTokens: 200 }),
+      node('B', 3, { sessionId: 'sb', contextTokens: 300 }),
+    ];
+    const edges = [compactEdge('root', 'K'), forkEdge('K', 'A'), forkEdge('K', 'B')];
+    const byId = byIdOf(nodes);
+    const base = pickForkBase(computeMerge(['A', 'B'], edges, byId), byId, edges);
+    expect(base?.baseId).toBe('K');
+    expect(base?.covered.has('root')).toBe(true);
+  });
+
+  it('returns null when no engine-compatible sessioned node exists, or the union is empty', () => {
+    const nodes = [node('root', 0), node('1', 1), node('2', 2), node('3', 3)]; // no sessions
     const edges = [forkEdge('root', '1'), forkEdge('1', '2'), forkEdge('1', '3')];
-    const shared = computeMerge(['2', '3'], edges, byIdOf(nodes)).shared;
-    expect(pickForkBase(shared, byIdOf(nodes), edges)).toBeNull(); // none sessioned
-    expect(pickForkBase([], {}, [])).toBeNull();                   // no common ancestor
+    const byId = byIdOf(nodes);
+    expect(pickForkBase(computeMerge(['2', '3'], edges, byId), byId, edges)).toBeNull();
+    expect(pickForkBase({ shared: [], branches: [] }, {}, [])).toBeNull();
   });
 });
 
 describe('mergeFit (merge context-budget guard)', () => {
   it('fits when the estimated first-send input is within the window budget', () => {
     const nodes = [node('lca', 0, { sessionId: 's', contextTokens: 1000, contextWindow: 200000 }), node('a', 1), node('b', 2)];
-    const fit = mergeFit('short excerpt', { lcaId: 'lca' }, ['a', 'b'], byIdOf(nodes));
+    const fit = mergeFit('short excerpt', { baseId: 'lca' }, ['a', 'b'], byIdOf(nodes));
     expect(fit.fits).toBe(true);
     expect(fit.window).toBe(200000);
     expect(fit.budget).toBe(Math.round((200000 * MERGE_BUDGET_PCT) / 100));
   });
 
-  it('blocks when the LCA carried context + excerpt text would exceed the budget', () => {
-    // LCA session already near-full → even a modest excerpt pushes the estimate over budget.
+  it('blocks when the base carried context + excerpt text would exceed the budget', () => {
+    // base session already near-full → even a modest excerpt pushes the estimate over budget.
     const nodes = [node('lca', 0, { sessionId: 's', contextTokens: 195000, contextWindow: 200000 }), node('a', 1), node('b', 2)];
-    const fit = mergeFit('x'.repeat(60000), { lcaId: 'lca' }, ['a', 'b'], byIdOf(nodes)); // ~20K text tokens
+    const fit = mergeFit('x'.repeat(60000), { baseId: 'lca' }, ['a', 'b'], byIdOf(nodes)); // ~15K text tokens
     expect(fit.fits).toBe(false);
     expect(fit.estimated).toBeGreaterThan(fit.budget);
   });
@@ -1165,7 +1180,15 @@ describe('mergeFit (merge context-budget guard)', () => {
     const nodes = [node('a', 1, { contextWindow: 200000 }), node('b', 2, { contextWindow: 1000000 })];
     const fit = mergeFit('x'.repeat(60000), null, ['a', 'b'], byIdOf(nodes));
     expect(fit.window).toBe(1000000); // max of the two leaves
-    expect(fit.fits).toBe(true);      // ~20K text tokens ≪ 900K budget
+    expect(fit.fits).toBe(true);      // ~15K text tokens ≪ 900K budget
+  });
+
+  it('an explicit TARGET window overrides the measured one (cross-engine budget — AD5)', () => {
+    // base measures a 1M window, but the merge runs on a 200K target engine → budget against the target.
+    const nodes = [node('lca', 0, { sessionId: 's', contextTokens: 1000, contextWindow: 1_000_000 }), node('a', 1), node('b', 2)];
+    const fit = mergeFit('x'.repeat(800_000), { baseId: 'lca' }, ['a', 'b'], byIdOf(nodes), 200_000);
+    expect(fit.window).toBe(200_000);
+    expect(fit.fits).toBe(false); // ~200K text + 1K ≫ 180K budget
   });
 
   it('fails open (does not block) when the window is unknown — never block on a guess', () => {
@@ -1173,6 +1196,29 @@ describe('mergeFit (merge context-budget guard)', () => {
     const fit = mergeFit('x'.repeat(10_000_000), null, ['a', 'b'], byIdOf(nodes));
     expect(fit.window).toBe(0);
     expect(fit.fits).toBe(true);
+  });
+});
+
+describe('M-MultiEngine engine attribution + guards', () => {
+  it('boardEngine defaults to claude when unset, else returns the tag', () => {
+    expect(boardEngine({})).toBe('claude');
+    expect(boardEngine({ engine: 'codex' })).toBe('codex');
+  });
+
+  it('fuseEligibility blocks a cross-engine adjacent fork pair, allows a same-engine one', () => {
+    const edges = [forkEdge('P', 'C')];
+    const cross = [node('P', 1, { sessionId: 'sp' }), node('C', 2, { sessionId: 'sc', engine: 'codex' })];
+    expect(fuseEligibility(edges, 'P', 'C', byIdOf(cross))).toBeNull(); // claude × codex → blocked
+    const same = [node('P', 1, { sessionId: 'sp' }), node('C', 2, { sessionId: 'sc' })];
+    expect(fuseEligibility(edges, 'P', 'C', byIdOf(same))).toEqual({ ancestorId: 'P', descendantId: 'C' });
+  });
+
+  it('continuationMode keeps the legacy base when the graph parent is a foreign engine', () => {
+    // parent ran on codex; a claude continuation can't spine/branch its session → legacy fork base.
+    const parent = node('P', 1, { sessionId: 'sp', engine: 'codex' });
+    const child = node('C', 2, { parentSessionId: 'anchor-session' });
+    const edges = [forkEdge('P', 'C')];
+    expect(continuationMode(child, [parent, child], edges, 'claude')).toEqual({ fork: true });
   });
 });
 

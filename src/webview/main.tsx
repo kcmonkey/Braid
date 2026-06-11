@@ -69,6 +69,11 @@ const Markdown = React.memo(function Markdown({ text }: { text: string }) {
 });
 
 // Tools whose `file_path` input names a workspace file the user can open in the editor.
+// M-MultiEngine (Phase 3): show a per-board engine badge ONLY when more than one provider is actually
+// implemented — so today (Claude-only) it never renders (a true no-op). Once a 2nd engine ships, a board
+// that ran on a non-active engine reads honestly instead of the toolbar's active provider implying it.
+const MULTI_PROVIDER = PROVIDER_CATALOG.filter((p) => p.implemented).length > 1;
+
 const FILE_TOOLS = new Set(['Read', 'Edit', 'Write', 'NotebookEdit']);
 // The file_path this step references, or '' if none — used to render an open-in-editor link.
 function stepFile(step: ToolStep): string {
@@ -1200,6 +1205,12 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
       {lod !== 'far-far' && <TagChips tags={data.tags} />}
       <div className="board__head">
         <span className="board__turn" title={turnBadge.title}>{turnBadge.icon}</span>
+        {/* Per-board engine badge — gated to multi-provider (no-op today); reads board.engine, not the toolbar's
+            active provider, so an in-flight board never mis-attributes after a switch. (M-MultiEngine Phase 3) */}
+        {MULTI_PROVIDER && isDetail && (() => {
+          const p = PROVIDER_CATALOG.find((x) => x.id === boardEngine(data));
+          return p ? <span className="board__engine" style={{ color: p.accent }} title={`Ran on ${p.name}`}>● {p.name}</span> : null;
+        })()}
         {/* far-far: tags inline in the thin head row (the board is a slim bar; the summary floats above it). */}
         {lod === 'far-far' && <TagChips tags={data.tags} />}
         {/* Multi-turn board: M11 in-board follow-ups or an M12 fusion — show how many rounds it holds. */}
