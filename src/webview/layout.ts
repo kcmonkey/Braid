@@ -140,49 +140,18 @@ export function graphTopLeft(nodes: BoardNodeT[]): { x: number; y: number } {
  *  - else → pin the graph's bounding-box top-left, so an unselected repack holds its position instead of
  *    snapping to (0,0). (Fixes the "dramatic drift on re-arrange" where the graph had drifted off-origin
  *    via accumulated selected-anchor translations.)
- * `anchorPrevSize` (optional): the selected board's measured size BEFORE this relayout. When its width
- * differs from the board's current width — a far↔detail LOD flip — the selected board is pinned by its
- * horizontal CENTER but TOP edge, so it grows symmetrically left+right yet still flows DOWNWARD (taller
- * detail content doesn't shove the board up — a large upward jump read as the viewport lurching). Omit it
- * (or pass an equal width) to keep the plain top-left pin (height-only growth like streaming, and all
- * structural relayouts).
  * Pure: the viewport is not involved; callers feed the current nodes and apply the returned positions.
+ * Note: the selected board's far↔detail width grow is CENTERED separately, pre-paint, by main.tsx's
+ * detail-centering layout effect (a constant horizontal nudge synchronized with the CSS width change), so
+ * this function keeps the simple top-left pin — it must NOT also recenter, or the two would compound.
  */
 export function relayoutAnchored(
   nodes: BoardNodeT[], edges: Edge[], dir: LayoutDir, selectedId: string | null,
-  anchorPrevSize?: { width: number; height: number },
 ): BoardNodeT[] {
   const laid = layoutGraph(nodes, edges, dir);
   if (!nodes.length) return laid;
-
-  let before: { x: number; y: number } | undefined;
-  let after: { x: number; y: number } | undefined;
-  if (selectedId) {
-    const cur = nodes.find((n) => n.id === selectedId);
-    const laidSel = laid.find((n) => n.id === selectedId);
-    if (cur && laidSel) {
-      const newW = cur.measured?.width ?? NODE_W;
-      // When the selected board CHANGED WIDTH since the last layout — a far→detail LOD flip that grew it
-      // (320→480) or the reverse — pin its horizontal CENTER so it enlarges/shrinks symmetrically left+right
-      // instead of from the left edge. But keep the TOP pinned VERTICALLY: detail boards are much taller, so
-      // centering the height would shove the board UPWARD by ~Δheight/2 (100–200px) — that big jump read as
-      // the viewport lurching. Pinning the top makes the taller detail content grow DOWNWARD in place (same
-      // as streaming / the old behavior), with only the symmetric width change. Otherwise (width unchanged —
-      // e.g. streaming content growing only the HEIGHT) pin the full TOP-LEFT. `anchorPrevSize` is the
-      // board's measured size BEFORE this change; when absent (structural relayouts that don't pass it) or
-      // width-unchanged, the +width/2 terms cancel out and this is exactly the old top-left pin.
-      if (anchorPrevSize && anchorPrevSize.width !== newW) {
-        before = { x: cur.position.x + anchorPrevSize.width / 2, y: cur.position.y };
-        after = { x: laidSel.position.x + newW / 2, y: laidSel.position.y };
-      } else {
-        before = cur.position;
-        after = laidSel.position;
-      }
-    }
-  } else {
-    before = graphTopLeft(nodes);
-    after = graphTopLeft(laid);
-  }
+  const before = selectedId ? nodes.find((n) => n.id === selectedId)?.position : graphTopLeft(nodes);
+  const after = selectedId ? laid.find((n) => n.id === selectedId)?.position : graphTopLeft(laid);
   if (!before || !after) return laid;
   const dx = before.x - after.x, dy = before.y - after.y;
   if (!dx && !dy) return laid;

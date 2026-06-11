@@ -151,33 +151,4 @@ describe('relayoutAnchored', () => {
   it('returns the laid graph unchanged for an empty set', () => {
     expect(relayoutAnchored([], [], 'TB', null)).toEqual([]);
   });
-
-  // far→detail: the selected board grew wider (320→480) and taller (200→400). With its PRE-grow size passed,
-  // it must be pinned by its horizontal CENTER (symmetric left+right width grow) but keep its TOP fixed, so
-  // the taller detail content grows DOWNWARD in place — NOT shoved upward (which read as a viewport lurch).
-  // (user: "make the anchor centered" + "the viewport seems move a bit ... unpleasant")
-  it('centers the selected board horizontally but pins its top across a width change', () => {
-    const a = node('a');
-    const b: BoardNodeT = { ...node('b'), measured: { width: 480, height: 400 } }; // already grown to detail
-    const laid = layoutGraph([a, b], edges);
-    const beforeB = at(laid, 'b');
-    const out = relayoutAnchored(laid, edges, 'TB', 'b', { width: 320, height: 200 });
-    const afterB = at(out, 'b');
-    // horizontal center preserved (was-far center 320/2, now-detail center 480/2 land on the same x):
-    expect(afterB.x + 480 / 2).toBeCloseTo(beforeB.x + 320 / 2, 5);
-    // top edge held — NO upward shift (the board grows downward, not centered vertically):
-    expect(afterB.y).toBeCloseTo(beforeB.y, 5);
-    expect(afterB.x).not.toBeCloseTo(beforeB.x, 5); // ... and it's not the old top-left pin (x did move)
-  });
-
-  // Streaming: only the HEIGHT changed (content arriving), width is constant. Then the board must keep its
-  // top-left pinned (new content flows downward in reading order) — recentering here would jitter the graph.
-  it('keeps the top-left pin when only the height changed (streaming grows downward)', () => {
-    const a = node('a');
-    const b: BoardNodeT = { ...node('b'), measured: { width: 480, height: 600 } }; // taller, same width as prev
-    const laid = layoutGraph([a, b], edges);
-    const beforeB = at(laid, 'b');
-    const out = relayoutAnchored(laid, edges, 'TB', 'b', { width: 480, height: 320 }); // prev width === new width
-    expect(at(out, 'b')).toEqual(beforeB); // top-left held, no recentering
-  });
 });
