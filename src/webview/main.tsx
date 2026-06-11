@@ -2476,10 +2476,6 @@ function App() {
   const pickDir = (): LayoutDir => (window.innerWidth >= window.innerHeight ? 'LR' : 'TB');
   const [dir, setDir] = useState<LayoutDir>(() => pickDir());
   const dirRef = useRef<LayoutDir>(dir);
-  // Each board's measured size (w×h) as of the LAST applied auto-layout. The size-driven relayout reads it
-  // to center the selected board's far↔detail grow (relayoutAnchored's anchorPrevSize) — updated only when
-  // a relayout runs, so the debounce can't lose the pre-grow width across coalesced measure frames.
-  const laidSizesRef = useRef<Map<string, { width: number; height: number }>>(new Map());
   // Layout uses each node's REAL measured height (detail-expanded boards are tall, far gists are short),
   // so the graph packs compactly and reflows whenever the selection (→ which boards are detail) changes.
   const autoLayout = useCallback((ns: BoardNodeT[], es: Edge[]) => {
@@ -3560,24 +3556,16 @@ function App() {
     .join('|');
   useEffect(() => {
     if (!hydratedRef.current) return;
-    const t = setTimeout(() => {
-      // Read the snapshot the relayout will run on (kept in sync with `nodes` by the ref effect). The
-      // selected board's size AS OF THE LAST APPLIED LAYOUT lets relayoutAnchored center its far↔detail
-      // grow (pin the middle, not the top-left, so it enlarges symmetrically). laidSizes is updated only
-      // HERE (when a relayout actually runs), so the debounce coalescing many intermediate measure frames
-      // can never lose the pre-grow (far) width — every cancelled frame leaves it untouched.
-      const ns0 = nodesRef.current;
-      const sel = ns0.find((n) => n.selected);
-      const prevSel = sel ? laidSizesRef.current.get(sel.id) : undefined;
-      laidSizesRef.current = new Map(ns0.map((n) => [n.id, { width: n.measured?.width ?? 0, height: n.measured?.height ?? 0 }]));
+    const t = setTimeout(() => setNodes((ns) => {
       // Repack via dagre, then translate the WHOLE graph so it stays put on screen (the viewport is never
       // touched here). A SELECTED board pins itself — its lineage expanding (fisheye) reflows the OTHERS
       // around it and the board you clicked never slides to the edge. With NO selection we pin the graph's
       // bounding-box top-left instead of letting layoutGraph's origin-normalization snap it back to (0,0):
       // the graph can have drifted off-origin (accumulated selected-anchor translations), and snapping it
       // to the origin while the viewport sits elsewhere is what flung every node off-canvas. (decisions.md)
-      setNodes((ns) => relayoutAnchored(ns, edgesRef.current, dirRef.current, sel?.id ?? null, prevSel));
-    }, RELAYOUT_DEBOUNCE_MS);
+      const selectedId = ns.find((n) => n.selected)?.id ?? null;
+      return relayoutAnchored(ns, edgesRef.current, dirRef.current, selectedId);
+    }), RELAYOUT_DEBOUNCE_MS);
     return () => clearTimeout(t);
   }, [sizeSig]);
 
