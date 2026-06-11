@@ -2129,9 +2129,10 @@ function McpServerRow({ s, busy, onReconnect }: { s: McpServerInfo; busy: boolea
     </div>
   );
 }
-function McpPanel({ servers, busy, onReconnect, onClose }: {
+function McpPanel({ servers, busy, mcpInTurns, onReconnect, onClose }: {
   servers: McpServerInfo[] | null;
   busy: string[];
+  mcpInTurns: boolean;
   onReconnect: (name: string) => void;
   onClose: () => void;
 }) {
@@ -2143,6 +2144,15 @@ function McpPanel({ servers, busy, onReconnect, onClose }: {
           <h2>MCP servers</h2>
           <button className="mcp-panel__x" title="Close" onClick={onClose}>×</button>
         </div>
+        {/* Honesty banner: when MCP is off for turns, the servers below may connect but the agent can't call
+            their tools — keep the panel from implying they're usable in conversations. (gap #4 / mcpEnabled) */}
+        {!mcpInTurns && (
+          <div className="mcp-panel__warn">
+            MCP tools are <strong>off for conversations</strong> (kept off for faster turns). Servers may still
+            show “connected” here, but the agent won’t call their tools until you enable
+            <strong> “Load MCP in turns”</strong> in ⚙ Settings.
+          </div>
+        )}
         <div className="mcp-panel__body">
           {servers === null ? (
             <div className="mcp-panel__empty">Detecting…</div>
@@ -2618,9 +2628,9 @@ function App() {
   const [accounts, setAccounts] = useState<Partial<Record<EngineId, { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }>>>({});
   // Claude API-key auth status per provider (secret-safe: presence + last-4 hint + ambient-env detection).
   const [apiKeyStatus, setApiKeyStatus] = useState<Partial<Record<EngineId, ApiKeyStatus>>>({});
-  // Passive usage snapshots keyed by provider. The host filters stale provider events before posting; the
-  // webview stores the snapshot under the active provider at receipt time so switching providers keeps each
-  // provider's last known usage chip state separate. (M-Codex)
+  // Passive usage snapshots keyed by provider (each stamped by its adapter): the chip shows the ACTIVE
+  // provider's, so a Codex turn's snapshot never displays under the Claude chip (or vice versa). The host
+  // ALSO filters stale-provider events before posting (defense in depth) — keying still uses the stamp. (M-Codex)
   const [rateLimits, setRateLimits] = useState<Partial<Record<EngineId, RateLimitSnapshot>>>({});
   // Composer autofill (workspace-level): the host-served slash-command list + latest `@`-file search reply.
   // `searchFiles` debounces the host round-trip; the reply echoes its query so the menu drops stale results.
@@ -3667,7 +3677,7 @@ function App() {
         case 'apiKeyStatus':
           setApiKeyStatus((prev) => ({ ...prev, [m.provider]: { stored: m.stored, hint: m.hint, envDetected: m.envDetected, envHint: m.envHint } }));
           break;
-        case 'rateLimit': setRateLimits((prev) => ({ ...prev, [activeProviderRef.current]: m.snapshot })); break;
+        case 'rateLimit': setRateLimits((prev) => ({ ...prev, [m.snapshot.provider ?? 'claude']: m.snapshot })); break;
         case 'model': setResolvedModel(m.model); break;
         case 'slashCommands': setSlashCommands(m.commands); break;
         case 'fileResults': setFileResults({ query: m.query, files: m.files }); break;
@@ -4486,6 +4496,7 @@ function App() {
         <McpPanel
           servers={mcpServers}
           busy={mcpBusy}
+          mcpInTurns={!!config?.mcpEnabled}
           onReconnect={(name) => post({ type: 'mcpReconnect', name })}
           onClose={toggleMcpPanel}
         />

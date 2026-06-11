@@ -214,6 +214,11 @@ export interface AuthResult { ok: boolean; model?: string; error?: string; sdkFa
 
 export interface Engine {
   readonly id: EngineId;
+  // Whether this engine supports warm-session reuse: holding the streaming-input session open after a turn
+  // settles (TurnRequest.warmSession) AND accepting a route-tagged `push` that streams a continuation to a
+  // DIFFERENT board on the same session. The host reads this synchronously in the turn hot-path to gate
+  // warm-hold + spine-continuation reuse; an engine that lacks either half must return false. (warm reuse)
+  readonly warmReuse: boolean;
   capabilities(): Promise<EngineCapabilities>;
   // Drives the whole multi-turn burst; the host awaits it (the loop runs to completion) and registers the
   // live handle via ctl.onLive. Resolves when the burst ends (host then clears aborters/liveQueries).

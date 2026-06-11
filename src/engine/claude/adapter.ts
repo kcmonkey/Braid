@@ -83,6 +83,10 @@ function userMessage(prompt: string, images?: ImageInput[]): any {
 
 export class ClaudeAdapter implements Engine {
   readonly id = 'claude' as const;
+  // Warm-session reuse is implemented here (hold-open after settle + route-aware cross-board `push`). The host
+  // reads this SYNCHRONOUSLY in the turn hot-path to decide whether to keep the session warm / reuse it for a
+  // spine continuation — like `id` / `compact.mode`, a static per-engine flag, not user-facing capability data.
+  readonly warmReuse = true;
   constructor(private readonly deps: ClaudeAdapterDeps) {}
 
   /**
@@ -320,7 +324,7 @@ export class ClaudeAdapter implements Engine {
             case 'toolUse': sink.toolUse(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
             case 'toolResult': sink.toolResult(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
             case 'task': sink.task(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
-            case 'rateLimit': sink.rateLimit(e.snapshot); break;
+            case 'rateLimit': sink.rateLimit({ ...e.snapshot, provider: this.id }); break;
             case 'commands': sink.commands(e.commands); break;
             case 'result':
               // interrupted turn ends as error_during_execution/is_error — the user's send-now cut, NOT a
@@ -361,6 +365,14 @@ export class ClaudeAdapter implements Engine {
       else if (!turnSettled) sink.error(activeRoute.boardId, activeRoute.turnIndex, String(e?.message ?? e));
     } finally {
       closed = true; cancelIdle(); wakeUp();
+      // A warm session shared by a continuation chain can be torn down (abort / delete / config-change dispose)
+      // while a cross-board continuation still sits QUEUED — it never got a turn, so its board would otherwise
+      // hang in 'streaming' forever. Surface each stranded routed message on its OWN board so it settles
+      // (principle 11). Same-board follow-ups (no route) are handled webview-side (dropQueuedTurns).
+      for (const item of queue) {
+        if (item.route) sink.error(item.route.boardId, item.route.turnIndex, 'Session closed before this queued turn ran.');
+      }
+      queue.length = 0;
     }
   }
 

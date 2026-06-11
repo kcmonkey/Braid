@@ -152,6 +152,10 @@ function retireLiveRunsForCanvas(canvasId: string) {
 }
 
 function clearWaitingForRun(run: LiveRun) {
+  // A warm run's session closing clears the `waiting` hold on EVERY board that shared it (the run may span a
+  // continuation chain, so the primary board's own finalize isn't enough). turnIndex is informational here —
+  // the webview's `waiting` handler matches by boardId only (status flips per board, not per round) — so 0 is
+  // fine even for a multi-round board.
   const prefix = run.canvasId + '::';
   for (const key of run.keys) {
     if (!key.startsWith(prefix)) continue;
@@ -1511,8 +1515,12 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
   }
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   const runProvider = msg.engine && engineHost.has(msg.engine) ? msg.engine : DEFAULT_ACTIVE_PROVIDER;
+  // Warm reuse is gated on the engine supporting it (route-aware push + hold-open). Engines without it (Codex)
+  // never keep a warm session AND ignore the per-continuation route, so reusing one would misroute a spine
+  // continuation's output to the parent board. (warmReuse capability — see ClaudeAdapter/CodexAdapter)
+  const warmReuse = engineHost.get(runProvider).warmReuse;
   const k = aKey(canvasId, msg.boardId);
-  if (msg.resume && !msg.fork) {
+  if (warmReuse && msg.resume && !msg.fork) {
     const warm = liveRunsBySession.get(liveSessionKey(runProvider, msg.resume));
     if (warm?.handle && !warm.retired && warm.canvasId === canvasId && warm.cwd === cwd && !warm.abort.signal.aborted) {
       registerLiveKey(warm, k);
@@ -1544,7 +1552,9 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
     // wakeups, capped by the configured idle timeout (minutes → ms). (AD5)
     asyncContinuation: canvas.asyncContinuationEnabled,
     idleCapMs: Math.max(1, canvas.asyncContinuationIdleCapMin) * 60_000,
-    warmSession: canvas.warmSessionEnabled,
+    // Only hold open for engines that implement warm reuse — otherwise the flag is dead weight (Codex closes
+    // on queue-drain regardless) and could falsely advertise a reusable session in liveRunsBySession.
+    warmSession: canvas.warmSessionEnabled && warmReuse,
     warmIdleMs: Math.max(1, canvas.warmSessionIdleCapMin) * 60_000,
   };
   try {

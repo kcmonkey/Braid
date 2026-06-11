@@ -75,6 +75,10 @@ function buildUserInput(prompt: string, images?: ImageInput[]): { input: any[]; 
 
 export class CodexAdapter implements Engine {
   readonly id = 'codex' as const;
+  // No warm-session reuse: this adapter closes the thread when the queue drains and its `push` ignores the
+  // per-continuation route (all output → req.boardId). The host must NOT keep it warm or reuse it for a
+  // cross-board spine continuation, or output would misroute. (warmReuse gate — see ClaudeAdapter)
+  readonly warmReuse = false;
   constructor(private readonly deps: CodexAdapterDeps) {}
 
   private bin(): string { return this.deps.resolveBinary() || 'codex'; }
@@ -173,7 +177,7 @@ export class CodexAdapter implements Engine {
           case 'thinking': sink.thinking(req.boardId, e.turnIndex, e.thinks); break;
           case 'toolUse': sink.toolUse(req.boardId, e.turnIndex, e.ev); break;
           case 'toolResult': sink.toolResult(req.boardId, e.turnIndex, e.ev); break;
-          case 'rateLimit': sink.rateLimit(e.snapshot); break;
+          case 'rateLimit': sink.rateLimit({ ...e.snapshot, provider: this.id }); break;
           case 'result':
             settle(e.isError && !interrupted);
             if (resolveTurnEnd) { const r = resolveTurnEnd; resolveTurnEnd = null; r(); }
