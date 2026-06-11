@@ -546,6 +546,43 @@ function TurnBody({ data }: {
   return <>{nodes}</>;
 }
 
+// The user's question for a turn. A long prompt would otherwise dominate the conversation as one giant
+// pinned block, so once it overflows ~6 lines we clamp it (with a fade) and offer an icon-only chevron to
+// expand/collapse. Overflow is MEASURED (scrollHeight vs the clamped clientHeight) rather than guessed from
+// a character count, so it works the same for CJK and Latin text and re-checks when the view is resized.
+function QuestionBox({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  // Measure only while collapsed — the clamp must be applied for scrollHeight>clientHeight to mean anything.
+  // When expanded the clamp is gone (they'd read equal), so we keep the last collapsed verdict. Re-runs on
+  // text change and on collapse; a ResizeObserver re-measures when the focus view's width (line wrap) changes.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => { if (!expanded) setOverflows(el.scrollHeight - el.clientHeight > 2); };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text, expanded]);
+  const collapsed = !expanded;
+  const cls = `turn__q-text${collapsed ? ' turn__q-text--clamp' : ''}${overflows && collapsed ? ' turn__q-text--faded' : ''}`;
+  return (
+    <>
+      <div ref={ref} className={cls}>{text}</div>
+      {overflows && (
+        <button
+          className="turn__q-toggle nodrag nopan"
+          onClick={() => setExpanded((v) => !v)}
+          title={expanded ? 'Collapse question' : 'Show full question'}
+          aria-label={expanded ? 'Collapse question' : 'Show full question'}
+        >{expanded ? '▴' : '▾'}</button>
+      )}
+    </>
+  );
+}
+
 // One rendered conversation turn: the question, then the answer (thinking indicator + tool-interleaved
 // body + a live "working" pulse while streaming). Used for a normal board's single round AND for each
 // round of a fused multi-turn board (M12). `body` is the minimal shape TurnBody needs.
@@ -563,7 +600,7 @@ function TurnView({ boardId, prompt, body }: {
   return (
     <div className={`turn turn--${body.status}`} data-board-id={boardId}>
       <div className="turn__q">
-        <span className="turn__q-text">{prompt}</span>
+        <QuestionBox text={prompt} />
       </div>
       <div className="turn__a">
         <span className="turn__rail" aria-hidden />
@@ -1757,6 +1794,7 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
   activeProvider: EngineId;
   providerCaps: Partial<Record<EngineId, ProviderCapabilitiesView>>;
   onSetActive: (id: EngineId) => void;
+  onOpenAccount?: () => void; // when set, the spine shows an "Account ↗" link → the Accounts overlay
 }) {
   const [append, setAppend] = useState(() => config.appendSystemPrompt);
   const [allowed, setAllowed] = useState(() => listToText(config.allowedTools));
@@ -2039,7 +2077,11 @@ function formatReset(iso?: string | null): string {
 
 // Shared active-provider selector. Only implemented (registered) providers are selectable; unbuilt ones
 // render disabled (their engine doesn't exist yet). Switching posts `setActiveProvider`.
-function ProviderSpine({ activeProvider, onSetActive }: { activeProvider: EngineId; onSetActive: (id: EngineId) => void }) {
+function ProviderSpine({ activeProvider, onSetActive, onAccount }: {
+  activeProvider: EngineId;
+  onSetActive: (id: EngineId) => void;
+  onAccount?: () => void; // when set, render an "Account ↗" cross-link (jumps to the Accounts overlay)
+}) {
   return (
     <div className="spine">
       <span className="spine__lbl">Provider</span>
@@ -2057,6 +2099,12 @@ function ProviderSpine({ activeProvider, onSetActive }: { activeProvider: Engine
           </button>
         ))}
       </div>
+      {onAccount && (
+        <>
+          <span className="spine__spacer" />
+          <button type="button" className="spine__xlink" onClick={onAccount} title="Open the Accounts panel (identity, plan usage, sign in/out)">Account ↗</button>
+        </>
+      )}
     </div>
   );
 }

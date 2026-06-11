@@ -739,14 +739,27 @@ body {
    indented to the right under the rail. */
 .chatview .turn__q {
   position: sticky; top: 0; z-index: 5;
-  display: flex; margin: 8px 0 0; padding: 7px 13px;
+  display: flex; align-items: flex-start; gap: 6px; margin: 8px 0 0; padding: 7px 13px;
   background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
   box-shadow: 0 3px 10px rgba(0,0,0,.3);
 }
 .chatview .turn__q-text {
-  flex: 1; font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.45;
+  flex: 1; position: relative; font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.45;
   white-space: pre-wrap; word-break: break-word;
 }
+/* A long question is clamped to ~6 lines by default so it doesn't dominate the thread; the chevron toggles
+   the full text. (max-height only caps — short questions are unaffected and show no fade/toggle.) */
+.chatview .turn__q-text--clamp { max-height: 118px; overflow: hidden; }
+.chatview .turn__q-text--faded::after {
+  content: ''; position: absolute; left: 0; right: 0; bottom: 0; height: 30px;
+  background: linear-gradient(to bottom, transparent, var(--panel)); pointer-events: none;
+}
+.chatview .turn__q-toggle {
+  flex: none; align-self: flex-start; margin-top: 1px;
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 11px; line-height: 1; padding: 3px 5px; border-radius: 5px;
+}
+.chatview .turn__q-toggle:hover { color: var(--text); background: var(--panel-2); }
 .chatview .turn__a { position: relative; padding: 10px 2px 16px 28px; }
 .chatview .turn__a .msg__role { font-size: 10px; margin-bottom: 4px; }
 .chatview .turn__a .msg__text { font-size: 13px; line-height: 1.72; }
