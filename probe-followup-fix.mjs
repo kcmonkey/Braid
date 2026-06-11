@@ -21,7 +21,7 @@ const userMessage = (p) => ({ type: 'user', message: { role: 'user', content: p 
 const hasPending = () => latestPending.background.length > 0 || latestPending.crons.length > 0;
 
 async function* input() {
-  yield userMessage('Start this command IN THE BACKGROUND (run_in_background:true), do NOT wait: `node -e "setTimeout(()=>console.log(1),6000)"`. Report the task id and end your turn.');
+  yield userMessage('Start this command IN THE BACKGROUND (run_in_background:true) and do NOT wait for it: `node -e "setTimeout(()=>console.log(1),6000)"`. Report the background task id, then end your turn. Do not block on it.');
   while (!closed) {
     // FIXED: also hold while pending async (a continuation is imminent → not a safe input boundary).
     const holdForAsync = MODE === 'fixed' && hasPending();
@@ -38,7 +38,7 @@ async function* input() {
 }
 
 const options = {
-  cwd, includePartialMessages: true, permissionMode: 'bypassPermissions',
+  cwd, model: 'claude-opus-4-8', includePartialMessages: true, permissionMode: 'bypassPermissions',
   hooks: { Stop: [{ hooks: [async (h) => {
     latestPending = {
       background: Array.isArray(h?.background_tasks) ? h.background_tasks.map((t) => ({ id: t.id })) : [],
