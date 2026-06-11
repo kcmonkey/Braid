@@ -10,7 +10,7 @@ import type { BraidSettings } from './engine/host';
 import { EngineHost } from './engine/host';
 import { toCapabilitiesView } from './engine/capabilities';
 import { PROVIDER_CATALOG } from './protocol';
-import type { EngineId, ProviderCapabilitiesView } from './protocol';
+import type { EngineId, ProviderCapabilitiesView, ProviderAccount } from './protocol';
 import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry, resolveClaudeBinaryFromEntry } from './runtime/sdk-provision';
 import { ensureSdkInstalled } from './runtime/sdk-download';
 import type { EventSink, PreToolInterceptor, PreToolDecision, PermissionVerdict, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
@@ -80,6 +80,9 @@ const mcpControls = new Map<string, McpController>();
 // Accounts panel: one lazily-created account/usage control session per canvas (twin of mcpControls).
 // Created on `accountOpen`, disposed on `accountClose` / panel dispose — so it never idle-runs.
 const accountControls = new Map<string, AccountController>();
+// In-flight sign-in AbortControllers, keyed by canvas — aborted when the panel closes so a stuck OAuth
+// wait is canceled promptly (and never leaves the card spinning "Working…").
+const accountAuthAborts = new Map<string, AbortController>();
 
 // Composer autofill: the active provider's slash commands, cached for the workspace (cwd is fixed =
 // workspaceFolders[0]). Fetched lazily on the first `getSlashCommands`; replaced on a live `commands_changed`
@@ -947,12 +950,17 @@ async function refreshAccount(canvasId: string) {
   const ctrl = accountControls.get(canvasId);
   if (!ctrl) return;
   const provider = readSettings().activeProvider;
+  let lastAccount: ProviderAccount | null = null;
   for (let i = 0; i < ACCOUNT_POLL_TRIES; i++) {
     if (accountControls.get(canvasId) !== ctrl) return; // disposed or replaced mid-poll
     const [account, usage] = await Promise.all([ctrl.info(), ctrl.usage()]);
     if (accountControls.get(canvasId) !== ctrl) return; // disposed during the await
-    postTo(canvasId, { type: 'account', provider, account, usage, busy: ctrl.busy.size > 0 });
-    if (usage && usage.windows.length > 0) break; // got real usage → stop polling
+    // A transient null (a stalled control request that timed out) must not blank a confirmed identity —
+    // keep the last good account so the panel doesn't flicker back to "not signed in" mid-poll.
+    if (account) lastAccount = account;
+    const shown = account ?? lastAccount;
+    postTo(canvasId, { type: 'account', provider, account: shown, usage, busy: ctrl.busy.size > 0 });
+    if (shown && usage && usage.windows.length > 0) break; // got identity + real usage → stop polling
     await new Promise((r) => setTimeout(r, ACCOUNT_POLL_INTERVAL_MS));
   }
 }
@@ -961,21 +969,33 @@ async function refreshAccount(canvasId: string) {
 async function accountAuth(canvasId: string, action: 'in' | 'out') {
   const ctrl = accountControls.get(canvasId);
   if (!ctrl) return;
+  const abort = new AbortController();
+  accountAuthAborts.set(canvasId, abort);
   try {
     if (action === 'in') {
-      const abort = new AbortController();
       await ctrl.signIn((url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); }, abort.signal);
     } else {
       await ctrl.signOut();
     }
   } catch (e: any) {
     console.error('[Braid] account auth failed:', e?.message ?? e);
+  } finally {
+    accountAuthAborts.delete(canvasId);
   }
-  if (accountControls.get(canvasId) === ctrl) await refreshAccount(canvasId);
+  // The long-lived control session was spawned BEFORE this auth change, so its identity view is now stale
+  // (it would still report the old signed-in/out state). Recreate it so the post-auth refresh reflects
+  // reality — this is what makes a sign-out actually show "not signed in" (and a sign-in show identity).
+  if (accountControls.get(canvasId) === ctrl && panels.has(canvasId)) {
+    ctrl.dispose();
+    accountControls.delete(canvasId);
+    await openAccount(canvasId); // creates a fresh session, then refreshes
+  }
 }
 
-/** Accounts panel closed (or canvas disposed) → tear down the control session. */
+/** Accounts panel closed (or canvas disposed) → cancel any in-flight sign-in, then tear down the session. */
 function closeAccount(canvasId: string) {
+  accountAuthAborts.get(canvasId)?.abort();
+  accountAuthAborts.delete(canvasId);
   const ctrl = accountControls.get(canvasId);
   if (ctrl) { ctrl.dispose(); accountControls.delete(canvasId); }
 }

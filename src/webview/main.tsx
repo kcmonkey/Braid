@@ -2118,11 +2118,16 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive }: {
   onSignOut: (id: EngineId) => void;
   onSetActive: (id: EngineId) => void;
 }) {
+  const checked = snap !== undefined; // host has pushed at least one account snapshot for this provider
   const acct = snap?.account ?? null;
   const usage = snap?.usage ?? null;
   const busy = !!snap?.busy;
   const signedIn = !!acct?.signedIn;
   const isActive = active && signedIn;
+  // Distinguish "still checking the subscription" (panel just opened, first fetch in flight) from
+  // "checked → not signed in". Without this the card shows a false "Not signed in." for the ~1-2s before
+  // the first account push lands — which reads as truth and prompts a needless (stuck-prone) sign-in.
+  const loading = p.implemented && !checked && !busy;
   return (
     <div className={`pcard ${isActive ? 'pcard--active' : ''} ${p.implemented ? '' : 'pcard--off'}`}>
       <div className="pcard__head">
@@ -2132,11 +2137,13 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive }: {
         <span className="pcard__spacer" />
         {isActive
           ? <span className="badge badge--active">◆ Active</span>
-          : signedIn ? null : <span className="badge badge--setup">not set up</span>}
+          : signedIn || loading ? null : <span className="badge badge--setup">not set up</span>}
       </div>
       <div className="pcard__body">
         {busy ? (
-          <div className="pcard__busy"><span className="working__dot" /> Working… a browser window may open to authorize.</div>
+          <div className="pcard__busy"><span className="working__dot" /> Working…</div>
+        ) : loading ? (
+          <div className="pcard__busy"><span className="working__dot" /> Checking subscription…</div>
         ) : signedIn ? (
           <>
             <div className="pcard__identity">
@@ -2182,7 +2189,7 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive }: {
         ) : (
           <>
             <span className="pcard__spacer" />
-            <button className="btn primary" disabled={!p.implemented || busy} onClick={() => onSignIn(p.id)}>
+            <button className="btn primary" disabled={!p.implemented || busy || loading} onClick={() => onSignIn(p.id)}>
               Sign in{p.implemented ? '' : ' (soon)'}
             </button>
           </>

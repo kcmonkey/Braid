@@ -7,8 +7,11 @@ describe('toProviderAccount', () => {
       .toEqual({ signedIn: true, email: 'a@b.com', organization: 'Anthropic', plan: 'max', backend: 'firstParty' });
   });
 
-  it('signedIn is true when backend is firstParty even without an email', () => {
-    expect(toProviderAccount({ apiProvider: 'firstParty' })!.signedIn).toBe(true);
+  it('signedIn is false for firstParty WITHOUT an email (configured backend ≠ valid credentials)', () => {
+    // A logged-out CLI can still report apiProvider:'firstParty' — keying signed-in on the backend type
+    // produces a "shows signed in but isn't" false positive, so identity is keyed on a real email instead.
+    expect(toProviderAccount({ apiProvider: 'firstParty' })!.signedIn).toBe(false);
+    expect(toProviderAccount({ apiProvider: 'firstParty' })!.backend).toBe('firstParty');
   });
 
   it('signedIn is false for an empty/3P account', () => {

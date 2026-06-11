@@ -6,14 +6,37 @@ import { spawn } from 'child_process';
 import type { AccountController, AuthOutcome } from '../types';
 import type { ProviderAccount, ProviderUsage, UsageWindow, RateLimitSnapshot } from '../../protocol';
 
-/** Map the SDK's AccountInfo → neutral ProviderAccount. signed-in = we have an email, or the active backend
- * is the first-party (OAuth subscription) provider. */
+// Control-request / auth timeouts. A streaming-input control request can stall indefinitely under some
+// auth/session states (e.g. claudeOAuthWaitForCompletion never resolves when already signed in) — every
+// awaited SDK call below is bounded so the account panel can never get stuck "Working…" forever.
+const CONTROL_TIMEOUT_MS = 8000;      // accountInfo() / usage() — normally ~1-2s (probe), 8s is generous
+const AUTH_START_TIMEOUT_MS = 60_000; // claudeAuthenticate(true) → returns the authorize URL
+const AUTH_WAIT_TIMEOUT_MS = 180_000; // claudeOAuthWaitForCompletion() → user completes the browser flow
+const SIGNOUT_TIMEOUT_MS = 20_000;    // `claude auth logout` subprocess
+const TIMEOUT = Symbol('timeout');
+
+/** Resolve `p`, or `fallback` if it neither resolves nor rejects within `ms`. Never rejects (a rejection
+ * also degrades to `fallback`). Bounds a hung control request so it degrades to a retryable value instead
+ * of blocking the panel forever. */
+function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let done = false;
+    const finish = (v: T) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
+    const timer = setTimeout(() => finish(fallback), ms);
+    p.then((v) => finish(v), () => finish(fallback));
+  });
+}
+
+/** Map the SDK's AccountInfo → neutral ProviderAccount. signed-in = we have a real email (verified
+ * identity). NOTE: `apiProvider:'firstParty'` alone is NOT sufficient — it only reports the *configured*
+ * backend type, not that valid credentials exist, so a logged-out CLI can still report firstParty. Keying
+ * on email avoids the "shows signed in but isn't" false positive. */
 export function toProviderAccount(raw: any): ProviderAccount | null {
   if (!raw || typeof raw !== 'object') return null;
   const email = typeof raw.email === 'string' ? raw.email : undefined;
   const backend = typeof raw.apiProvider === 'string' ? raw.apiProvider : undefined;
   return {
-    signedIn: !!email || backend === 'firstParty',
+    signedIn: !!email,
     email,
     organization: typeof raw.organization === 'string' ? raw.organization : undefined,
     plan: typeof raw.subscriptionType === 'string' ? raw.subscriptionType : undefined,
@@ -77,7 +100,10 @@ export class ClaudeAccountControl implements AccountController {
 
   async info(): Promise<ProviderAccount | null> {
     try {
-      return toProviderAccount(await this._q.accountInfo());
+      // Timeout-bounded: a stalled control request must degrade to null (→ retry) not hang the panel.
+      const raw = await withTimeout<any>(this._q.accountInfo(), CONTROL_TIMEOUT_MS, TIMEOUT);
+      if (raw === TIMEOUT) { console.error('[Braid] accountInfo timed out'); return null; }
+      return toProviderAccount(raw);
     } catch (e: any) {
       console.error('[Braid] accountInfo failed:', e?.message ?? e);
       return null;
@@ -87,7 +113,8 @@ export class ClaudeAccountControl implements AccountController {
   async usage(): Promise<ProviderUsage | null> {
     try {
       // EXPERIMENTAL / unstable SDK method — wrapped so shape drift or removal degrades to null, never throws.
-      const raw = await this._q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET();
+      const raw = await withTimeout<any>(this._q.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET(), CONTROL_TIMEOUT_MS, TIMEOUT);
+      if (raw === TIMEOUT) { console.error('[Braid] usage query timed out'); return null; }
       return toProviderUsage(raw);
     } catch (e: any) {
       console.error('[Braid] usage query failed:', e?.message ?? e);
@@ -103,12 +130,24 @@ export class ClaudeAccountControl implements AccountController {
   async signIn(openUrl: (url: string) => void, signal: AbortSignal): Promise<AuthOutcome> {
     this.busy.add('auth');
     try {
-      const res: any = await this._q.claudeAuthenticate(true);
+      // Already signed in? Skip OAuth entirely. Re-running claudeAuthenticate when authed leaves
+      // claudeOAuthWaitForCompletion with no pending flow to complete → it never resolves → stuck
+      // "Working…" forever (the bug). A no-op success here is correct: identity is already valid.
+      const existing = await this.info();
+      if (existing?.signedIn) return { ok: true };
+      if (signal.aborted) return { ok: false, error: 'canceled', canceled: true };
+
+      const res: any = await withTimeout<any>(this._q.claudeAuthenticate(true), AUTH_START_TIMEOUT_MS, TIMEOUT);
+      if (res === TIMEOUT) return { ok: false, error: 'sign-in did not start (timed out)' };
       if (signal.aborted) return { ok: false, error: 'canceled', canceled: true };
       const url = res?.url ?? res?.authorizationUrl ?? res?.loginUrl ?? res?.authUrl;
       if (typeof url === 'string' && url) openUrl(url);
-      const done: any = await this._q.claudeOAuthWaitForCompletion();
+
+      // Wait for the browser flow, but bounded so the panel can never hang. On timeout the host re-reads
+      // identity, so a completed-but-slow auth still reflects correctly on the next refresh.
+      const done: any = await withTimeout<any>(this._q.claudeOAuthWaitForCompletion(), AUTH_WAIT_TIMEOUT_MS, TIMEOUT);
       if (signal.aborted) return { ok: false, error: 'canceled', canceled: true };
+      if (done === TIMEOUT) return { ok: false, error: 'sign-in timed out' };
       // The CLI rejects on failure, so a resolved call defaults to success; honor an explicit failure flag.
       const ok = done == null ? true : (done.success ?? done.ok ?? done.authenticated ?? true);
       return ok ? { ok: true } : { ok: false, error: typeof done?.error === 'string' ? done.error : 'sign-in did not complete' };
@@ -121,15 +160,17 @@ export class ClaudeAccountControl implements AccountController {
   }
 
   // Sign-out: the SDK exposes no logout control method, so spawn the bundled CLI's `auth logout` (clears the
-  // stored OAuth credentials, affecting every subsequent turn). Best-effort: resolves even on spawn error.
+  // stored OAuth credentials, affecting every subsequent turn). Bounded + killed on timeout so a hung
+  // subprocess (e.g. waiting on a prompt it never gets under stdio:'ignore') can't wedge the panel.
   async signOut(): Promise<void> {
     this.busy.add('auth');
     try {
       if (!this.claudeBinary) { console.error('[Braid] sign-out: claude binary not resolved'); return; }
       await new Promise<void>((resolve) => {
         const cp = spawn(this.claudeBinary!, ['auth', 'logout'], { stdio: 'ignore' });
-        cp.on('close', () => resolve());
-        cp.on('error', (e: any) => { console.error('[Braid] auth logout spawn failed:', e?.message ?? e); resolve(); });
+        const timer = setTimeout(() => { try { cp.kill(); } catch { /* ignore */ } resolve(); }, SIGNOUT_TIMEOUT_MS);
+        cp.on('close', () => { clearTimeout(timer); resolve(); });
+        cp.on('error', (e: any) => { clearTimeout(timer); console.error('[Braid] auth logout spawn failed:', e?.message ?? e); resolve(); });
       });
     } finally {
       this.busy.delete('auth');
