@@ -1785,7 +1785,7 @@ function ThinkingToggle({ value, onChange }: { value: string; onChange: (v: stri
 // The 6 non-model settings, opened from the ⚙ gear. Array/object settings edit as text in local
 // state and commit on blur, so per-keystroke re-parsing never reorders/strips mid-typed input.
 // Mounted fresh each time the gear opens, so local state seeds from the current config.
-function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, activeProvider, providerCaps, onSetActive }: {
+function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, activeProvider, providerCaps, onSetActive, onOpenAccount }: {
   config: BraidConfig;
   onChange: (patch: Partial<BraidConfig>) => void;
   resolvedModel: string | null; // full id from the last run (e.g. claude-opus-4-8); shown here, not in the bar
@@ -1819,7 +1819,7 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
         <button className="settings__close" onClick={onClose}>✕</button>
       </div>
 
-      <ProviderSpine activeProvider={activeProvider} onSetActive={onSetActive} />
+      <ProviderSpine activeProvider={activeProvider} onSetActive={onSetActive} onAccount={onOpenAccount && (() => { onClose(); onOpenAccount(); })} />
 
       <div className="settings__section">
         <div className="settings__sectiontitle">Generation <span className="settings__scope settings__scope--prov">· {pName}</span></div>
@@ -1930,7 +1930,7 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
 // In-canvas settings (M5): a model quick-switch dropdown + the resolved full model name + ⚙ gear.
 // Changes write through to global VS Code settings (host applies; see App.setConfigField).
 // `resolvedModel` is the full id from the last query's init message (e.g. claude-opus-4-8).
-function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, showPerm, activeProvider, providerCaps, onSetActive }: {
+function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, showPerm, activeProvider, providerCaps, onSetActive, onOpenAccount }: {
   config: BraidConfig;
   onChange: (patch: Partial<BraidConfig>) => void;
   resolvedModel: string | null;
@@ -1940,6 +1940,7 @@ function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, show
   activeProvider: EngineId;
   providerCaps: Partial<Record<EngineId, ProviderCapabilitiesView>>;
   onSetActive: (id: EngineId) => void;
+  onOpenAccount?: () => void; // forwarded to the gear panel's spine as an "Account ↗" link (canvas toolbar only)
 }) {
   const [open, setOpen] = useState(false);
   // The quick-switch model list follows the active provider's capabilities (falls back to the catalog default).
@@ -1969,7 +1970,7 @@ function SettingsControls({ config, onChange, resolvedModel, up, onOpenMcp, show
           <div className="settings__backdrop" onClick={() => setOpen(false)} />
           <SettingsPanel
             config={config} onChange={onChange} resolvedModel={resolvedModel} onClose={() => setOpen(false)} onOpenMcp={onOpenMcp}
-            activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActive}
+            activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActive} onOpenAccount={onOpenAccount}
           />
         </>
       )}
@@ -3998,15 +3999,23 @@ function App() {
           accent={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.accent ?? '#d97757'}
           onClick={openAcctPanel}
         />
-        <button
-          className={`btn ${acctPanelOpen ? 'active' : ''}`}
-          onClick={toggleAcctPanel}
-          title="Accounts & usage"
-        >
-          <span className="tb-ico">👤</span>
-        </button>
+        {(() => {
+          // Avatar reads as an account entry: the signed-in email's initial (like the official extension),
+          // else a generic person glyph. Clicking opens the centered Accounts overlay.
+          const email = accounts[activeProvider]?.account?.email;
+          const initial = email?.trim().charAt(0).toUpperCase();
+          return (
+            <button
+              className={`btn settings__avatar ${acctPanelOpen ? 'active' : ''}`}
+              onClick={toggleAcctPanel}
+              title="Accounts & usage — identity, plan usage, sign in / out"
+            >
+              {initial ? <span className="settings__avatarinitial">{initial}</span> : <span className="tb-ico">👤</span>}
+            </button>
+          );
+        })()}
         <span className="toolbar__sep" />
-        {config && <SettingsControls config={config} onChange={setConfigField} resolvedModel={resolvedModel} up onOpenMcp={toggleMcpPanel} activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActiveProvider} />}
+        {config && <SettingsControls config={config} onChange={setConfigField} resolvedModel={resolvedModel} up onOpenMcp={toggleMcpPanel} activeProvider={activeProvider} providerCaps={providerCaps} onSetActive={onSetActiveProvider} onOpenAccount={openAcctPanel} />}
       </div>
 
       {/* M12: transient hint when a board is dropped on a non-fusable neighbor. */}

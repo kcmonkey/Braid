@@ -1151,6 +1151,11 @@ body {
 .settings__genwrap { display: flex; flex-direction: column; gap: 10px; }
 .settings__gated { opacity: .5; }
 .settings__gnote { font-size: 10.5px; color: var(--muted-2); font-style: italic; }
+/* Spine cross-link ("Account ↗") + toolbar avatar initial */
+.spine__spacer { flex: 1; }
+.spine__xlink { font: inherit; font-size: 12px; color: var(--merge); cursor: pointer; background: none; border: none; padding: 0; white-space: nowrap; }
+.spine__xlink:hover { text-decoration: underline; }
+.settings__avatarinitial { font-weight: 800; font-size: 13px; color: var(--accent); line-height: 1; }
 
 /* Effort dots slider (official-style) */
 .settings__dots { display: flex; align-items: center; gap: 7px; }
