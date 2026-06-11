@@ -15,7 +15,7 @@ import './styles.css';
 import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
-  GRAPH_VERSION, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit,
+  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock, describeAsyncPending,

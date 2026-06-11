@@ -1,7 +1,7 @@
 // Pure graph/merge/serialization logic — no React/DOM deps so it's unit-testable in plain node.
 // Types from @xyflow/react are imported type-only (erased at compile time; xyflow is never loaded at runtime).
 import type { Node, Edge } from '@xyflow/react';
-import { TAG_VOCAB, type BoardTag, type AsyncPending } from '../protocol';
+import { TAG_VOCAB, type BoardTag, type AsyncPending, type EngineId } from '../protocol';
 
 // 'waiting' (异步续接) = the last round settled but the board's session is HELD OPEN for in-flight background
 // tasks / scheduled wakeups; the SDK re-drives → a new round may still arrive. Non-terminal (like 'streaming')
@@ -323,6 +323,11 @@ export interface BoardData {
   // summary in its place. (knowledge.md "native /compact")
   compact?: boolean;
   compactSummary?: string;
+  // M-MultiEngine (AD1): the engine that ran this board, stamped = the active provider at creation, IMMUTABLE.
+  // A board's `sessionId` belongs to THIS engine, so it is the SSOT for "which engine owns this session" — the
+  // turn router (host) and the engine-aware fork base read it via boardEngine(). Absent ⇒ 'claude' (legacy /
+  // no-op while one engine is registered). Persisted via ...data. A board never mixes engines across its rounds.
+  engine?: EngineId;
   sessionId?: string;        // this board's own session (after done) — under Lazy Fork, the SPINE session shared along a linear resume path
   parentSessionId?: string;  // session to resume+fork from (set when forked)
   // Lazy Fork: terminal assistant uuid of this board's last turn (the resumeSessionAt marker). Lets a
@@ -351,6 +356,13 @@ export interface BoardData {
   [key: string]: unknown;
 }
 export type BoardNodeT = Node<BoardData, 'board'>;
+
+// M-MultiEngine (AD1): the engine that owns a board's session. SSOT for "absence == claude" so legacy graphs
+// (no `engine` field) and the single-engine no-op case both resolve to 'claude'. Pure. Used by every
+// engine-aware decision (fork base / fuse guard / turn routing) — never read `data.engine` raw.
+export function boardEngine(d: { engine?: EngineId }): EngineId {
+  return d.engine ?? 'claude';
+}
 
 export interface MergeResult {
   shared: string[];                                   // shared ancestors (deduped, sent once)

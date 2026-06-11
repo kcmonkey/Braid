@@ -17,6 +17,7 @@ describe('toCapabilitiesView', () => {
       reasoning: true,
       steer: true,
       compact: true, // derived: compact.mode === 'native' !== 'none'
+      images: true,  // Claude is a vision provider (M-MultiEngine)
       models: claudeModels,
     });
   });
@@ -26,13 +27,13 @@ describe('toCapabilitiesView', () => {
     expect(caps.models).toBe(claudeModels); // referential identity ⇒ no duplicate list
   });
 
-  it('catalog Claude models still match the former hardcoded MODEL_OPTS values/labels', () => {
+  it('catalog Claude models still match the former hardcoded MODEL_OPTS values/labels (+ context windows)', () => {
     expect(claudeModels).toEqual([
-      { value: '', label: 'Default model' },
-      { value: 'claude-fable-5', label: 'Fable 5' },
-      { value: 'opus', label: 'Opus' },
-      { value: 'sonnet', label: 'Sonnet' },
-      { value: 'haiku', label: 'Haiku' },
+      { value: '', label: 'Default model', contextWindow: 1_000_000 },
+      { value: 'claude-fable-5', label: 'Fable 5', contextWindow: 1_000_000 },
+      { value: 'opus', label: 'Opus', contextWindow: 1_000_000 },
+      { value: 'sonnet', label: 'Sonnet', contextWindow: 1_000_000 },
+      { value: 'haiku', label: 'Haiku', contextWindow: 200_000 },
     ]);
   });
 });
