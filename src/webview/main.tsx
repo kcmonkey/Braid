@@ -402,41 +402,59 @@ function PlanCard({ step }: { step: ToolStep }) {
   const [mode, setMode] = useState<'default' | 'acceptEdits'>('default');
   const [rejecting, setRejecting] = useState(false);
   const [feedback, setFeedback] = useState('');
+  const [userOpen, setUserOpen] = useState<boolean | null>(null);
   const plan = typeof step.input.plan === 'string' ? step.input.plan : '';
   const filePath = typeof step.input.planFilePath === 'string' ? step.input.planFilePath : '';
+  // Lifecycle: pending (canUseTool waiting) → resolved (allow → success result / deny → is_error result).
+  // A resolved plan stays in the thread for review; the approve/reject controls become a status badge.
+  const pending = step.permission != null && step.result == null;
+  const rejected = step.result != null && !!step.isError;
+  const approved = step.result != null && !step.isError;
+  // Body open default follows status (collapse only once approved); userOpen overrides once toggled.
+  const open = pending ? true : (userOpen ?? !approved);
   const approve = () => { setSubmitted(true); post({ type: 'permissionResponse', toolUseId: step.id, decision: 'allow', mode }); };
   const reject = () => { setSubmitted(true); post({ type: 'permissionResponse', toolUseId: step.id, decision: 'deny', message: feedback.trim() || undefined }); };
   return (
-    <div className="plan nodrag" onMouseDown={(e) => e.stopPropagation()}>
-      <div className="plan__head"><span className="plan__icon">📋</span><span className="plan__title">Plan ready for review</span></div>
-      <div className="plan__body">{plan ? <Markdown text={plan} /> : <span className="plan__empty">{toolSummary(step) || 'No plan text provided.'}</span>}</div>
+    <div className={`plan nodrag${pending ? '' : ' plan--resolved'}`} onMouseDown={(e) => e.stopPropagation()}>
+      <div className="plan__head">
+        <span className="plan__icon">📋</span>
+        <span className="plan__title">{pending ? 'Plan ready for review' : rejected ? 'Rejected plan' : 'Approved plan'}</span>
+        {!pending && (
+          <button type="button" className="plan__toggle nodrag nopan" onClick={() => setUserOpen(!open)} title={open ? 'Collapse plan' : 'Expand plan'}>{open ? '▾' : '▸'}</button>
+        )}
+      </div>
+      {open && <div className="plan__body">{plan ? <Markdown text={plan} /> : <span className="plan__empty">{toolSummary(step) || 'No plan text provided.'}</span>}</div>}
       {filePath && (
         <button className="plan__file nodrag nopan" title={`Open ${filePath}`} onClick={() => post({ type: 'openFile', path: filePath })}>📄 {filePath}</button>
       )}
-      {!rejecting ? (
-        <div className="plan__actions">
-          <label className="plan__mode" title="What to do after approving the plan">
-            <span>Continue in</span>
-            <select value={mode} onChange={(e) => setMode(e.target.value as 'default' | 'acceptEdits')} disabled={submitted}>
-              <option value="default">default · prompt for risky tools</option>
-              <option value="acceptEdits">acceptEdits · auto-accept edits</option>
-            </select>
-          </label>
-          <button type="button" className="plan__btn plan__btn--ok" onClick={approve} disabled={submitted} title="Approve & start coding">✓ Approve</button>
-          <button type="button" className="plan__btn plan__btn--no" onClick={() => setRejecting(true)} disabled={submitted} title="Reject & keep planning">✕ Reject</button>
-          {submitted && <span className="plan__wait">Waiting for the model…</span>}
-        </div>
-      ) : (
-        <div className="plan__reject">
-          <textarea
-            className="plan__feedback" placeholder="Optional: what to change before approving…"
-            value={feedback} onChange={(e) => setFeedback(e.target.value)} disabled={submitted}
-          />
+      {pending ? (
+        !rejecting ? (
           <div className="plan__actions">
-            <button type="button" className="plan__btn plan__btn--no" onClick={reject} disabled={submitted} title="Send feedback & keep planning">Send & keep planning</button>
-            <button type="button" className="plan__btn" onClick={() => setRejecting(false)} disabled={submitted} title="Back">Back</button>
+            <label className="plan__mode" title="What to do after approving the plan">
+              <span>Continue in</span>
+              <select value={mode} onChange={(e) => setMode(e.target.value as 'default' | 'acceptEdits')} disabled={submitted}>
+                <option value="default">default · prompt for risky tools</option>
+                <option value="acceptEdits">acceptEdits · auto-accept edits</option>
+              </select>
+            </label>
+            <button type="button" className="plan__btn plan__btn--ok" onClick={approve} disabled={submitted} title="Approve & start coding">✓ Approve</button>
+            <button type="button" className="plan__btn plan__btn--no" onClick={() => setRejecting(true)} disabled={submitted} title="Reject & keep planning">✕ Reject</button>
+            {submitted && <span className="plan__wait">Waiting for the model…</span>}
           </div>
-        </div>
+        ) : (
+          <div className="plan__reject">
+            <textarea
+              className="plan__feedback" placeholder="Optional: what to change before approving…"
+              value={feedback} onChange={(e) => setFeedback(e.target.value)} disabled={submitted}
+            />
+            <div className="plan__actions">
+              <button type="button" className="plan__btn plan__btn--no" onClick={reject} disabled={submitted} title="Send feedback & keep planning">Send & keep planning</button>
+              <button type="button" className="plan__btn" onClick={() => setRejecting(false)} disabled={submitted} title="Back">Back</button>
+            </div>
+          </div>
+        )
+      ) : (
+        <div className={`plan__status ${rejected ? 'plan__status--no' : 'plan__status--ok'}`}>{rejected ? '✕ Plan rejected — kept planning' : '✓ Plan approved'}</div>
       )}
     </div>
   );
@@ -445,11 +463,15 @@ function PlanCard({ step }: { step: ToolStep }) {
 // Route one step to its card kind. Single source of truth shared by StepList (nested) and TurnBody
 // (top-level interleave) so the Agent/MCP/generic routing lives in exactly one place. (principle 13)
 function renderStep(s: ToolStep, steps: ToolStep[]) {
-  // A tool awaiting permission approval shows the approve/deny prompt until its result arrives, then the
+  // ExitPlanMode → rich plan card. Render it whenever there's a plan (pending OR resolved) so a
+  // rejected/approved plan stays reviewable in the thread; PlanCard shows the approve/reject controls
+  // only while pending and a status badge afterwards. Safe on reload: serializeGraph strips `permission`
+  // but `input.plan` + `result` persist → resolved/read-only state, no phantom "needs approval".
+  if (s.name === 'ExitPlanMode' && typeof s.input.plan === 'string') return <PlanCard key={s.id} step={s} />;
+  // Other tools awaiting permission show the approve/deny prompt until the result arrives, then the
   // normal card below. (canUseTool tools only — AskUserQuestion is gated by the PreToolUse hook, not here.)
-  // ExitPlanMode gets a richer plan-confirmation card (renders the plan + continue-mode / feedback).
   if (s.permission != null && s.result == null) {
-    return s.name === 'ExitPlanMode' ? <PlanCard key={s.id} step={s} /> : <PermissionCard key={s.id} step={s} />;
+    return <PermissionCard key={s.id} step={s} />;
   }
   if (s.name === 'AskUserQuestion') return <AskUserCard key={s.id} step={s} />;
   if (s.name === 'TodoWrite') return <TodoCard key={s.id} step={s} />;

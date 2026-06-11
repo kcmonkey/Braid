@@ -1051,7 +1051,16 @@ body {
 .plan__head { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
 .plan__icon { flex: none; }
 .plan__body { font-size: 12px; color: var(--text); max-height: 360px; overflow: auto; background: var(--bg-deep); border-radius: 6px; padding: 6px 9px; margin-bottom: 7px; }
+/* In ChatView there's plenty of room — let the plan body grow with the window (board-node cards stay 360). */
+.chatview .plan__body { max-height: min(70vh, 800px); }
 .plan__empty { color: var(--muted); font-style: italic; }
+/* Resolved (post-decision) plan: dim the accent so it reads as historical, not actionable. */
+.plan--resolved { border-color: var(--border-sub); }
+.plan__toggle { margin-left: auto; flex: none; background: none; border: none; color: var(--muted-2); cursor: pointer; font-size: 11px; line-height: 1; padding: 0 2px; }
+.plan__toggle:hover { color: var(--text); }
+.plan__status { font-size: 11.5px; font-weight: 600; }
+.plan__status--ok { color: var(--green); }
+.plan__status--no { color: var(--red); }
 .plan__file { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10.5px; color: var(--muted-2); background: var(--bg-deep); border: 1px solid var(--border-sub); border-radius: 5px; padding: 3px 7px; margin-bottom: 7px; cursor: pointer; }
 .plan__file:hover { border-color: var(--accent); color: var(--text-2); }
 .plan__actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
