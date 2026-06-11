@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Braid — Accounts with Claude API-key auth method (mockup)</title>
+<style>
+  /* Palette lifted verbatim from src/webview/styles.css :root so this reads like the real canvas. */
+  :root {
+    --bg:#1c1b1a; --bg-deep:#1f1e1d; --bg-code:#1a1917;
+    --panel:#30302e; --panel-2:#2b2a27;
+    --border:#423f3a; --border-sub:#383631;
+    --text:#f5f4ee; --text-2:#e3e1d8; --muted:#a8a199; --muted-2:#8c857b;
+    --accent:#d97757; --accent-2:#c2613f; --accent-soft:rgba(217,119,87,.16);
+    --fork:#d29922; --merge:#6c8cff; --compact:#57ab5a;
+    --green:#7cb573; --red:#e5645d; --red-bg:#3a201c;
+    --codex:#10a37f;
+    --amber:#d8a43a; --amber-bg:#2a2616; --amber-border:#6b5417;
+  }
+  * { box-sizing: border-box; }
+  html, body { height:100%; margin:0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--text); font-size:14px; line-height:1.5; }
+
+  /* ---- Faux canvas backdrop ---- */
+  .canvas { position:fixed; inset:0; overflow:hidden; background:radial-gradient(circle,#2a2825 1px,transparent 1px) 0 0 / 22px 22px, var(--bg); }
+  .ghost-board { position:absolute; width:230px; border:1px solid var(--border); border-radius:12px; background:var(--panel); box-shadow:0 6px 24px rgba(0,0,0,.35); opacity:.5; pointer-events:none; }
+  .ghost-board .gb-head { padding:9px 12px; border-bottom:1px solid var(--border-sub); background:linear-gradient(180deg,#37352f,var(--panel)); display:flex; gap:8px; align-items:center; }
+  .gb-dot { width:8px;height:8px;border-radius:50%;background:var(--accent); }
+  .gb-turn { font-size:11px;font-weight:700;color:var(--muted-2);background:var(--bg-deep);border-radius:6px;padding:2px 7px; }
+  .ghost-board .gb-body { padding:10px 12px; }
+  .gb-line { height:8px; border-radius:4px; background:#3a3833; margin-bottom:7px; } .gb-line.s { width:60%; }
+
+  /* ---- Floating top-right controls (icon-only) ---- */
+  .topbar { position:fixed; top:16px; right:16px; display:flex; gap:8px; align-items:center; z-index:12; }
+  .chip { display:flex; align-items:center; gap:7px; cursor:pointer; font-size:12px; font-weight:600; letter-spacing:.02em;
+    padding:6px 10px; border-radius:8px; border:1px solid var(--border-sub); background:var(--bg-deep); color:var(--muted-2); user-select:none; }
+  .chip:hover { border-color:var(--border); color:var(--text-2); }
+  .chip .dot { width:8px;height:8px;border-radius:50%; } .chip .pct { font-variant-numeric:tabular-nums; }
+  .chip--warn { color:var(--amber); border-color:var(--amber-border); background:var(--amber-bg); }
+  .chip--high { color:var(--red); border-color:var(--red); background:var(--red-bg); }
+  .chip--meter { color:var(--green); border-color:#3c5230; background:#1f2a1c; }
+  .iconbtn { width:34px;height:34px;border-radius:8px;border:1px solid var(--border-sub); background:var(--bg-deep); color:var(--muted);
+    cursor:pointer; font-size:15px; display:flex;align-items:center;justify-content:center; }
+  .iconbtn:hover { color:var(--text); border-color:var(--border); }
+  .iconbtn.on { color:var(--text); border-color:var(--accent); background:var(--accent-soft); }
+  .avatar { width:34px;height:34px;border-radius:50%; cursor:pointer; display:flex;align-items:center;justify-content:center;
+    font-weight:700; font-size:14px; color:#1c1b1a; background:var(--accent); border:2px solid var(--bg-deep); box-shadow:0 0 0 1px var(--accent); }
+  .avatar.ghost { background:var(--bg-deep); color:var(--muted); box-shadow:0 0 0 1px var(--border-sub); }
+  .avatar:hover { filter:brightness(1.08); }
+
+  /* ---- Composer (bottom) ---- */
+  .composer { position:fixed; left:50%; bottom:18px; transform:translateX(-50%); z-index:5; width:560px; max-width:92vw;
+    background:var(--panel); border:1px solid var(--border); border-radius:12px; box-shadow:0 10px 30px rgba(0,0,0,.4); padding:10px 12px; }
+  .composer__ta { width:100%; min-height:34px; resize:none; background:transparent; border:none; color:var(--text); font:inherit; font-size:13px; outline:none; }
+  .composer__ta::placeholder { color:var(--muted-2); }
+  .composer__bar { display:flex; align-items:center; gap:8px; margin-top:8px; }
+  .prov-mini { display:flex; align-items:center; gap:6px; font-size:11px; color:var(--muted-2); }
+  .prov-mini .dot { width:8px;height:8px;border-radius:50%; }
+  .mini-select { font:inherit; font-size:12px; color:var(--text-2); background:var(--bg-deep); border:1px solid var(--border-sub); border-radius:7px; padding:5px 8px; cursor:pointer; }
+  .composer__bar .spacer { flex:1; }
+  .send { width:32px;height:32px;border-radius:8px;border:none; background:var(--accent); color:#1c1b1a; font-size:15px; cursor:pointer; }
+
+  .catcher { position:fixed; inset:0; z-index:9; background:transparent; }
+  .catcher.hidden { display:none; }
+
+  /* ---- Account overlay (dedicated centered panel) ---- */
+  .backdrop { position:fixed; inset:0; background:rgba(20,19,18,.55); z-index:14; display:flex; align-items:flex-start; justify-content:center; padding-top:6vh; }
+  .backdrop.hidden { display:none; }
+  .panel { width:560px; max-width:94vw; max-height:86vh; overflow:auto; background:var(--panel); border:1px solid var(--border); border-radius:14px; box-shadow:0 18px 50px rgba(0,0,0,.5); }
+  .panel__head { position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; padding:14px 18px; border-bottom:1px solid var(--border-sub); background:linear-gradient(180deg,#37352f,var(--panel)); }
+  .panel__title { font-size:15px; font-weight:700; display:flex; gap:9px; align-items:center; }
+  .panel__sub { font-size:11px; color:var(--muted-2); font-weight:500; }
+  .panel__close { background:none;border:none;color:var(--muted);font-size:16px;cursor:pointer;padding:4px; }
+  .panel__close:hover { color:var(--text); }
+  .panel__body { padding:16px 18px; display:flex; flex-direction:column; gap:14px; }
+
+  /* ---- Shared spine: active-provider selector ---- */
+  .spine { display:flex; align-items:center; gap:9px; flex-wrap:wrap; }
+  .spine__lbl { font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; color:var(--muted-2); }
+  .seg { display:flex; gap:4px; background:var(--bg-deep); border:1px solid var(--border-sub); border-radius:9px; padding:3px; }
+  .seg button { font:inherit; font-size:12px; font-weight:600; cursor:pointer; border:none; background:transparent; color:var(--muted); padding:5px 10px; border-radius:6px; display:flex; align-items:center; gap:6px; }
+  .seg button .dot { width:8px;height:8px;border-radius:50%; }
+  .seg button.on { background:var(--panel); color:var(--text); box-shadow:0 0 0 1px var(--border); }
+  .spine .spacer { flex:1; }
+
+  /* ---- Provider account card ---- */
+  .pcard { border:1px solid var(--border-sub); border-radius:12px; background:var(--panel-2); overflow:hidden; }
+  .pcard.active { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent-soft); }
+  .pcard.disabled { opacity:.62; }
+  .pcard__head { display:flex; align-items:center; gap:10px; padding:12px 14px; border-bottom:1px solid var(--border-sub); }
+  .pcard__dot { width:10px;height:10px;border-radius:50%; flex:none; }
+  .pcard__name { font-size:14px; font-weight:700; }
+  .pcard__vendor { font-size:11px; color:var(--muted-2); margin-left:-4px; }
+  .pcard__spacer { flex:1; }
+  .badge { font-size:10px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; padding:3px 8px; border-radius:6px; white-space:nowrap; }
+  .badge--active { color:#1c1b1a; background:var(--accent); }
+  .badge--setup { color:var(--muted-2); background:var(--bg-deep); border:1px solid var(--border-sub); }
+  .badge--meter { color:var(--green); background:#1f2a1c; border:1px solid #3c5230; }
+  .pcard__body { padding:12px 14px; display:flex; flex-direction:column; gap:11px; }
+
+  /* ---- Auth-method segmented toggle (NEW — the heart of this mockup) ---- */
+  .authseg { display:flex; gap:4px; background:var(--bg-deep); border:1px solid var(--border-sub); border-radius:9px; padding:3px; }
+  .authseg button { flex:1; justify-content:center; font:inherit; font-size:11.5px; font-weight:600; cursor:pointer; border:none; background:transparent; color:var(--muted); padding:6px 8px; border-radius:6px; display:flex; align-items:center; gap:6px; }
+  .authseg button.on { background:var(--panel); color:var(--text); box-shadow:0 0 0 1px var(--border); }
+  .authseg button .ico { font-size:12px; }
+
+  .identity { display:flex; flex-direction:column; gap:3px; }
+  .identity .email { font-size:13px; font-weight:600; color:var(--text); }
+  .identity .plan { font-size:12px; color:var(--muted); } .identity .plan b { color:var(--green); font-weight:700; }
+  .divider { height:1px; background:var(--border-sub); margin:1px 0; }
+  .usage { display:flex; flex-direction:column; gap:9px; }
+  .urow { display:grid; grid-template-columns:58px 1fr auto; align-items:center; gap:10px; }
+  .urow .ulabel { font-size:11px; color:var(--muted-2); font-weight:600; }
+  .bar { height:7px; border-radius:5px; background:var(--bg-deep); overflow:hidden; border:1px solid var(--border-sub); }
+  .bar__fill { height:100%; border-radius:5px; transition:width .5s ease; }
+  .bar__fill.ok { background:var(--green); } .bar__fill.warn { background:var(--fork); } .bar__fill.high { background:var(--red); }
+  .umeta { font-size:11px; color:var(--muted-2); white-space:nowrap; font-variant-numeric:tabular-nums; } .umeta b { color:var(--text-2); font-weight:700; }
+  .cost { font-size:12px; color:var(--muted); display:flex; gap:7px; align-items:baseline; } .cost b { color:var(--text); font-size:13px; font-variant-numeric:tabular-nums; } .cost span { color:var(--muted-2); font-size:11px; }
+  .cost .meter-note { color:var(--amber); }
+
+  /* ---- API-key face (NEW) ---- */
+  .keyline { display:flex; align-items:center; gap:9px; }
+  .keyline .glyph { font-size:16px; }
+  .keymask { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px; letter-spacing:.06em; color:var(--text); }
+  .keytier { font-size:12px; color:var(--muted); } .keytier .lit { color:var(--green); }
+  .keyinput { display:flex; gap:8px; }
+  .keyinput input { flex:1; font:inherit; font-size:12px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; color:var(--text-2); background:var(--bg-deep); border:1px solid var(--border-sub); border-radius:7px; padding:8px 9px; }
+  .keyinput input:focus { outline:none; border-color:var(--accent); }
+  .billnote { font-size:11px; color:var(--amber); background:var(--amber-bg); border:1px solid var(--amber-border); border-radius:7px; padding:7px 9px; display:flex; gap:7px; align-items:flex-start; line-height:1.5; }
+  .billnote b { color:#e9c97a; }
+
+  .pcard__actions { display:flex; gap:8px; padding:11px 14px; border-top:1px solid var(--border-sub); background:var(--bg-deep); }
+  .pcard__actions .spacer { flex:1; }
+  .btn { font:inherit; font-size:12px; font-weight:600; cursor:pointer; padding:6px 12px; border-radius:7px; border:1px solid var(--border); background:var(--panel); color:var(--text-2); }
+  .btn:hover { border-color:var(--muted-2); color:var(--text); } .btn:disabled { opacity:.45; cursor:not-allowed; }
+  .btn--primary { background:var(--accent); border-color:var(--accent); color:#1c1b1a; } .btn--primary:hover { background:var(--accent-2); border-color:var(--accent-2); }
+  .btn--ghost { background:transparent; }
+  .btn--danger { color:var(--red); border-color:#5a2f2b; background:transparent; } .btn--danger:hover { background:var(--red-bg); border-color:var(--red); }
+  .signedout { font-size:12px; color:var(--muted); }
+
+  .hint { font-size:10.5px; color:var(--muted-2); line-height:1.6; border-top:1px dashed var(--border-sub); padding-top:10px; }
+  .hint code { font-family:ui-monospace,monospace; color:var(--text-2); background:var(--bg-code); padding:1px 5px; border-radius:4px; font-size:10px; }
+
+  .legend { position:fixed; left:16px; bottom:14px; max-width:460px; z-index:5; font-size:11px; color:var(--muted-2); line-height:1.6; background:rgba(31,30,29,.92); border:1px solid var(--border-sub); border-radius:9px; padding:11px 13px; }
+  .legend b { color:var(--text-2); } .legend .k { color:var(--accent); font-weight:700; }
+</style>
+</head>
+<body>
+  <div class="canvas">
+    <div class="ghost-board" style="top:16%; left:7%;"><div class="gb-head"><span class="gb-dot"></span><span class="gb-turn">root</span></div><div class="gb-body"><div class="gb-line"></div><div class="gb-line"></div><div class="gb-line s"></div></div></div>
+    <div class="ghost-board" style="top:46%; left:17%;"><div class="gb-head"><span class="gb-dot" style="background:var(--fork)"></span><span class="gb-turn">fork</span></div><div class="gb-body"><div class="gb-line"></div><div class="gb-line s"></div></div></div>
+    <div class="ghost-board" style="top:24%; left:64%;"><div class="gb-head"><span class="gb-dot" style="background:var(--merge)"></span><span class="gb-turn">merge</span></div><div class="gb-body"><div class="gb-line"></div><div class="gb-line"></div><div class="gb-line s"></div></div></div>
+  </div>
+
+  <!-- Floating top-right controls -->
+  <div class="topbar">
+    <div id="chip" class="chip" title="Active provider — click for Accounts">
+      <span class="dot" style="background:var(--accent)"></span><span id="chipLabel">Claude</span><span class="pct" id="chipPct">· $0.42</span>
+    </div>
+    <div id="avatarBtn" class="avatar" title="Accounts">🔑</div>
+    <div id="gearBtn" class="iconbtn" title="Settings">⚙</div>
+  </div>
+
+  <!-- Composer -->
+  <div class="composer">
+    <textarea class="composer__ta" placeholder="Ask the active provider…"></textarea>
+    <div class="composer__bar">
+      <span class="prov-mini"><span class="dot" id="composerDot" style="background:var(--accent)"></span><span id="composerProv">Claude</span></span>
+      <select class="mini-select" id="composerModel" title="Quick model switch"></select>
+      <span class="spacer"></span><button class="send" title="Send">➤</button>
+    </div>
+  </div>
+
+  <div id="catcher" class="catcher hidden"></div>
+
+  <!-- ACCOUNT: dedicated centered overlay -->
+  <div id="backdrop" class="backdrop hidden">
+    <div class="panel" onclick="event.stopPropagation()">
+      <div class="panel__head"><div class="panel__title">Accounts <span class="panel__sub">providers · auth method · usage</span></div>
+        <button class="panel__close" id="closeBtn" title="Close">✕</button></div>
+      <div class="panel__body" id="acctBody"></div>
+    </div>
+  </div>
+
+  <div class="legend">
+    <b>Mockup — Claude with an API-key auth method.</b> The Claude card gains an <span class="k">auth-method toggle</span>
+    (<b>Subscription ⇄ API key</b>). It opens on <b>API key</b> so you see the new face first — masked key, metered <b>$</b> cost
+    (no plan bars), and a key glyph in the top-right chip/avatar. Flip to <b>Subscription</b> to compare; click <b>Remove key</b>
+    to see the empty "paste a key" state. Codex stays a not-built placeholder.
+  </div>
+
+<script>
+  const CLAUDE_MODELS = [{v:'',t:'Default model'},{v:'fable',t:'Fable 5'},{v:'opus',t:'Opus'},{v:'sonnet',t:'Sonnet'},{v:'haiku',t:'Haiku'}];
+  const CODEX_MODELS  = [{v:'gpt-5-codex',t:'GPT-5 Codex'},{v:'o4',t:'o4'},{v:'o4-mini',t:'o4-mini'}];
+
+  const state = {
+    active:'claude', acctOpen:true, settingsOpen:false,
+    providers:{
+      claude:{ id:'claude', name:'Claude', vendor:'Anthropic', dot:'var(--accent)', implemented:true, supportsApiKey:true,
+        authMethod:'apiKey',                       // ← start on the NEW face
+        // subscription face
+        signedIn:true, auth:'idle', email:'kcmonkey1992@gmail.com', org:'Anthropic', plan:'Max', backend:'subscription · firstParty',
+        usage:[{label:'5-hour',pct:68,resets:'resets 14:30'},{label:'7-day',pct:31,resets:'resets Mon'}], cost:'$0.00', costNote:'covered by subscription',
+        // api-key face
+        key:{ present:true, hint:'4f2a', tier:'pay-as-you-go · first-party', cost:'$0.42' },
+        cap:{ models:CLAUDE_MODELS }, settings:{ model:'opus' } },
+      codex:{ id:'codex', name:'Codex', vendor:'OpenAI', dot:'var(--codex)', implemented:false, supportsApiKey:false,
+        authMethod:'subscription', signedIn:false, auth:'idle', key:{present:false},
+        cap:{ models:CODEX_MODELS }, settings:{ model:'gpt-5-codex' } }
+    }
+  };
+
+  const $ = id => document.getElementById(id);
+  const barClass = p => p>=85?'high':p>=60?'warn':'ok';
+  const connected = p => p.authMethod==='apiKey' ? p.key.present : p.signedIn;
+
+  function spineHTML(){
+    const segs = Object.entries(state.providers).map(([id,p])=>
+      `<button class="${state.active===id?'on':''}" onclick="setActive('${id}')"><span class="dot" style="background:${p.dot}"></span>${p.name}</button>`).join('');
+    return `<div class="spine"><span class="spine__lbl">Provider</span><div class="seg">${segs}</div><span class="spacer"></span></div>`;
+  }
+
+  /* ---- auth-method toggle (only for providers that offer a key path) ---- */
+  function authSegHTML(id,p){
+    if(!p.implemented || !p.supportsApiKey) return '';
+    return `<div class="authseg">
+      <button class="${p.authMethod==='subscription'?'on':''}" onclick="setAuthMethod('${id}','subscription')"><span class="ico">👤</span>Subscription</button>
+      <button class="${p.authMethod==='apiKey'?'on':''}" onclick="setAuthMethod('${id}','apiKey')"><span class="ico">🔑</span>API key</button>
+    </div>`;
+  }
+
+  /* ---- subscription face (≈ today's card) ---- */
+  function subscriptionBody(p){
+    if(!p.signedIn) return `<div class="signedout">Not signed in. Sign-in opens your browser (OAuth).</div>`;
+    return `<div class="identity"><span class="email">${p.email}</span><span class="plan"><b>${p.plan} plan</b> · ${p.backend}</span></div>
+      <div class="divider"></div>
+      <div class="usage">${p.usage.map(u=>`<div class="urow"><span class="ulabel">${u.label}</span>
+        <div class="bar"><div class="bar__fill ${barClass(u.pct)}" style="width:${u.pct}%"></div></div>
+        <span class="umeta"><b>${u.pct}%</b> · ${u.resets}</span></div>`).join('')}</div>
+      <div class="cost"><span>Session</span><b>${p.cost}</b><span>${p.costNote}</span></div>`;
+  }
+
+  /* ---- API-key face (NEW) ---- */
+  function apiKeyBody(id,p){
+    if(p.key.present){
+      return `<div class="keyline"><span class="glyph">🔑</span><span class="keymask">sk-ant-••••••••${p.key.hint}</span></div>
+        <span class="keytier">${p.key.tier} · <span class="lit">extended-thinking text visible</span></span>
+        <div class="divider"></div>
+        <div class="cost"><span>Session</span><b>${p.key.cost}</b><span class="meter-note">metered — billed to your key</span></div>
+        <div class="billnote"><span>⚠</span><div>Billing runs through your <b>Anthropic API account</b>, not your subscription. The switch is explicit and applies on the next turn — existing boards are untouched.</div></div>`;
+    }
+    return `<div class="keyinput"><input id="keyInput" type="password" placeholder="sk-ant-…  paste your Anthropic API key" /><button class="btn btn--primary" onclick="saveKey('${id}')">Save</button></div>
+      <div class="billnote"><span>⚠</span><div>Stored in VS Code <b>SecretStorage</b> (never <code style="background:none;color:inherit">settings.json</code>, never synced). Enables <b>metered</b> API billing — your subscription stays untouched until you switch.</div></div>`;
+  }
+
+  function cardBody(id,p){
+    const seg = authSegHTML(id,p);
+    let inner;
+    if(!p.implemented) inner = `<div class="signedout">Engine not built yet — sign-in arrives with this provider.</div>`;
+    else if(p.authMethod==='apiKey') inner = apiKeyBody(id,p);
+    else inner = subscriptionBody(p);
+    return seg + inner;
+  }
+
+  function cardActions(id,p){
+    if(!p.implemented) return `<div class="spacer"></div><button class="btn btn--primary" disabled>Sign in (soon)</button>`;
+    const conn = connected(p);
+    const setA = (state.active===id && conn)
+      ? `<span class="badge badge--active" style="align-self:center">◆ Active</span>`
+      : (conn ? `<button class="btn btn--ghost" onclick="setActive('${id}')">Set active</button>` : '');
+    if(p.authMethod==='apiKey'){
+      if(p.key.present) return `<div class="spacer"></div>${setA}<button class="btn btn--ghost" onclick="saveKey('${id}')">Update key</button><button class="btn btn--danger" onclick="removeKey('${id}')">Remove key</button>`;
+      return `<div class="spacer"></div><button class="btn btn--primary" onclick="saveKey('${id}')">Save key</button>`;
+    }
+    if(p.signedIn) return `<button class="btn btn--ghost" onclick="renderAcct()" title="Re-fetch usage">↻ Refresh</button><div class="spacer"></div>${setA}<button class="btn btn--danger" onclick="signOut('${id}')">Sign out</button>`;
+    return `<div class="spacer"></div><button class="btn btn--primary" onclick="signIn('${id}')">Sign in</button>`;
+  }
+
+  function cardHTML(id,p){
+    const conn = connected(p); const isActive = state.active===id && conn;
+    const badge = isActive
+      ? '<span class="badge badge--active">◆ Active</span>'
+      : (conn ? (p.authMethod==='apiKey' ? '<span class="badge badge--meter">API key</span>' : '')
+              : (p.implemented ? '' : '<span class="badge badge--setup">not set up</span>'));
+    return `<div class="pcard ${isActive?'active':''} ${p.implemented?'':'disabled'}"><div class="pcard__head">
+      <span class="pcard__dot" style="background:${p.dot}"></span><span class="pcard__name">${p.name}</span><span class="pcard__vendor">${p.vendor}</span>
+      <span class="pcard__spacer"></span>${badge}</div>
+      <div class="pcard__body">${cardBody(id,p)}</div><div class="pcard__actions">${cardActions(id,p)}</div></div>`;
+  }
+
+  function renderAcct(){
+    $('acctBody').innerHTML = spineHTML() + Object.entries(state.providers).map(([id,p])=>cardHTML(id,p)).join('') +
+      `<div class="hint"><b>Subscription</b> identity from <code>query.accountInfo()</code> / <code>claude auth status</code>, plan usage from the free <code>rate_limit_event</code> stream.
+       <b>API key</b> goes to <code>SecretStorage</code> and is injected per-spawn as <code>env:{ ...process.env, ANTHROPIC_API_KEY }</code> — gated strictly on this toggle, so the subscription path stays byte-for-byte unchanged.</div>`;
+  }
+
+  function renderChrome(){
+    const p = state.providers[state.active]; const conn = connected(p);
+    const chip = $('chip'); $('chipLabel').textContent = p.name; chip.querySelector('.dot').style.background = p.dot;
+    if(p.authMethod==='apiKey'){
+      $('chipPct').textContent = conn ? '· '+p.key.cost : 'no key';
+      chip.className = 'chip' + (conn ? ' chip--meter' : '');
+    } else {
+      const u = p.signedIn ? p.usage[0] : null;
+      $('chipPct').textContent = u ? `5h ${u.pct}%` : 'signed out';
+      chip.className = 'chip' + (u && u.pct>=85 ? ' chip--high' : u && u.pct>=60 ? ' chip--warn' : '');
+    }
+    const av = $('avatarBtn');
+    if(p.authMethod==='apiKey'){ av.textContent = conn ? '🔑' : '👤'; av.className = 'avatar' + (conn ? '' : ' ghost'); }
+    else { av.textContent = p.signedIn ? (p.email ? p.email[0].toUpperCase() : 'K') : '👤'; av.className = 'avatar' + (p.signedIn ? '' : ' ghost'); }
+    $('composerDot').style.background = p.dot; $('composerProv').textContent = p.name;
+    $('composerModel').innerHTML = p.cap.models.map(m=>`<option value="${m.v}" ${p.settings.model===m.v?'selected':''}>${m.t}</option>`).join('');
+  }
+
+  function render(){
+    $('catcher').classList.toggle('hidden', !(state.acctOpen||state.settingsOpen));
+    $('backdrop').classList.toggle('hidden', !state.acctOpen);
+    if(state.acctOpen) renderAcct();
+    renderChrome();
+  }
+
+  /* ---- interactions ---- */
+  window.openAcct = ()=>{ state.acctOpen=true; render(); };
+  window.setActive = id => { if(connected(state.providers[id])) state.active=id; render(); };
+  window.setAuthMethod = (id,m) => { state.providers[id].authMethod=m; render(); };
+  window.saveKey = (id)=>{ const p=state.providers[id]; const inp=document.getElementById('keyInput'); const v=inp&&inp.value.trim();
+    p.key.present=true; if(v&&v.length>=4) p.key.hint=v.slice(-4); if(!p.key.cost||p.key.cost==='$0.00') p.key.cost='$0.00'; p.key.tier=p.key.tier||'pay-as-you-go · first-party'; state.active=id; render(); };
+  window.removeKey = (id)=>{ const p=state.providers[id]; p.key.present=false;
+    if(state.active===id){ const o=Object.keys(state.providers).find(k=>connected(state.providers[k])); if(o) state.active=o; } render(); };
+  window.signOut = id => { const p=state.providers[id]; p.signedIn=false;
+    if(state.active===id){ const o=Object.keys(state.providers).find(k=>connected(state.providers[k])); if(o) state.active=o; } render(); };
+  window.signIn = id => { const p=state.providers[id]; p.signedIn=true; state.active=id; render(); };
+  window.renderAcct = renderAcct;
+
+  $('avatarBtn').onclick = ()=>{ state.acctOpen=!state.acctOpen; render(); };
+  $('gearBtn').onclick   = ()=>{ state.acctOpen=true; render(); };
+  $('chip').onclick      = ()=>openAcct();
+  $('closeBtn').onclick  = ()=>{ state.acctOpen=false; render(); };
+  $('catcher').onclick   = ()=>{ state.acctOpen=false; render(); };
+  $('backdrop').onclick  = ()=>{ state.acctOpen=false; render(); };
+  $('composerModel').onchange = e=>{ state.providers[state.active].settings.model=e.target.value; render(); };
+
+  render();
+</script>
+</body>
+</html>
