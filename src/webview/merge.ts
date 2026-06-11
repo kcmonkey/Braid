@@ -513,13 +513,17 @@ export function continuationChildren(id: string, edges: Edge[]): string[] {
  * → branch falls back to forkSession-from-end (no resumeAt), i.e. the old eager behavior. (plans/Lazy-Fork)
  */
 export function continuationMode(
-  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[],
+  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[], turnEngine: EngineId = 'claude',
 ): { fork: boolean; resumeAt?: string } {
   const parentId = edges.find(
     (e) => e.target === board.id && ((e.data?.kind as string) ?? 'fork') !== 'merge',
   )?.source;
   const parent = parentId ? nodes.find((n) => n.id === parentId) : undefined;
   if (!parent?.data.sessionId) return { fork: !!board.data.parentSessionId }; // unresolvable parent → legacy
+  // M-MultiEngine (AD3): a foreign-engine graph parent can't be spine/branch-resumed — its session belongs to
+  // another engine. Keep the legacy base (forkBaseFor already rebuilt this board onto a same-engine anchor via
+  // mergeContext, so onSend won't even consult us here — this is a defensive guard). No-op when engines match.
+  if (boardEngine(parent.data) !== turnEngine) return { fork: !!board.data.parentSessionId };
   // The board's resume target must BE the parent's session for spine/branch to apply. A compact node (and
   // any node whose parentSessionId points at a forked/independent session, not the graph parent's) keeps the
   // legacy fork base — resuming/truncating the parent's session would be wrong. (plans/Lazy-Fork)
@@ -727,8 +731,15 @@ export function turnViewStatus(turns: Turn[], boardStatus: Status, i: number): T
 // The board (and any surviving dirty ancestors between it and the nearest clean ancestor) fork natively
 // from that clean ancestor; this replays their own Q/A on top so the deleted node is excluded. Q AND A of
 // every round (unlike flattenTurns, which only flattens answers). (plans/Node-Delete)
-export function buildRebuildSeed(turns: Turn[]): string {
-  const body = turns.map((t) => `Q: ${t.prompt}\nA: ${t.answer}`).join('\n\n');
+export function buildRebuildSeed(turns: Turn[], opts?: { withSteps?: boolean }): string {
+  // M-MultiEngine (AD5): a CROSS-ENGINE seed carries Q/A + tool steps (the foreign branch's tool narrative the
+  // new engine's session can't inherit). A same-engine Node-Delete rebuild stays Q/A-only (withSteps=false
+  // default → byte-identical to before, the no-op invariant). Steps reuse formatSteps (SSOT).
+  const withSteps = opts?.withSteps ?? false;
+  const body = turns.map((t) => {
+    const qa = `Q: ${t.prompt}\nA: ${t.answer}`;
+    return withSteps && t.steps && t.steps.length ? `${qa}\n${formatSteps(t.steps)}` : qa;
+  }).join('\n\n');
   return `Below is the prior conversation leading up to here (an intermediate step was removed). Continue from this context:\n\n${body}`;
 }
 
