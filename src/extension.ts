@@ -950,17 +950,21 @@ async function refreshAccount(canvasId: string) {
   const ctrl = accountControls.get(canvasId);
   if (!ctrl) return;
   const provider = readSettings().activeProvider;
-  let lastAccount: ProviderAccount | null = null;
+  // Identity FIRST — `ctrl.info()` is the fast one-shot `claude auth status` (~250ms). Push it immediately
+  // so the panel resolves quickly instead of blocking on the slower usage control request.
+  let account: ProviderAccount | null = await ctrl.info();
+  if (accountControls.get(canvasId) !== ctrl) return; // disposed during the await
+  postTo(canvasId, { type: 'account', provider, account, usage: null, busy: ctrl.busy.size > 0 });
+  // Usage (rate-limit windows) comes only from the streaming control session, which can lag while warming
+  // (~1s+). Poll it and fill the bars in as they arrive, keeping the already-shown identity. Retry identity
+  // too if the fast path missed.
   for (let i = 0; i < ACCOUNT_POLL_TRIES; i++) {
-    if (accountControls.get(canvasId) !== ctrl) return; // disposed or replaced mid-poll
-    const [account, usage] = await Promise.all([ctrl.info(), ctrl.usage()]);
-    if (accountControls.get(canvasId) !== ctrl) return; // disposed during the await
-    // A transient null (a stalled control request that timed out) must not blank a confirmed identity —
-    // keep the last good account so the panel doesn't flicker back to "not signed in" mid-poll.
-    if (account) lastAccount = account;
-    const shown = account ?? lastAccount;
-    postTo(canvasId, { type: 'account', provider, account: shown, usage, busy: ctrl.busy.size > 0 });
-    if (shown && usage && usage.windows.length > 0) break; // got identity + real usage → stop polling
+    if (accountControls.get(canvasId) !== ctrl) return;
+    const usage = await ctrl.usage();
+    if (accountControls.get(canvasId) !== ctrl) return;
+    if (!account) account = await ctrl.info();
+    postTo(canvasId, { type: 'account', provider, account, usage, busy: ctrl.busy.size > 0 });
+    if (account && usage && usage.windows.length > 0) break; // got identity + real usage → stop polling
     await new Promise((r) => setTimeout(r, ACCOUNT_POLL_INTERVAL_MS));
   }
 }

@@ -44,6 +44,21 @@ export function toProviderAccount(raw: any): ProviderAccount | null {
   };
 }
 
+/** Map the bundled CLI's `claude auth status` JSON → neutral ProviderAccount. This is the FAST identity
+ * path (~250ms one-shot spawn vs ~1.2s for the streaming control request) and carries an authoritative
+ * `loggedIn` boolean, so it's the preferred source. Shape (probe 2026-06-11):
+ * `{loggedIn, authMethod, apiProvider, email, orgId, orgName, subscriptionType}`. */
+export function toProviderAccountFromStatus(raw: any): ProviderAccount | null {
+  if (!raw || typeof raw !== 'object') return null;
+  return {
+    signedIn: raw.loggedIn === true, // authoritative — the CLI's own logged-in flag
+    email: typeof raw.email === 'string' ? raw.email : undefined,
+    organization: typeof raw.orgName === 'string' ? raw.orgName : undefined,
+    plan: typeof raw.subscriptionType === 'string' ? raw.subscriptionType : undefined,
+    backend: typeof raw.apiProvider === 'string' ? raw.apiProvider : undefined,
+  };
+}
+
 // Window id → display label, in render order. Mirrors the SDKControlGetUsageResponse.rate_limits keys.
 const USAGE_WINDOWS: [string, string][] = [
   ['five_hour', '5-hour'],
@@ -99,6 +114,13 @@ export class ClaudeAccountControl implements AccountController {
   constructor(private readonly claudeBinary?: string) {}
 
   async info(): Promise<ProviderAccount | null> {
+    // Prefer the fast one-shot `claude auth status` (~250ms, authoritative `loggedIn`) over the streaming
+    // control request (~1.2s) — this is what makes the panel resolve quickly. Fall back to the control
+    // session's accountInfo() if the binary is unavailable or the spawn fails.
+    if (this.claudeBinary) {
+      const status = await this.authStatus();
+      if (status !== null) return toProviderAccountFromStatus(status);
+    }
     try {
       // Timeout-bounded: a stalled control request must degrade to null (→ retry) not hang the panel.
       const raw = await withTimeout<any>(this._q.accountInfo(), CONTROL_TIMEOUT_MS, TIMEOUT);
@@ -108,6 +130,21 @@ export class ClaudeAccountControl implements AccountController {
       console.error('[Braid] accountInfo failed:', e?.message ?? e);
       return null;
     }
+  }
+
+  /** Spawn the bundled CLI's `claude auth status` and return its parsed JSON (or null on any failure).
+   * Non-interactive + read-only (probe-verified: returns immediately, exits 0, no TTY prompt). */
+  private authStatus(): Promise<any | null> {
+    return new Promise((resolve) => {
+      let out = '';
+      let settled = false;
+      const cp = spawn(this.claudeBinary!, ['auth', 'status'], { stdio: ['ignore', 'pipe', 'ignore'] });
+      const done = (v: any) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
+      const timer = setTimeout(() => { try { cp.kill(); } catch { /* ignore */ } done(null); }, CONTROL_TIMEOUT_MS);
+      cp.stdout?.on('data', (d) => { out += d; });
+      cp.on('close', () => { try { done(JSON.parse(out)); } catch { done(null); } });
+      cp.on('error', (e: any) => { console.error('[Braid] auth status spawn failed:', e?.message ?? e); done(null); });
+    });
   }
 
   async usage(): Promise<ProviderUsage | null> {

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { toProviderAccount, toProviderUsage, toRateLimitSnapshot } from './account';
+import { toProviderAccount, toProviderAccountFromStatus, toProviderUsage, toRateLimitSnapshot } from './account';
 
 describe('toProviderAccount', () => {
   it('maps a subscription (firstParty) account → signedIn with plan/backend', () => {
@@ -22,6 +22,24 @@ describe('toProviderAccount', () => {
   it('returns null for non-object input', () => {
     expect(toProviderAccount(null)).toBeNull();
     expect(toProviderAccount(undefined)).toBeNull();
+  });
+});
+
+describe('toProviderAccountFromStatus', () => {
+  it('maps `claude auth status` JSON → signedIn from the authoritative loggedIn flag', () => {
+    expect(toProviderAccountFromStatus({
+      loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty',
+      email: 'a@b.com', orgId: 'x', orgName: "a@b.com's Organization", subscriptionType: 'max',
+    })).toEqual({ signedIn: true, email: 'a@b.com', organization: "a@b.com's Organization", plan: 'max', backend: 'firstParty' });
+  });
+
+  it('loggedIn:false → signedIn false (even if a stale email lingers)', () => {
+    expect(toProviderAccountFromStatus({ loggedIn: false, email: 'a@b.com', apiProvider: 'firstParty' })!.signedIn).toBe(false);
+  });
+
+  it('returns null for non-object input', () => {
+    expect(toProviderAccountFromStatus(null)).toBeNull();
+    expect(toProviderAccountFromStatus(undefined)).toBeNull();
   });
 });
 
