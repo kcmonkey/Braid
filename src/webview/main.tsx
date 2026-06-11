@@ -1239,7 +1239,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
 
   // No stop during compaction: it's a discrete /compact op, not a stoppable generation, and aborting it
   // mid-flight would strand the node in 'streaming' (runCompact doesn't settle on abort). Cancel = delete.
-  const stopBtn = (data.status === 'streaming' || data.status === 'waiting') && !compacting ? (
+  const stopBtn = (data.status === 'streaming' || data.status === 'waiting') && !compacting && !queuedWaiting ? (
     <button
       className="board__stop nodrag nopan"
       title={data.status === 'waiting' ? 'Stop waiting — end background work and finalize this board' : 'Stop generating'}
@@ -1316,7 +1316,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         {data.unread && <span className="board__unread" title="Unread · finished — clears once you open it" />}
         {/* Working spinner only when actually generating — a pending AskUserQuestion / permission prompt is
             WAITING on you, not working, so show the ❓ / 🔐 badge instead (keeps the states unambiguous). */}
-        {data.status === 'streaming' && !needsAsk && !needsPerm && <span className="board__working" title="Generating…" />}
+        {queuedWaiting
+          ? <span className="board__queuedbadge" title="Queued after the current answer">Queued</span>
+          : data.status === 'streaming' && !needsAsk && !needsPerm && <span className="board__working" title="Generating…" />}
         {/* Async continuation (异步续接): held open for background work / a scheduled wakeup — a distinct
             indicator (not the streaming spinner) so the board reads as "waiting", not stuck/done. */}
         {data.status === 'waiting' && <span className="board__awaiting" title={`Waiting — ${describeAsyncPending(data.asyncPending) || 'background work'} (will continue automatically; Stop to end)`}>⏱</span>}
@@ -1338,6 +1340,10 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
           badge+tags, with the summary floating above). detail = the full body below. */}
       {!isDetail || isCollapsedGraph ? null : compacting ? (
         <div className="board__summary board__compacting"><span className="board__dot" /> 🗜 Compacting…</div>
+      ) : queuedWaiting ? (
+        <div className="board__summary board__queued">
+          <span className="queued__dot" /> Queued after the current answer
+        </div>
       ) : data.compact && !data.prompt ? (
         // Compacted-boundary node: a context checkpoint, NOT an input board. Show the compacted summary
         // (truncated) instead of a composer; continue by forking (the + handle), or select it to merge.
@@ -2513,23 +2519,26 @@ function AccountsPanel({ accounts, activeProvider, authMethod, apiKeyStatus, onS
   );
 }
 
-// Active-provider chip (top-right) — provider dot + name + plan-limit usage. The usage% rides the free
-// `rate_limit_event` on every turn stream (no control session); until the first event lands the chip shows
-// just the provider name (no %). Color bands on utilization (≥60 warn, ≥85 high). Click → Accounts overlay.
+// Active-provider usage chip (top-right) — a pure usage pill: provider-accent dot + plan-limit usage%. The
+// active provider's NAME is intentionally omitted: it's already shown (highlighted) in the adjacent segmented
+// provider switch, so repeating it here read as duplicated. The usage% rides the free `rate_limit_event` on
+// every turn stream (no control session). Until the first event lands there's nothing to show (and a lone dot
+// looks broken), so the chip hides — the switch + avatar already convey identity and the Accounts entry point.
+// Color bands on utilization (≥60 warn, ≥85 high). Click → Accounts overlay. (providerName kept for tooltips.)
 function UsageChip({ snapshot, providerName, accent, onClick, apiKeyMode }: { snapshot: RateLimitSnapshot | null; providerName: string; accent: string; onClick: () => void; apiKeyMode?: boolean }) {
   // API-key auth has no subscription plan windows — show "API" (metered), not a %. (authMethod)
   const pct = !apiKeyMode && snapshot && snapshot.utilizationPct != null ? Math.round(snapshot.utilizationPct) : null;
   const band = usageBand(pct);
   const win = snapshot?.windowId === 'seven_day' ? '7d' : snapshot?.windowId === 'five_hour' ? '5h' : '';
+  if (!apiKeyMode && pct == null) return null; // no usage data yet → hide (avoid a lonely, label-less dot)
   return (
     <button
       type="button"
       className={`usagechip ${apiKeyMode ? 'usagechip--api' : band === 'high' ? 'usagechip--high' : band === 'warn' ? 'usagechip--warn' : ''}`}
-      title={apiKeyMode ? `${providerName} — API key (metered); click for Accounts` : pct != null ? `${providerName} — plan usage; click for Accounts` : `${providerName} — click for Accounts`} onClick={onClick}
+      title={apiKeyMode ? `${providerName} — API key (metered); click for Accounts` : `${providerName} — plan usage; click for Accounts`} onClick={onClick}
     >
       <span className="usagechip__dot" style={{ background: accent }} />
-      <span className="usagechip__name">{providerName}</span>
-      {apiKeyMode ? <span className="usagechip__pct">API</span> : pct != null && <span className="usagechip__pct">{win ? `${win} ` : ''}{pct}%</span>}
+      {apiKeyMode ? <span className="usagechip__pct">API</span> : <span className="usagechip__pct">{win ? `${win} ` : ''}{pct}%</span>}
     </button>
   );
 }
@@ -2873,7 +2882,52 @@ function App() {
     // deferred — post() would fire `resume: undefined` and open a brand-new empty session with no
     // inherited context. (focusSend keeps nodesRef.current in sync synchronously so the just-created
     // child is findable here.)
-    const node = nodesRef.current.find((n) => n.id === boardId);
+    let node = nodesRef.current.find((n) => n.id === boardId);
+    if (node?.data.queueParentId) {
+      const queueParent = nodesRef.current.find((n) => n.id === node!.data.queueParentId);
+      const queueParentLive = !!queueParent && (queueParent.data.status === 'streaming' || queueParent.data.status === 'waiting');
+      if (queueParentLive) {
+        let sendText = prompt;
+        const attached = attachByBoardRef.current[fromId]?.attachment;
+        if (attached) {
+          sendText = `${buildEditorContextBlock(attached)}\n\n${sendText}`;
+          clearAttach(fromId);
+        }
+        const pendingImages = imagesByBoardRef.current[fromId] ?? [];
+        const images = pendingImages.length ? pendingImages.map((i) => ({ mediaType: i.mediaType, data: i.data })) : undefined;
+        const newData: Partial<BoardData> = {
+          prompt, answer: '', thinking: '', thinks: [], thoughtMs: undefined, status: 'streaming', steps: [],
+          contextTokens: undefined, contextWindow: undefined, autoCompacted: undefined,
+          summary: undefined, miniSummary: undefined, tags: undefined,
+          parentSessionId: node.data.parentSessionId ?? queueParent.data.sessionId,
+          queueParentId: queueParent.id,
+          queueStarted: false,
+        };
+        const newNodes = nodesRef.current.map((n) => (n.id === boardId ? { ...n, data: { ...n.data, ...newData } } : n));
+        setNodes(newNodes);
+        nodesRef.current = newNodes;
+        post({
+          type: 'followup',
+          boardId: queueParent.id,
+          routeBoardId: boardId,
+          text: sendText,
+          interrupt: false,
+          resume: queueParent.data.sessionId,
+          turnIndex: 0,
+          images,
+          engine: boardEngine(queueParent.data),
+        });
+        if (pendingImages.length) clearImages(fromId);
+        return;
+      }
+      const parentSessionId = queueParent?.data.sessionId ?? node.data.parentSessionId;
+      const newNodes = nodesRef.current.map((n) => (n.id === boardId
+        ? { ...n, data: { ...n.data, queueParentId: undefined, queueStarted: undefined, ...(parentSessionId ? { parentSessionId } : {}) } }
+        : n));
+      setNodes(newNodes);
+      nodesRef.current = newNodes;
+      node = newNodes.find((n) => n.id === boardId);
+    }
     const parentSessionId = node?.data.parentSessionId;
     const mergeContext = node?.data.mergeContext;
     // The node displays the user's raw question; mergeContext / attachment are only prepended for the engine.
@@ -3044,6 +3098,23 @@ function App() {
     const parent = nodesRef.current.find((n) => n.id === parentId);
     if (!parent) return;
     const childId = `b${idRef.current++}`;
+    if (parent.data.status === 'streaming' || parent.data.status === 'waiting') {
+      const child: BoardNodeT = {
+        id: childId, type: 'board', selected: true,
+        position: parent.position,
+        data: {
+          prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
+          engine: boardEngine(parent.data),
+          parentSessionId: parent.data.sessionId,
+          queueParentId: parentId,
+          onSend, onFork, onStop, onCompact,
+        },
+      };
+      const newEdges = edgesRef.current.concat(makeEdge(parentId, childId, 'fork'));
+      setEdges(newEdges);
+      setNodes(autoLayout(nodesRef.current.map((n): BoardNodeT => ({ ...n, selected: false })).concat(child), newEdges));
+      return;
+    }
     const child: BoardNodeT = {
       id: childId, type: 'board', selected: true, // select the new board → it + its lineage render detail
       position: parent.position, // placeholder; layoutGraph assigns the real spot
@@ -3764,6 +3835,22 @@ function App() {
   const clearApiKey = useCallback((id: EngineId) => post({ type: 'clearApiKey', provider: id }), []);
   const adoptEnvKey = useCallback((id: EngineId) => post({ type: 'adoptEnvKey', provider: id }), []);
 
+  const queueStartFields = useCallback((boardId: string): Partial<BoardData> => {
+    const d = nodesRef.current.find((n) => n.id === boardId)?.data;
+    return d?.queueParentId && !d.queueStarted ? { queueStarted: true } : {};
+  }, []);
+
+  const queueFinishFields = useCallback((boardId: string): Partial<BoardData> => {
+    const d = nodesRef.current.find((n) => n.id === boardId)?.data;
+    if (!d?.queueParentId) return {};
+    const parentSessionId = d.parentSessionId ?? nodesRef.current.find((n) => n.id === d.queueParentId)?.data.sessionId;
+    return {
+      queueParentId: undefined,
+      queueStarted: undefined,
+      ...(parentSessionId ? { parentSessionId } : {}),
+    };
+  }, []);
+
   // host → webview
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -3822,13 +3909,21 @@ function App() {
           break;
         }
         // session is board-level (same session across a board's turns) → no turnIndex routing.
-        case 'session': patch(m.boardId, () => ({ sessionId: m.sessionId })); break;
+        case 'session':
+          setNodes((ns) => ns.map((n) => {
+            if (n.id === m.boardId) return { ...n, data: { ...n.data, sessionId: m.sessionId } };
+            if (n.data.queueParentId === m.boardId && !n.data.parentSessionId) {
+              return { ...n, data: { ...n.data, parentSessionId: m.sessionId } };
+            }
+            return n;
+          }));
+          break;
         // M11: route streamed content to the right round (turnIndex) of a multi-turn board; single-turn
         // boards (no turns[]) patch the top level as before. status/sessionId/context are board-level.
-        case 'update': patchTurn(m.boardId, m.turnIndex, () => ({ answer: m.text, thinking: m.thinking ?? '' }), { status: 'streaming' }); break;
+        case 'update': patchTurn(m.boardId, m.turnIndex, () => ({ answer: m.text, thinking: m.thinking ?? '' }), { status: 'streaming', ...queueStartFields(m.boardId) }); break;
         // Positioned thinking marks (full array each time) → replace this round's `thinks` so the pills
         // splice into the prose at their offsets. The active mark (if any) drives the live "Thinking…" pulse.
-        case 'thinking': patchTurn(m.boardId, m.turnIndex, () => ({ thinks: m.thinks }), {}); break;
+        case 'thinking': patchTurn(m.boardId, m.turnIndex, () => ({ thinks: m.thinks }), queueStartFields(m.boardId)); break;
         case 'done': {
           // A done for an INTERMEDIATE turn (queue/interrupt chained more) settles that round but keeps the
           // board streaming (patchTurn drops the status); only the final turn flags unread/auto-compact.
@@ -3842,7 +3937,7 @@ function App() {
             () => ({ answer: m.text || '', thinking: m.thinking ?? '', thinks: m.thinks ?? [], done: true }),
             // context-usage is board-level "current fill" → only the final turn's value is meaningful;
             // applying an intermediate (e.g. interrupted) turn's would briefly flicker the badge wrong.
-            { status: m.isError ? 'error' : 'done', sessionId: m.sessionId, ...(isFinal && m.messageUuid ? { messageUuid: m.messageUuid } : {}), ...(isFinal ? { contextTokens: m.contextTokens, contextWindow: m.contextWindow } : {}), ...(m.autoCompacted ? { autoCompacted: true } : {}), ...(unread ? { unread: true } : {}) });
+            { status: m.isError ? 'error' : 'done', sessionId: m.sessionId, ...queueFinishFields(m.boardId), ...(isFinal && m.messageUuid ? { messageUuid: m.messageUuid } : {}), ...(isFinal ? { contextTokens: m.contextTokens, contextWindow: m.contextWindow } : {}), ...(m.autoCompacted ? { autoCompacted: true } : {}), ...(unread ? { unread: true } : {}) });
           if (isFinal) {
             // M11: if this turn pushed context past the threshold (and the engine didn't already
             // auto-compact internally), queue a self-driven compact node. Fired by the [nodes] effect
