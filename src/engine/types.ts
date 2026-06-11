@@ -214,6 +214,9 @@ export interface Engine {
   mcpControl(cwd: string): Promise<McpController | null>;
   // Account/usage/auth control session (lazy; host owns lifecycle). null = SDK unavailable.
   accountControl(cwd: string): Promise<AccountController | null>;
+  // Fast, control-session-free identity fetch (so the toolbar avatar populates on canvas load without
+  // opening the Accounts panel). null = not signed in / unsupported / unavailable (never throws).
+  accountIdentity(cwd: string): Promise<ProviderAccount | null>;
   // The provider's available slash commands for composer autofill (display-side specs). [] = none /
   // unsupported / SDK unavailable (never throws). Each provider supplies its own set. (multi-provider seam)
   listSlashCommands(cwd: string): Promise<SlashCommandSpec[]>;

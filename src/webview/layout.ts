@@ -142,8 +142,10 @@ export function graphTopLeft(nodes: BoardNodeT[]): { x: number; y: number } {
  *    via accumulated selected-anchor translations.)
  * `anchorPrevSize` (optional): the selected board's measured size BEFORE this relayout. When its width
  * differs from the board's current width — a far↔detail LOD flip — the selected board is pinned by its
- * CENTER (not top-left) so it grows/shrinks symmetrically from the middle. Omit it (or pass an equal width)
- * to keep the plain top-left pin (height-only growth like streaming, and all structural relayouts).
+ * horizontal CENTER but TOP edge, so it grows symmetrically left+right yet still flows DOWNWARD (taller
+ * detail content doesn't shove the board up — a large upward jump read as the viewport lurching). Omit it
+ * (or pass an equal width) to keep the plain top-left pin (height-only growth like streaming, and all
+ * structural relayouts).
  * Pure: the viewport is not involved; callers feed the current nodes and apply the returned positions.
  */
 export function relayoutAnchored(
@@ -159,17 +161,19 @@ export function relayoutAnchored(
     const cur = nodes.find((n) => n.id === selectedId);
     const laidSel = laid.find((n) => n.id === selectedId);
     if (cur && laidSel) {
-      const newW = cur.measured?.width ?? NODE_W, newH = cur.measured?.height ?? NODE_H;
+      const newW = cur.measured?.width ?? NODE_W;
       // When the selected board CHANGED WIDTH since the last layout — a far→detail LOD flip that grew it
-      // (320→480) or the reverse — pin its CENTER so it enlarges/shrinks symmetrically out from the middle
-      // instead of from the top-left corner. Otherwise (width unchanged — e.g. streaming content growing
-      // only the HEIGHT) pin the TOP-LEFT as before, so new content flows downward in reading order and the
-      // graph doesn't jitter. `anchorPrevSize` is the board's measured size BEFORE this change; when absent
-      // (structural relayouts that don't pass it) or width-unchanged, the +size/2 terms cancel out and this
-      // is exactly the old top-left pin.
+      // (320→480) or the reverse — pin its horizontal CENTER so it enlarges/shrinks symmetrically left+right
+      // instead of from the left edge. But keep the TOP pinned VERTICALLY: detail boards are much taller, so
+      // centering the height would shove the board UPWARD by ~Δheight/2 (100–200px) — that big jump read as
+      // the viewport lurching. Pinning the top makes the taller detail content grow DOWNWARD in place (same
+      // as streaming / the old behavior), with only the symmetric width change. Otherwise (width unchanged —
+      // e.g. streaming content growing only the HEIGHT) pin the full TOP-LEFT. `anchorPrevSize` is the
+      // board's measured size BEFORE this change; when absent (structural relayouts that don't pass it) or
+      // width-unchanged, the +width/2 terms cancel out and this is exactly the old top-left pin.
       if (anchorPrevSize && anchorPrevSize.width !== newW) {
-        before = { x: cur.position.x + anchorPrevSize.width / 2, y: cur.position.y + anchorPrevSize.height / 2 };
-        after = { x: laidSel.position.x + newW / 2, y: laidSel.position.y + newH / 2 };
+        before = { x: cur.position.x + anchorPrevSize.width / 2, y: cur.position.y };
+        after = { x: laidSel.position.x + newW / 2, y: laidSel.position.y };
       } else {
         before = cur.position;
         after = laidSel.position;

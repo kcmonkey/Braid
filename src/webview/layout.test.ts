@@ -153,19 +153,21 @@ describe('relayoutAnchored', () => {
   });
 
   // far→detail: the selected board grew wider (320→480) and taller (200→400). With its PRE-grow size passed,
-  // it must be pinned by its CENTER so it enlarges symmetrically out from the middle — not anchored at the
-  // top-left corner growing rightward/downward. (user: "make the anchor centered")
-  it('centers the selected board across a width change (grows from the middle, not the top-left)', () => {
+  // it must be pinned by its horizontal CENTER (symmetric left+right width grow) but keep its TOP fixed, so
+  // the taller detail content grows DOWNWARD in place — NOT shoved upward (which read as a viewport lurch).
+  // (user: "make the anchor centered" + "the viewport seems move a bit ... unpleasant")
+  it('centers the selected board horizontally but pins its top across a width change', () => {
     const a = node('a');
     const b: BoardNodeT = { ...node('b'), measured: { width: 480, height: 400 } }; // already grown to detail
     const laid = layoutGraph([a, b], edges);
     const beforeB = at(laid, 'b');
-    const oldCenter = { x: beforeB.x + 320 / 2, y: beforeB.y + 200 / 2 }; // center while it was still far
     const out = relayoutAnchored(laid, edges, 'TB', 'b', { width: 320, height: 200 });
     const afterB = at(out, 'b');
-    const newCenter = { x: afterB.x + 480 / 2, y: afterB.y + 400 / 2 };
-    expect(newCenter).toEqual(oldCenter); // center preserved → symmetric grow
-    expect(afterB).not.toEqual(beforeB);  // ... which is NOT the old top-left pin
+    // horizontal center preserved (was-far center 320/2, now-detail center 480/2 land on the same x):
+    expect(afterB.x + 480 / 2).toBeCloseTo(beforeB.x + 320 / 2, 5);
+    // top edge held — NO upward shift (the board grows downward, not centered vertically):
+    expect(afterB.y).toBeCloseTo(beforeB.y, 5);
+    expect(afterB.x).not.toBeCloseTo(beforeB.x, 5); // ... and it's not the old top-left pin (x did move)
   });
 
   // Streaming: only the HEIGHT changed (content arriving), width is constant. Then the board must keep its

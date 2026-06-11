@@ -102,6 +102,30 @@ export function toRateLimitSnapshot(raw: any): RateLimitSnapshot | null {
   };
 }
 
+/** Spawn the bundled CLI's `claude auth status` and return its parsed JSON (or null on any failure).
+ * Non-interactive + read-only (probe-verified: returns immediately, exits 0, no TTY prompt). The FAST
+ * identity path (~250ms) — no streaming control session needed, so it's also usable standalone (e.g. an
+ * identity-only fetch on canvas load, before any panel is opened). */
+export function fetchAuthStatus(binary: string, timeoutMs = 8000): Promise<any | null> {
+  return new Promise((resolve) => {
+    let out = '';
+    let settled = false;
+    const cp = spawn(binary, ['auth', 'status'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const done = (v: any) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
+    const timer = setTimeout(() => { try { cp.kill(); } catch { /* ignore */ } done(null); }, timeoutMs);
+    cp.stdout?.on('data', (d) => { out += d; });
+    cp.on('close', () => { try { done(JSON.parse(out)); } catch { done(null); } });
+    cp.on('error', (e: any) => { console.error('[Braid] auth status spawn failed:', e?.message ?? e); done(null); });
+  });
+}
+
+/** Identity-only fetch via `claude auth status` → neutral ProviderAccount (null if binary missing / fails).
+ * No control session, so the host can populate the avatar on canvas load without spinning one up. */
+export async function claudeAccountIdentity(binary: string | undefined): Promise<ProviderAccount | null> {
+  if (!binary) return null;
+  return toProviderAccountFromStatus(await fetchAuthStatus(binary));
+}
+
 /** Account/usage control over a long-lived streaming-input query (implements AccountController). Twin of
  * ClaudeMcpControl: the adapter creates it, sets `_q`, and drains the stream to pump transport. */
 export class ClaudeAccountControl implements AccountController {
@@ -118,7 +142,7 @@ export class ClaudeAccountControl implements AccountController {
     // control request (~1.2s) — this is what makes the panel resolve quickly. Fall back to the control
     // session's accountInfo() if the binary is unavailable or the spawn fails.
     if (this.claudeBinary) {
-      const status = await this.authStatus();
+      const status = await fetchAuthStatus(this.claudeBinary, CONTROL_TIMEOUT_MS);
       if (status !== null) return toProviderAccountFromStatus(status);
     }
     try {
@@ -130,21 +154,6 @@ export class ClaudeAccountControl implements AccountController {
       console.error('[Braid] accountInfo failed:', e?.message ?? e);
       return null;
     }
-  }
-
-  /** Spawn the bundled CLI's `claude auth status` and return its parsed JSON (or null on any failure).
-   * Non-interactive + read-only (probe-verified: returns immediately, exits 0, no TTY prompt). */
-  private authStatus(): Promise<any | null> {
-    return new Promise((resolve) => {
-      let out = '';
-      let settled = false;
-      const cp = spawn(this.claudeBinary!, ['auth', 'status'], { stdio: ['ignore', 'pipe', 'ignore'] });
-      const done = (v: any) => { if (!settled) { settled = true; clearTimeout(timer); resolve(v); } };
-      const timer = setTimeout(() => { try { cp.kill(); } catch { /* ignore */ } done(null); }, CONTROL_TIMEOUT_MS);
-      cp.stdout?.on('data', (d) => { out += d; });
-      cp.on('close', () => { try { done(JSON.parse(out)); } catch { done(null); } });
-      cp.on('error', (e: any) => { console.error('[Braid] auth status spawn failed:', e?.message ?? e); done(null); });
-    });
   }
 
   async usage(): Promise<ProviderUsage | null> {
