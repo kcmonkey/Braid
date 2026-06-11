@@ -2590,11 +2590,10 @@ function App() {
   const [dir, setDir] = useState<LayoutDir>(() => pickDir());
   const dirRef = useRef<LayoutDir>(dir);
   // Detail-WIDTH board set as of the last paint — the centering layout effect diffs it to find which boards
-  // just changed width (far↔detail), and the last zoom band to tell a selection change from a zoom-band flip.
+  // just changed width (far↔detail), whether the cause was a selection click or a zoom-band crossing.
   // `snapLod` suppresses the node transition for that one frame so the recenter applies WITHOUT the 150ms
   // glide → far↔detail growth is symmetric with no settling slide.
   const prevWideRef = useRef<Set<string>>(new Set());
-  const prevZoomComprRef = useRef<boolean | null>(null);
   const [snapLod, setSnapLod] = useState(false);
   // Layout uses each node's REAL measured height (detail-expanded boards are tall, far gists are short),
   // so the graph packs compactly and reflows whenever the selection (→ which boards are detail) changes.
@@ -3726,18 +3725,18 @@ function App() {
   //  • height Δ is content-driven, so read the board's NEW height straight from the DOM here — measured.height
   //    still holds the OLD height (React Flow's ResizeObserver only updates it post-paint), giving us the full
   //    delta pre-paint. The dagre relayout that follows keeps its top-left pin, preserving this recenter.
-  // Guards: (a) a freshly forked board (no `measured` yet) is born detail via autoLayout, not a far→detail
-  // transition — skip it; (b) a zoom-band crossing flips many boards at once while the viewport is already
-  // scaling — re-sync the baseline without nudging. Keyed on `wideSig` (the 480px-rendered set), so it fires
-  // exactly on real width changes.
+  // Applies whatever the trigger — a selection click OR a zoom-band crossing (zooming in past COMPRESS_ZOOM
+  // flips the lineage far→detail just like clicking): both change real width and must scale about center, else
+  // a zoom-expanded board drops below its horizontal parent/child. Keyed on `wideSig` (the 480px-rendered
+  // set), so it fires exactly on real width changes. Guard: a freshly forked board (no `measured` yet) is born
+  // detail via autoLayout, not a far→detail transition — skip it (handled in `plan`).
   useLayoutEffect(() => {
     const prevWide = prevWideRef.current;
-    const zoomFlip = prevZoomComprRef.current !== zoomCompressed; // a zoom-band crossing, not a selection change
     const entered: string[] = [], left: string[] = [];
     for (const id of wideIds) if (!prevWide.has(id)) entered.push(id);   // far → detail (grew)
     for (const id of prevWide) if (!wideIds.has(id)) left.push(id);      // detail → far (shrank)
     prevWideRef.current = wideIds;
-    if (zoomFlip || (!entered.length && !left.length)) return;
+    if (!entered.length && !left.length) return;
     // Each changed board's CURRENT rendered height, straight from the DOM (this effect runs pre-paint, so the
     // new LOD content is in the DOM but measured.height still holds the old height).
     const domH = new Map<string, number>();
@@ -3767,9 +3766,6 @@ function App() {
     const raf = requestAnimationFrame(() => setSnapLod(false));
     return () => cancelAnimationFrame(raf);
   }, [wideSig]);
-  // Track the zoom band separately so the effect above can always tell a zoom-band crossing from a selection
-  // change — even across crossings that don't alter `wideSig` (e.g. nothing selected), which wouldn't fire it.
-  useEffect(() => { prevZoomComprRef.current = zoomCompressed; }, [zoomCompressed]);
 
   // auto-direction: when the viewport aspect ratio crosses over (wide↔tall), flip dagre's flow
   // direction and re-lay out. Guard on `d === dirRef.current` so plain resizes within one orientation
