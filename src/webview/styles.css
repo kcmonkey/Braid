@@ -165,6 +165,18 @@ body {
   border: 2px solid var(--accent-soft); border-top-color: var(--accent);
   animation: board-spin .7s linear infinite;
 }
+.board__queuedbadge {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted-2);
+  font-size: 11px;
+  line-height: 1;
+}
 @keyframes board-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   /* NOTE: .board__working is intentionally NOT reset here — the "working" spinner is functional status,
@@ -199,6 +211,17 @@ body {
   color: #b7b4ff; background: #25243a; border: 1px solid #5b58a6; border-radius: 5px; padding: 3px 7px;
 }
 .board__collapse-expand:hover { background: #302f4a; color: var(--text); }
+/* Per-board "collapse history" button — a head-row sibling of the compact 🗜 button, in the collapse purple. */
+.board__collapse {
+  flex: none; font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
+  color: #b7b4ff; background: #25243a; border: 1px solid #5b58a6; border-radius: 5px; padding: 3px 6px;
+}
+.board__collapse:hover { background: #302f4a; color: var(--text); }
+/* Folded-board count chip on a collapsed representative (the gist carries the meaning; this is just the size). */
+.board__foldcount {
+  flex: none; font-size: 11px; font-weight: 700; color: #b7b4ff; background: #25243a;
+  border: 1px solid #4a4878; border-radius: 6px; padding: 1px 7px; white-space: nowrap;
+}
 
 .board__head {
   display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; cursor: pointer;
@@ -348,6 +371,7 @@ body {
 @keyframes pulse { 0%,100% { opacity: .3; } 50% { opacity: 1; } }
 
 .board__summary { padding: 10px 12px; font-size: 13px; line-height: 1.65; letter-spacing: .02em; color: var(--muted); }
+.board__queued { display: flex; align-items: center; gap: 7px; font-style: italic; color: var(--muted-2); }
 .board__summary .md { font-size: 13px; line-height: 1.65; }
 .board__summary .md p { margin: 4px 0; }
 .board__summary .md ul, .board__summary .md ol { margin: 4px 0; padding-left: 18px; }
@@ -848,6 +872,7 @@ body {
 .composer__input::placeholder { color: var(--muted-2); }
 .composer__input:disabled { opacity: .6; }
 .composer__hint { font-size: 12px; color: var(--compact); line-height: 1.4; }
+.composer__hint--queued { display: flex; align-items: center; gap: 7px; color: var(--muted-2); }
 /* M9: compacting state shown in place of the composer while /compact runs on the focused node. */
 .composer--compacting {
   flex-direction: row; align-items: center; gap: 9px;

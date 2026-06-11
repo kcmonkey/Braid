@@ -44,6 +44,13 @@ export const BRANCH_SUMMARY_VERSION = 4;
 // still bounding total subprocesses). (policy/mechanism — principle 14)
 export const MAX_CONCURRENT_BRANCH_SUMMARIES = 2;
 
+// Collapse-history digest version — independent of DIGEST_VERSION / BRANCH_SUMMARY_VERSION. Bump (only)
+// when the folded-history summarizer prompt or the digest-key field set (collapseDigestKey) changes in a
+// way that should retroactively re-run on already-summarized collapsed nodes: it is folded into the key,
+// so a bump makes every collapsed representative's stored key mismatch → needsCollapseDigest re-requests.
+//   v1: initial folded-history card + mini + tags (reuses the per-round summarizer over combined Q/A).
+export const COLLAPSE_DIGEST_VERSION = 1;
+
 // One tool invocation within a turn: the tool_use (id/name/input) plus its paired tool_result.
 // `result` is captured truncated (see TOOL_RESULT_CAP) and persisted with the board (M4 gap2).
 export interface ToolStep {
@@ -262,6 +269,16 @@ export interface Turn {
 
 export interface CollapsedGraph {
   hiddenIds: string[];
+  // Digest of the FOLDED history (the hidden ancestors + this representative), synthesized by Haiku from
+  // their combined Q/A so the collapsed card shows WHAT it hides — not a bare board count. Mirrors the
+  // per-board digest (summary / miniSummary / tags) but describes the whole folded chain. `digestKey` gates
+  // staleness: it encodes COLLAPSE_DIGEST_VERSION + the folded boards' ids/answer-lengths; needsCollapseDigest
+  // re-requests on a mismatch (more history folded in, content changed, or a version bump). All display-only;
+  // persisted as part of collapsedGraph via `...data`.
+  summary?: string;
+  miniSummary?: string;
+  tags?: BoardTag[];
+  digestKey?: string;
 }
 
 export interface BoardData {
@@ -588,8 +605,11 @@ export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], select
   return [...plans.entries()]
     .map(([targetId, ids]) => ({ targetId, hiddenIds: [...ids].sort((a, b) => (byId.get(a)?.data.seq ?? 0) - (byId.get(b)?.data.seq ?? 0)) }))
     .filter((p) => {
+      // Nothing to fold (e.g. a root's child whose visible sibling pins the target at the root, which has no
+      // ancestors) → not a real collapse; drop it so callers / the per-board affordance see no plan.
+      if (!p.hiddenIds.length) return false;
       const existing = byId.get(p.targetId)?.data.collapsedGraph?.hiddenIds ?? [];
-      return p.hiddenIds.some((id) => !existing.includes(id)) || !byId.get(p.targetId)?.data.collapsedGraph;
+      return p.hiddenIds.some((id) => !existing.includes(id));
     });
 }
 
@@ -640,6 +660,49 @@ export function syncHiddenEdges(nodes: BoardNodeT[], edges: Edge[]): Edge[] {
     return { ...e, hidden: shouldHide };
   });
   return changed ? out : edges;
+}
+
+// ---- Collapse-history digest (folded-history summary on a collapsed representative) ----
+
+/** The boards whose content the collapsed representative's digest summarizes: its hidden ancestors (already
+ * seq-ordered) followed by the representative itself (the deepest, still-visible member). [] if not collapsed. */
+export function foldedHistoryIds(repId: string, byId: Record<string, BoardNodeT>): string[] {
+  const cg = byId[repId]?.data.collapsedGraph;
+  if (!cg) return [];
+  return [...cg.hiddenIds, repId];
+}
+
+/** Combined Q/A of a collapsed node's folded history (seq order), the material the host feeds the engine
+ * summarizer. Empty when no folded board carries any prompt/answer (idle/compact-only chains). Pure. */
+export function collapseDigestText(repId: string, byId: Record<string, BoardNodeT>): string {
+  return foldedHistoryIds(repId, byId)
+    .map((id) => {
+      const d = byId[id]?.data;
+      if (!d) return '';
+      const q = (d.prompt ?? '').trim();
+      const a = (d.answer ?? '').trim();
+      return q || a ? `Q: ${q}\nA: ${a}` : '';
+    })
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+/** Deterministic staleness key for a collapsed node's folded-history digest: COLLAPSE_DIGEST_VERSION plus
+ * each folded board's id + answer length. Stored as collapsedGraph.digestKey; a mismatch means more history
+ * folded in / content changed / the version bumped → regenerate. Pure → unit-tested. */
+export function collapseDigestKey(repId: string, byId: Record<string, BoardNodeT>): string {
+  const parts = foldedHistoryIds(repId, byId).map((id) => `${id}:${byId[id]?.data.answer?.length ?? 0}`);
+  return `v${COLLAPSE_DIGEST_VERSION}|${parts.join('|')}`;
+}
+
+/** Whether a collapsed representative should have its folded-history digest (re)generated: it IS collapsed,
+ * its folded history has summarizable Q/A, and the stored digestKey differs from the recomputed one. The
+ * auto-effect ANDs the per-board in-flight / retry-budget refs on top. Pure → unit-tested. */
+export function needsCollapseDigest(repId: string, byId: Record<string, BoardNodeT>): boolean {
+  const cg = byId[repId]?.data.collapsedGraph;
+  if (!cg) return false;
+  if (!collapseDigestText(repId, byId)) return false; // nothing with content to summarize
+  return cg.digestKey !== collapseDigestKey(repId, byId);
 }
 
 /**

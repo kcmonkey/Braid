@@ -637,6 +637,9 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
     case 'branchSummarize':
       await runBranchSummaryHost(msg, canvasId);
       break;
+    case 'collapseDigest':
+      await runCollapseDigestHost(msg, canvasId);
+      break;
     case 'compact':
       await runCompactHost(msg, canvasId);
       break;
@@ -1616,6 +1619,21 @@ async function runBranchSummaryHost(msg: Extract<WebviewMessage, { type: 'branch
   } catch (e: any) {
     console.error('[Braid] branch summarize failed:', e?.message ?? e);
     postTo(canvasId, { type: 'branchSummary', boardId: msg.boardId, text: '' });
+  }
+}
+
+/** Visual graph collapse: synthesize a folded-history digest for a collapsed node. Reuses the engine's
+ * existing per-round summarizer over the combined Q/A of the folded boards (built webview-side). Mirrors
+ * runSummaryHost — ALWAYS posts a `collapseDigested` reply (even empty / on throw) so the webview clears
+ * its in-flight flag and the bounded retry kicks in, never hanging the collapsed card without a digest. */
+async function runCollapseDigestHost(msg: Extract<WebviewMessage, { type: 'collapseDigest' }>, canvasId: string) {
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+  try {
+    const { summary, miniSummary, tags } = await engineFor(msg.engine).summarize({ cwd, prompt: '', answer: msg.text });
+    postTo(canvasId, { type: 'collapseDigested', boardId: msg.boardId, summary, miniSummary, tags });
+  } catch (e: any) {
+    console.error('[Braid] collapse digest failed:', e?.message ?? e);
+    postTo(canvasId, { type: 'collapseDigested', boardId: msg.boardId, summary: '' });
   }
 }
 

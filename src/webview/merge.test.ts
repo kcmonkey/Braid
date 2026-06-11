@@ -5,6 +5,7 @@ import {
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
+  needsCollapseDigest, collapseDigestKey, collapseDigestText, COLLAPSE_DIGEST_VERSION,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
@@ -508,6 +509,44 @@ describe('visual graph collapse', () => {
     const g = serializeGraph(nodes, edges, 2, 2);
     expect(g.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
     expect(g.nodes.find((n) => n.id === 'b')!.hidden).toBeUndefined();
+  });
+
+  it('drops a spurious empty-fold plan (a root child whose visible sibling pins the target)', () => {
+    // root has two children; collapsing one would have to hide root to fold anything, but root's other
+    // child keeps root visible → the guard pins the target at root, which has no ancestors → nothing to fold.
+    const nodes = [node('root', 0), node('x', 1), node('y', 2)];
+    const edges = [forkEdge('root', 'x'), forkEdge('root', 'y')];
+    expect(planCollapseSelection(nodes, edges, ['x'])).toEqual([]);
+  });
+});
+
+describe('collapse-history digest', () => {
+  it('summarizes the folded history (hidden ancestors + the representative) and gates on the key', () => {
+    const nodes = [node('a', 0), node('b', 1, { collapsedGraph: { hiddenIds: ['a'] } })];
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
+    // needs a digest until one is stored; the combined text includes BOTH the hidden ancestor and the rep.
+    expect(needsCollapseDigest('b', byId)).toBe(true);
+    const text = collapseDigestText('b', byId);
+    expect(text).toContain('q-a');
+    expect(text).toContain('q-b');
+    // the version is folded into the key so a bump re-flags every collapsed node.
+    expect(collapseDigestKey('b', byId)).toContain(`v${COLLAPSE_DIGEST_VERSION}`);
+    // stamping the current key clears the staleness flag.
+    nodes[1].data.collapsedGraph!.digestKey = collapseDigestKey('b', byId);
+    expect(needsCollapseDigest('b', byId)).toBe(false);
+  });
+
+  it('re-flags when more history folds in (the key changes)', () => {
+    const nodes = [node('a', 0), node('z', 1), node('b', 2, { collapsedGraph: { hiddenIds: ['a'], digestKey: 'stale' } })];
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
+    expect(needsCollapseDigest('b', byId)).toBe(true);
+  });
+
+  it('does not flag a non-collapsed board', () => {
+    const nodes = [node('a', 0)];
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
+    expect(needsCollapseDigest('a', byId)).toBe(false);
+    expect(collapseDigestText('a', byId)).toBe('');
   });
 });
 

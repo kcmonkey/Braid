@@ -218,6 +218,12 @@ export type WebviewMessage =
   // store the result on. The host runs a single Haiku one-shot (Engine.branchSummary) and replies with
   // `branchSummary`. Orthogonal to `summarize` (which describes one round).
   | { type: 'branchSummarize'; boardId: string; text: string; engine?: EngineId }
+  // Visual graph collapse: synthesize a folded-history digest (card + mini + tags) for a collapsed
+  // representative node. `text` = the combined Q/A of the folded boards (hidden ancestors + the
+  // representative), built webview-side from collapseDigestText; `boardId` = the collapsed node to store
+  // the result on (under collapsedGraph). The host runs the engine's existing summarizer and replies with
+  // `collapseDigested`. Orthogonal to `summarize` (one round) / `branchSummarize` (a one-line branch label).
+  | { type: 'collapseDigest'; boardId: string; text: string; engine?: EngineId }
   // M9 compact: run native /compact on `resume` (a done board's sessionId), forking so the original
   // session is untouched. `boardId` = the new compact node to settle when done.
   | { type: 'compact'; boardId: string; resume: string; engine?: EngineId }
@@ -331,6 +337,10 @@ export type HostMessage =
   // Empty `text` = generation produced nothing / failed — the webview clears its in-flight flag and the
   // retry budget re-tries (the host ALWAYS posts this, even on empty/throw, so the flag never hangs).
   | { type: 'branchSummary'; boardId: string; text: string }
+  // Visual graph collapse: the folded-history digest for a collapsed representative (reply to collapseDigest).
+  // Stored on collapsedGraph (summary / miniSummary / tags). Empty `summary` = generation produced nothing /
+  // failed — the webview clears its in-flight flag and the bounded retry re-tries (host ALWAYS posts this).
+  | { type: 'collapseDigested'; boardId: string; summary: string; miniSummary?: string; tags?: string[] }
   // M9 compact: compaction finished — the compacted (forked) session id + the /compact summary.
   // The webview turns the compact node idle (awaiting a prompt) with this session as its parent.
   // `summary` = raw native /compact analysis (full fidelity, used for merge/fork). `digest` = a short
