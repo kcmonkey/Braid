@@ -2519,6 +2519,10 @@ function App() {
   // capabilities (drives the spine + capability gating), the Accounts overlay, per-provider identity/usage
   // snapshots (host-pushed on accountOpen / after sign in/out), and the passive plan-limit chip snapshot.
   const [activeProvider, setActiveProviderState] = useState<EngineId>('claude');
+  // M-MultiEngine (AD1): synchronous mirror of the active provider, read when STAMPING a new board's `engine`
+  // at creation (the creation sites run outside render and need the current value, like configRef). Updated
+  // together with the state on every `config` push.
+  const activeProviderRef = useRef<EngineId>('claude');
   const [providerCaps, setProviderCaps] = useState<Partial<Record<EngineId, ProviderCapabilitiesView>>>({});
   const [acctPanelOpen, setAcctPanelOpen] = useState(false);
   const [accounts, setAccounts] = useState<Partial<Record<EngineId, { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }>>>({});
@@ -3483,7 +3487,7 @@ function App() {
         }
         case 'config':
           setConfig(m.config); configRef.current = m.config;
-          setActiveProviderState(m.activeProvider); setProviderCaps(m.capabilities);
+          setActiveProviderState(m.activeProvider); activeProviderRef.current = m.activeProvider; setProviderCaps(m.capabilities);
           break;
         case 'account':
           setAccounts((prev) => ({ ...prev, [m.provider]: { account: m.account, usage: m.usage, busy: m.busy } }));
