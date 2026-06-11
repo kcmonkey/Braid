@@ -2113,24 +2113,72 @@ function ProviderSpine({ activeProvider, onSetActive, onAccount }: {
   );
 }
 
-function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive }: {
+const API_KEY_PROVIDERS = new Set<EngineId>(['claude']); // providers offering an API-key auth method (vs OAuth-only)
+type ApiKeyStatus = { stored: boolean; hint?: string; envDetected: boolean; envHint?: string };
+
+// API-key face of a provider card: a masked stored key + metered note, or an entry field + an "adopt the
+// key already in your environment" offer. The raw key is write-only (posted on save) — never read back.
+function ApiKeyFace({ id, status, onSave, onAdopt }: {
+  id: EngineId; status?: ApiKeyStatus;
+  onSave: (id: EngineId, key: string) => void;
+  onAdopt: (id: EngineId) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  if (status?.stored) {
+    return (
+      <>
+        <div className="keyline"><span className="keyline__glyph">🔑</span><span className="keymask">sk-ant-••••••••{status.hint ?? ''}</span></div>
+        <span className="keytier">pay-as-you-go · first-party · <span className="keytier__lit">thinking text visible</span></span>
+        <div className="pcard__divider" />
+        <div className="pcard__cost"><span>Session</span><b className="pcard__meter">metered</b><span>billed to your API key</span></div>
+        <div className="billnote"><span className="billnote__i">⚠</span><div>Billing runs through your <b>Anthropic API account</b>, not your subscription. The switch is explicit and applies on the next turn — existing boards are untouched.</div></div>
+      </>
+    );
+  }
+  return (
+    <>
+      {status?.envDetected && (
+        <div className="adoptnote">
+          <div>A key is set in your environment (<code>ANTHROPIC_API_KEY ••••{status.envHint ?? ''}</code>).</div>
+          <button className="btn primary" onClick={() => onAdopt(id)}>Adopt this key</button>
+        </div>
+      )}
+      <div className="keyinput">
+        <input type="password" placeholder="sk-ant-…  paste your Anthropic API key" value={draft} onChange={(e) => setDraft(e.target.value)} />
+        <button className="btn primary" disabled={!draft.trim()} onClick={() => { onSave(id, draft.trim()); setDraft(''); }}>Save</button>
+      </div>
+      <div className="billnote"><span className="billnote__i">⚠</span><div>Stored in VS Code <b>SecretStorage</b> (never settings.json, never synced). Enables <b>metered</b> API billing — your subscription stays untouched until you switch.</div></div>
+    </>
+  );
+}
+
+function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive, showApiKey, authMethod, keyStatus, onSetAuthMethod, onSaveKey, onClearKey, onAdoptEnvKey }: {
   p: ProviderDesc;
   snap?: AccountSnap;
   active: boolean;
   onSignIn: (id: EngineId) => void;
   onSignOut: (id: EngineId) => void;
   onSetActive: (id: EngineId) => void;
+  showApiKey?: boolean;                          // this card is the active provider AND offers an API-key method
+  authMethod?: 'subscription' | 'apiKey';
+  keyStatus?: ApiKeyStatus;
+  onSetAuthMethod?: (m: 'subscription' | 'apiKey') => void;
+  onSaveKey?: (id: EngineId, key: string) => void;
+  onClearKey?: (id: EngineId) => void;
+  onAdoptEnvKey?: (id: EngineId) => void;
 }) {
   const checked = snap !== undefined; // host has pushed at least one account snapshot for this provider
   const acct = snap?.account ?? null;
   const usage = snap?.usage ?? null;
   const busy = !!snap?.busy;
+  const apiMode = !!showApiKey && authMethod === 'apiKey';
   const signedIn = !!acct?.signedIn;
-  const isActive = active && signedIn;
+  const connected = apiMode ? !!keyStatus?.stored : signedIn; // "connected" = usable via the chosen method
+  const isActive = active && connected;
   // Distinguish "still checking the subscription" (panel just opened, first fetch in flight) from
   // "checked → not signed in". Without this the card shows a false "Not signed in." for the ~1-2s before
   // the first account push lands — which reads as truth and prompts a needless (stuck-prone) sign-in.
-  const loading = p.implemented && !checked && !busy;
+  const loading = !apiMode && p.implemented && !checked && !busy;
   return (
     <div className={`pcard ${isActive ? 'pcard--active' : ''} ${p.implemented ? '' : 'pcard--off'}`}>
       <div className="pcard__head">
@@ -2140,10 +2188,19 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive }: {
         <span className="pcard__spacer" />
         {isActive
           ? <span className="badge badge--active">◆ Active</span>
-          : signedIn || loading ? null : <span className="badge badge--setup">not set up</span>}
+          : apiMode && connected ? <span className="badge badge--meter">API key</span>
+          : connected || loading ? null : <span className="badge badge--setup">not set up</span>}
       </div>
+      {showApiKey && onSetAuthMethod && (
+        <div className="pcard__authseg">
+          <button className={authMethod !== 'apiKey' ? 'on' : ''} onClick={() => onSetAuthMethod('subscription')}><span className="ico">👤</span>Subscription</button>
+          <button className={authMethod === 'apiKey' ? 'on' : ''} onClick={() => onSetAuthMethod('apiKey')}><span className="ico">🔑</span>API key</button>
+        </div>
+      )}
       <div className="pcard__body">
-        {busy ? (
+        {apiMode ? (
+          <ApiKeyFace id={p.id} status={keyStatus} onSave={onSaveKey ?? (() => {})} onAdopt={onAdoptEnvKey ?? (() => {})} />
+        ) : busy ? (
           <div className="pcard__busy"><span className="working__dot" /> Working…</div>
         ) : loading ? (
           <div className="pcard__busy"><span className="working__dot" /> Checking subscription…</div>
@@ -2181,7 +2238,15 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive }: {
         )}
       </div>
       <div className="pcard__actions">
-        {signedIn ? (
+        {apiMode ? (
+          <>
+            {isActive
+              ? <span className="badge badge--active">◆ Active</span>
+              : connected ? <button className="btn" onClick={() => onSetActive(p.id)}>Set active</button> : null}
+            <span className="pcard__spacer" />
+            {connected && <button className="btn btn--danger" onClick={() => onClearKey?.(p.id)}>Remove key</button>}
+          </>
+        ) : signedIn ? (
           <>
             {isActive
               ? <span className="badge badge--active">◆ Active</span>
@@ -2203,12 +2268,18 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive }: {
 }
 
 // Accounts overlay (dedicated centered panel; mirrors McpPanel's backdrop + floating card structure).
-function AccountsPanel({ accounts, activeProvider, onSignIn, onSignOut, onSetActive, onClose }: {
+function AccountsPanel({ accounts, activeProvider, authMethod, apiKeyStatus, onSignIn, onSignOut, onSetActive, onSetAuthMethod, onSaveKey, onClearKey, onAdoptEnvKey, onClose }: {
   accounts: Partial<Record<EngineId, AccountSnap>>;
   activeProvider: EngineId;
+  authMethod: 'subscription' | 'apiKey';
+  apiKeyStatus: Partial<Record<EngineId, ApiKeyStatus>>;
   onSignIn: (id: EngineId) => void;
   onSignOut: (id: EngineId) => void;
   onSetActive: (id: EngineId) => void;
+  onSetAuthMethod: (m: 'subscription' | 'apiKey') => void;
+  onSaveKey: (id: EngineId, key: string) => void;
+  onClearKey: (id: EngineId) => void;
+  onAdoptEnvKey: (id: EngineId) => void;
   onClose: () => void;
 }) {
   return (
@@ -2216,20 +2287,29 @@ function AccountsPanel({ accounts, activeProvider, onSignIn, onSignOut, onSetAct
       <div className="acct__backdrop" onClick={onClose} />
       <div className="acct-panel nodrag nopan" onClick={(e) => e.stopPropagation()}>
         <div className="acct-panel__head">
-          <h2>Accounts <span className="acct-panel__sub">providers · identity · usage</span></h2>
+          <h2>Accounts <span className="acct-panel__sub">providers · auth method · usage</span></h2>
           <button className="acct-panel__x" title="Close" onClick={onClose}>×</button>
         </div>
         <div className="acct-panel__body">
           <ProviderSpine activeProvider={activeProvider} onSetActive={onSetActive} />
-          {PROVIDER_CATALOG.map((p) => (
-            <AccountCard
-              key={p.id} p={p} snap={accounts[p.id]} active={activeProvider === p.id}
-              onSignIn={onSignIn} onSignOut={onSignOut} onSetActive={onSetActive}
-            />
-          ))}
+          {PROVIDER_CATALOG.map((p) => {
+            // The auth-method toggle is meaningful only for the ACTIVE provider (the flat config carries its
+            // authMethod) that offers an API-key path. Other cards stay subscription/OAuth-only.
+            const showApiKey = p.id === activeProvider && API_KEY_PROVIDERS.has(p.id);
+            return (
+              <AccountCard
+                key={p.id} p={p} snap={accounts[p.id]} active={activeProvider === p.id}
+                onSignIn={onSignIn} onSignOut={onSignOut} onSetActive={onSetActive}
+                showApiKey={showApiKey} authMethod={showApiKey ? authMethod : undefined} keyStatus={apiKeyStatus[p.id]}
+                onSetAuthMethod={onSetAuthMethod} onSaveKey={onSaveKey} onClearKey={onClearKey} onAdoptEnvKey={onAdoptEnvKey}
+              />
+            );
+          })}
         </div>
         <div className="acct-panel__foot">
-          Identity &amp; plan-limit usage come from your signed-in subscription. Sign-in opens your browser; tokens are stored locally (never an API key).
+          {authMethod === 'apiKey'
+            ? 'API key stored in VS Code SecretStorage (never settings.json / never synced); billed per-token to your Anthropic API account. Switch back to Subscription anytime.'
+            : 'Subscription identity & plan-limit usage come from your signed-in account; sign-in opens your browser (OAuth, no API key). Or switch a provider to an API key above.'}
         </div>
       </div>
     </>
@@ -2239,19 +2319,20 @@ function AccountsPanel({ accounts, activeProvider, onSignIn, onSignOut, onSetAct
 // Active-provider chip (top-right) — provider dot + name + plan-limit usage. The usage% rides the free
 // `rate_limit_event` on every turn stream (no control session); until the first event lands the chip shows
 // just the provider name (no %). Color bands on utilization (≥60 warn, ≥85 high). Click → Accounts overlay.
-function UsageChip({ snapshot, providerName, accent, onClick }: { snapshot: RateLimitSnapshot | null; providerName: string; accent: string; onClick: () => void }) {
-  const pct = snapshot && snapshot.utilizationPct != null ? Math.round(snapshot.utilizationPct) : null;
+function UsageChip({ snapshot, providerName, accent, onClick, apiKeyMode }: { snapshot: RateLimitSnapshot | null; providerName: string; accent: string; onClick: () => void; apiKeyMode?: boolean }) {
+  // API-key auth has no subscription plan windows — show "API" (metered), not a %. (authMethod)
+  const pct = !apiKeyMode && snapshot && snapshot.utilizationPct != null ? Math.round(snapshot.utilizationPct) : null;
   const band = usageBand(pct);
   const win = snapshot?.windowId === 'seven_day' ? '7d' : snapshot?.windowId === 'five_hour' ? '5h' : '';
   return (
     <button
       type="button"
-      className={`usagechip ${band === 'high' ? 'usagechip--high' : band === 'warn' ? 'usagechip--warn' : ''}`}
-      title={pct != null ? `${providerName} — plan usage; click for Accounts` : `${providerName} — click for Accounts`} onClick={onClick}
+      className={`usagechip ${apiKeyMode ? 'usagechip--api' : band === 'high' ? 'usagechip--high' : band === 'warn' ? 'usagechip--warn' : ''}`}
+      title={apiKeyMode ? `${providerName} — API key (metered); click for Accounts` : pct != null ? `${providerName} — plan usage; click for Accounts` : `${providerName} — click for Accounts`} onClick={onClick}
     >
       <span className="usagechip__dot" style={{ background: accent }} />
       <span className="usagechip__name">{providerName}</span>
-      {pct != null && <span className="usagechip__pct">{win ? `${win} ` : ''}{pct}%</span>}
+      {apiKeyMode ? <span className="usagechip__pct">API</span> : pct != null && <span className="usagechip__pct">{win ? `${win} ` : ''}{pct}%</span>}
     </button>
   );
 }
@@ -2419,6 +2500,8 @@ function App() {
   const [providerCaps, setProviderCaps] = useState<Partial<Record<EngineId, ProviderCapabilitiesView>>>({});
   const [acctPanelOpen, setAcctPanelOpen] = useState(false);
   const [accounts, setAccounts] = useState<Partial<Record<EngineId, { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }>>>({});
+  // Claude API-key auth status per provider (secret-safe: presence + last-4 hint + ambient-env detection).
+  const [apiKeyStatus, setApiKeyStatus] = useState<Partial<Record<EngineId, ApiKeyStatus>>>({});
   const [rateLimit, setRateLimit] = useState<RateLimitSnapshot | null>(null);
   // Composer autofill (workspace-level): the host-served slash-command list + latest `@`-file search reply.
   // `searchFiles` debounces the host round-trip; the reply echoes its query so the menu drops stale results.
@@ -3358,6 +3441,12 @@ function App() {
     post({ type: 'accountSignOut', provider: id });
   }, []);
   const onSetActiveProvider = useCallback((id: EngineId) => post({ type: 'setActiveProvider', provider: id }), []);
+  // Claude API-key auth method: switching mode writes the provider config (authMethod); the key value is
+  // sent only on save (host → SecretStorage), never echoed back. (authMethod / billing invariant)
+  const setAuthMethod = useCallback((m: 'subscription' | 'apiKey') => setConfigField({ authMethod: m }), [setConfigField]);
+  const saveApiKey = useCallback((id: EngineId, key: string) => post({ type: 'setApiKey', provider: id, key }), []);
+  const clearApiKey = useCallback((id: EngineId) => post({ type: 'clearApiKey', provider: id }), []);
+  const adoptEnvKey = useCallback((id: EngineId) => post({ type: 'adoptEnvKey', provider: id }), []);
 
   // host → webview
   useEffect(() => {
@@ -3377,6 +3466,9 @@ function App() {
           break;
         case 'account':
           setAccounts((prev) => ({ ...prev, [m.provider]: { account: m.account, usage: m.usage, busy: m.busy } }));
+          break;
+        case 'apiKeyStatus':
+          setApiKeyStatus((prev) => ({ ...prev, [m.provider]: { stored: m.stored, hint: m.hint, envDetected: m.envDetected, envHint: m.envHint } }));
           break;
         case 'rateLimit': setRateLimit(m.snapshot); break;
         case 'model': setResolvedModel(m.model); break;
@@ -4094,20 +4186,24 @@ function App() {
             providerName={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.name ?? 'Claude'}
             accent={PROVIDER_CATALOG.find((p) => p.id === activeProvider)?.accent ?? '#d97757'}
             onClick={openAcctPanel}
+            apiKeyMode={config.authMethod === 'apiKey'}
           />
         )}
         {(() => {
-          // Avatar reads as an account entry: signed-in → a filled accent circle with the email's initial
-          // (like the official extension); signed-out → a ghost person glyph. Click → Accounts overlay.
+          // Avatar reads as an account entry. Subscription → a filled accent circle with the email's initial
+          // (like the official extension) / ghost person when signed-out. API-key mode → a key glyph (filled
+          // when a key is stored). Click → Accounts overlay.
+          const apiKeyMode = config?.authMethod === 'apiKey';
           const email = accounts[activeProvider]?.account?.email;
           const initial = email?.trim().charAt(0).toUpperCase();
+          const filled = apiKeyMode ? !!apiKeyStatus[activeProvider]?.stored : !!initial;
           return (
             <button
-              className={`btn settings__avatar ${initial ? 'settings__avatar--filled' : ''} ${acctPanelOpen ? 'active' : ''}`}
+              className={`btn settings__avatar ${filled ? 'settings__avatar--filled' : ''} ${acctPanelOpen ? 'active' : ''}`}
               onClick={toggleAcctPanel}
-              title="Accounts & usage — identity, plan usage, sign in / out"
+              title={apiKeyMode ? 'Account — API-key auth (metered). Click for Accounts.' : 'Accounts & usage — identity, plan usage, sign in / out'}
             >
-              {initial ? <span className="settings__avatarinitial">{initial}</span> : <span className="tb-ico">👤</span>}
+              {apiKeyMode ? <span className="tb-ico">🔑</span> : initial ? <span className="settings__avatarinitial">{initial}</span> : <span className="tb-ico">👤</span>}
             </button>
           );
         })()}
@@ -4192,9 +4288,15 @@ function App() {
         <AccountsPanel
           accounts={accounts}
           activeProvider={activeProvider}
+          authMethod={config?.authMethod ?? 'subscription'}
+          apiKeyStatus={apiKeyStatus}
           onSignIn={acctSignIn}
           onSignOut={acctSignOut}
           onSetActive={(id) => post({ type: 'setActiveProvider', provider: id })}
+          onSetAuthMethod={setAuthMethod}
+          onSaveKey={saveApiKey}
+          onClearKey={clearApiKey}
+          onAdoptEnvKey={adoptEnvKey}
           onClose={toggleAcctPanel}
         />
       )}

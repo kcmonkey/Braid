@@ -8,6 +8,8 @@ import type { BraidConfig, ProviderConfig, CanvasConfig, LegacyFlatProviderConfi
 import { DEFAULT_PROVIDER_CONFIG, DEFAULT_CANVAS_CONFIG, migrateLegacyConfig } from './sdkOptions';
 import type { BraidSettings } from './engine/host';
 import { EngineHost } from './engine/host';
+import { FileGraphStore } from './persistence/graphStore';
+import type { Canvas } from './persistence/graphStore';
 import { toCapabilitiesView } from './engine/capabilities';
 import { PROVIDER_CATALOG } from './protocol';
 import type { EngineId, ProviderCapabilitiesView, ProviderAccount } from './protocol';
@@ -16,13 +18,24 @@ import { ensureSdkInstalled } from './runtime/sdk-download';
 import type { EventSink, PreToolInterceptor, PreToolDecision, PermissionVerdict, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
 
 // ---- Multi-canvas model (M5) ----
-// Each Canvas = its own editor-area webview panel + its own persisted graph. The Activity Bar
-// tree lists them. workspaceState is just the persistence proxy; the webview graph is the SSOT.
-interface Canvas { id: string; name: string }
-const CANVASES_KEY = 'braid.canvases';     // ordered registry: Canvas[]
-const GRAPH_PREFIX = 'braid.graph.';       // per-canvas graph key prefix
-const LEGACY_GRAPH_KEY = 'braid.graph';    // pre-M5 single graph (migrated once)
+// Each Canvas = its own editor-area webview panel + its own persisted graph. The Activity Bar tree lists
+// them. Persistence lives in a user-level FILE STORE (~/.braid/projects/<encoded-cwd>/, see persistence/
+// graphStore) — independent of VS Code, so the future standalone build reuses it. The webview graph is the
+// SSOT; the host just round-trips it. The old workspaceState keys below are read ONLY by the one-time
+// migration (migrateWorkspaceStateToFiles). (CLAUDE.md 宿主中性 / 独立版; Persistence-Store)
+const CANVASES_KEY = 'braid.canvases';     // pre-file-store registry (workspaceState) — migration source only
+const GRAPH_PREFIX = 'braid.graph.';       // pre-file-store per-canvas graph key prefix — migration source only
+const LEGACY_GRAPH_KEY = 'braid.graph';    // pre-M5 single graph — migration source only
 const graphKey = (id: string) => `${GRAPH_PREFIX}${id}`;
+
+/** The active project's cwd = the file-store key (mirrors how every engine cwd is resolved elsewhere). */
+function projectCwd(): string {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+}
+/** The file-backed graph store for the current project (under ~/.braid). */
+function graphStore(): FileGraphStore {
+  return FileGraphStore.forProject(projectCwd());
+}
 
 // One webview panel per open canvas, and in-flight queries keyed by canvas+board so a board id
 // reused across canvases (each has its own b1/b2…) never aborts the wrong one.
@@ -324,26 +337,44 @@ export function deactivate() {
   accountControls.clear();
 }
 
-// ---- Canvas registry ----
-const getCanvases = (ctx: vscode.ExtensionContext): Canvas[] =>
-  ctx.workspaceState.get<Canvas[]>(CANVASES_KEY) ?? [];
-const setCanvases = (ctx: vscode.ExtensionContext, list: Canvas[]) =>
-  ctx.workspaceState.update(CANVASES_KEY, list);
+// ---- Canvas registry (file store: ~/.braid/projects/<encoded-cwd>/canvases.json) ----
+const getCanvases = (): Canvas[] => graphStore().listCanvases();
+const setCanvases = (list: Canvas[]): void => graphStore().saveCanvases(list);
 const newId = () => 'c' + Math.random().toString(36).slice(2, 9);
 
-/** Lazily ensure at least one canvas exists; migrate a pre-M5 single graph into the default one. */
+/** One-time migration: copy this project's canvases + graphs out of VS Code workspaceState into the file
+ *  store. Idempotent — a no-op once the file store is initialized (canvases.json exists). Folds the pre-M5
+ *  single graph too. The workspaceState copy is left intact as a backup (principle 15 — reversible). */
+function migrateWorkspaceStateToFiles(ctx: vscode.ExtensionContext, store: FileGraphStore): void {
+  if (store.initialized()) return; // file store already owns this project
+  const list = ctx.workspaceState.get<Canvas[]>(CANVASES_KEY) ?? [];
+  if (list.length) {
+    store.saveCanvases(list);
+    for (const c of list) {
+      const graph = ctx.workspaceState.get<SerializedGraph>(graphKey(c.id));
+      if (graph) store.writeGraph(c.id, graph);
+    }
+    return;
+  }
+  // No M5 registry — fold the pre-M5 single graph (if any) into a seeded canvas (old ensureCanvases behavior).
+  const legacy = ctx.workspaceState.get<SerializedGraph>(LEGACY_GRAPH_KEY);
+  if (legacy) {
+    const id = newId();
+    store.saveCanvases([{ id, name: 'Canvas 1' }]);
+    store.writeGraph(id, legacy);
+  }
+  // else: nothing to migrate — ensureCanvases seeds a fresh Canvas 1 into the file store.
+}
+
+/** Lazily ensure at least one canvas exists. First touch of a project migrates any prior workspaceState
+ *  canvases/graphs into the file store (idempotent), then seeds a fresh Canvas 1 if still empty. */
 async function ensureCanvases(ctx: vscode.ExtensionContext): Promise<Canvas[]> {
-  const list = getCanvases(ctx);
+  migrateWorkspaceStateToFiles(ctx, graphStore());
+  const list = getCanvases();
   if (list.length) return list;
   const id = newId();
   const seeded: Canvas[] = [{ id, name: 'Canvas 1' }];
-  await setCanvases(ctx, seeded);
-  // Migrate the old single graph (if any) into this canvas, without data loss.
-  const legacy = ctx.workspaceState.get<SerializedGraph>(LEGACY_GRAPH_KEY);
-  if (legacy) {
-    await ctx.workspaceState.update(graphKey(id), legacy);
-    await ctx.workspaceState.update(LEGACY_GRAPH_KEY, undefined);
-  }
+  setCanvases(seeded);
   treeProvider?.refresh();
   return seeded;
 }
@@ -376,7 +407,7 @@ function wireCanvasPanel(context: vscode.ExtensionContext, id: string, panel: vs
 function openCanvas(context: vscode.ExtensionContext, id: string) {
   const existing = panels.get(id);
   if (existing) { existing.reveal(vscode.ViewColumn.Active); return; }
-  const name = getCanvases(context).find((c) => c.id === id)?.name ?? 'Braid';
+  const name = getCanvases().find((c) => c.id === id)?.name ?? 'Braid';
   const panel = vscode.window.createWebviewPanel(
     VIEW_TYPE, name, vscode.ViewColumn.Active,
     { ...webviewOptions(context), retainContextWhenHidden: true },
@@ -391,7 +422,7 @@ function openCanvas(context: vscode.ExtensionContext, id: string) {
  * VS Code re-creates the panel in its original tab group/position and hands it back here with that
  * state, so we map the id to a still-live canvas and re-wire the revived panel in place. Panels whose
  * canvas was deleted (or that carry no id) are dropped. The graph itself was never lost — it lives in
- * workspaceState; this only restores which tabs were open.
+ * the file store (~/.braid); this only restores which tabs were open.
  */
 function registerCanvasSerializer(context: vscode.ExtensionContext): vscode.Disposable {
   return vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
@@ -419,9 +450,9 @@ async function openDefault(context: vscode.ExtensionContext) {
 }
 
 async function newCanvas(context: vscode.ExtensionContext) {
-  const list = getCanvases(context);
+  const list = getCanvases();
   const id = newId();
-  await setCanvases(context, [...list, { id, name: `Canvas ${list.length + 1}` }]);
+  setCanvases([...list, { id, name: `Canvas ${list.length + 1}` }]);
   treeProvider.refresh();
   openCanvas(context, id);
 }
@@ -429,7 +460,7 @@ async function newCanvas(context: vscode.ExtensionContext) {
 async function renameCanvas(context: vscode.ExtensionContext, c: Canvas) {
   const name = (await vscode.window.showInputBox({ value: c.name, prompt: 'Rename canvas' }))?.trim();
   if (!name) return;
-  await setCanvases(context, getCanvases(context).map((x) => (x.id === c.id ? { ...x, name } : x)));
+  setCanvases(getCanvases().map((x) => (x.id === c.id ? { ...x, name } : x)));
   treeProvider.refresh();
   const p = panels.get(c.id);
   if (p) p.title = name;
@@ -440,8 +471,8 @@ async function deleteCanvas(context: vscode.ExtensionContext, c: Canvas) {
     `Delete canvas "${c.name}"? All its boards will be removed and cannot be recovered.`, { modal: true }, 'Delete',
   );
   if (ok !== 'Delete') return;
-  await setCanvases(context, getCanvases(context).filter((x) => x.id !== c.id));
-  await context.workspaceState.update(graphKey(c.id), undefined);
+  setCanvases(getCanvases().filter((x) => x.id !== c.id));
+  graphStore().deleteGraph(c.id);
   panels.get(c.id)?.dispose(); // also clears its aborters via onDidDispose
   treeProvider.refresh();
 }
@@ -522,7 +553,7 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
     }
     case 'ready': {
       // webview mounted → hand back this canvas's persisted graph (or null if none).
-      const graph = context.workspaceState.get<SerializedGraph>(graphKey(canvasId)) ?? null;
+      const graph = graphStore().readGraph(canvasId);
       postTo(canvasId, { type: 'restored', graph });
       // Proactively populate the toolbar avatar/identity (fast `claude auth status`, no control session) so
       // the account shows on load — the user shouldn't have to open the Accounts panel to see who's signed in.
@@ -532,7 +563,7 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
     }
     case 'persist': {
       // webview is SSOT; store its debounced snapshot verbatim under this canvas's key.
-      await context.workspaceState.update(graphKey(canvasId), msg.graph);
+      graphStore().writeGraph(canvasId, msg.graph);
       break;
     }
     case 'getConfig':
