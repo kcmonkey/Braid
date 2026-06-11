@@ -9,7 +9,8 @@ tsconfig.json
 # Repo / agent infra — not part of the runtime
 .claude/**
 scripts/**
-media/demo/STORYBOARD.md
+media/demo/**
+mockups/**
 CLAUDE.md
 .git/**
 .gitignore
