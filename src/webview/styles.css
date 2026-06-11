@@ -1176,7 +1176,8 @@ body {
 .spine__spacer { flex: 1; }
 .spine__xlink { font: inherit; font-size: 12px; color: var(--merge); cursor: pointer; background: none; border: none; padding: 0; white-space: nowrap; }
 .spine__xlink:hover { text-decoration: underline; }
-.settings__avatarinitial { font-weight: 800; font-size: 13px; color: var(--accent); line-height: 1; }
+/* Dark glyph on the filled accent avatar circle (matches the mockup). */
+.settings__avatarinitial { font-weight: 800; font-size: 13px; color: #1c1b1a; line-height: 1; }
 
 /* Effort dots slider (official-style) */
 .settings__dots { display: flex; align-items: center; gap: 7px; }
@@ -1315,7 +1316,8 @@ body {
 .usagechip { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600; letter-spacing: .02em;
   padding: 5px 9px; border-radius: 8px; border: 1px solid var(--border-sub); background: var(--bg-deep); color: var(--muted-2); }
 .usagechip:hover { border-color: var(--border); color: var(--text-2); }
-.usagechip__dot { width: 8px; height: 8px; border-radius: 50%; }
+.usagechip__dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.usagechip__name { color: var(--text-2); }
 .usagechip__pct { font-variant-numeric: tabular-nums; }
 .usagechip--warn { color: #d8a43a; border-color: #6b5417; background: #2a2616; }
 .usagechip--high { color: var(--red); border-color: var(--red); background: var(--red-bg); }
