@@ -3,7 +3,7 @@ import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
-  boardEngine, diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
+  boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
@@ -1394,5 +1394,51 @@ describe('needsDigest (digest versioning / backfill)', () => {
     expect(needsDigest(done({ status: 'streaming' }))).toBe(false);            // still generating
     expect(needsDigest(node('b', 0, { status: 'done', answer: '' }).data)).toBe(false); // no answer
     expect(needsDigest(node('c', 0, { status: 'idle', answer: '' }).data)).toBe(false); // idle compact boundary
+  });
+});
+
+describe('unifiedDiffRows / codexFileChanges (Codex fileChange diff rendering)', () => {
+  it('unifiedDiffRows: +/- → add/del (sign stripped), headers dropped, @@ kept as ctx', () => {
+    const diff = [
+      'diff --git a/x.ts b/x.ts',
+      'index 111..222 100644',
+      '--- a/x.ts',
+      '+++ b/x.ts',
+      '@@ -1,2 +1,2 @@',
+      ' keep',
+      '-old line',
+      '+new line',
+    ].join('\n');
+    expect(unifiedDiffRows(diff)).toEqual([
+      { kind: 'ctx', text: '@@ -1,2 +1,2 @@' },
+      { kind: 'ctx', text: 'keep' },
+      { kind: 'del', text: 'old line' },
+      { kind: 'add', text: 'new line' },
+    ]);
+  });
+
+  it('codexFileChanges: add → all-add rows (probe shape {path, kind:{type:"add"}, diff})', () => {
+    const rows = codexFileChanges([{ path: '/w/probe.txt', kind: { type: 'add' }, diff: 'x\nz' }]);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ path: '/w/probe.txt', kind: 'add' });
+    expect(rows[0].rows).toEqual([{ kind: 'add', text: 'x' }, { kind: 'add', text: 'z' }]);
+  });
+
+  it('codexFileChanges: delete → all-del rows', () => {
+    const rows = codexFileChanges([{ path: 'a', kind: 'delete', content: 'gone' }]);
+    expect(rows[0].rows).toEqual([{ kind: 'del', text: 'gone' }]);
+  });
+
+  it('codexFileChanges: update with unified_diff parses it; update with raw payload is best-effort', () => {
+    const u = codexFileChanges([{ path: 'a', kind: { type: 'update' }, unified_diff: '@@ -1 +1 @@\n-a\n+b' }]);
+    expect(u[0].rows).toEqual([{ kind: 'ctx', text: '@@ -1 +1 @@' }, { kind: 'del', text: 'a' }, { kind: 'add', text: 'b' }]);
+    const raw = codexFileChanges([{ path: 'a', kind: 'update', diff: 'just text' }]);
+    expect(raw[0].rows).toEqual([{ kind: 'add', text: 'just text' }]);
+  });
+
+  it('codexFileChanges: non-array / malformed → [] (graceful fallback to generic card)', () => {
+    expect(codexFileChanges(undefined)).toEqual([]);
+    expect(codexFileChanges('nope' as unknown)).toEqual([]);
+    expect(codexFileChanges([null, 42])).toEqual([]);
   });
 });

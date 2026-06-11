@@ -18,7 +18,7 @@ import {
   GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, mergeUnion, modelWindowFor, forkableSession,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
-  serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock, describeAsyncPending,
+  serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
@@ -150,6 +150,56 @@ function ToolCard({ step }: { step: ToolStep }) {
           ) : (
             <div className="tool__pending">Running…</div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Codex `fileChange` tool call → a real red/green diff (parity with Claude's Edit/Write). Codex hands us a
+// ready unified diff per file (codexFileChanges → DiffRow[]), so we reuse the SAME .tool__diff / .diffrow
+// visuals — identical look to Claude's edit diff. Default OPEN (the diff is the point, like Edit). Multi-file
+// changes stack per-file sections with a clickable path header. Empty/malformed input → generic ToolCard
+// fallback so nothing is silently swallowed (principle 11). (M-Codex: fileChange diff rendering)
+function FileChangeCard({ step }: { step: ToolStep }) {
+  const changes = useMemo<CodexFileChange[]>(() => codexFileChanges((step.input as { changes?: unknown })?.changes), [step.input]);
+  const [open, setOpen] = useState(true);
+  if (!changes.length) return <ToolCard step={step} />;
+  const primary = changes[0].path;
+  const head = changes.length === 1 ? primary : `${changes.length} files`;
+  const kindMark = (k: string) => (k === 'add' ? '＋' : k === 'delete' ? '－' : '✎');
+  return (
+    <div className={`tool tool--filechange ${step.isError ? 'tool--err' : ''}`}>
+      <div className="tool__head" onClick={() => setOpen((o) => !o)}>
+        <span className="tool__chev">{open ? '▾' : '▸'}</span>
+        <span className="tool__name">✎ Edit</span>
+        <span
+          className="tool__sum tool__file"
+          title={primary ? `Open in editor: ${primary}` : head}
+          onClick={(e) => { e.stopPropagation(); if (primary) post({ type: 'openFile', path: primary }); }}
+        >{head}</span>
+        {step.isError && <span className="tool__badge">err</span>}
+      </div>
+      {open && (
+        <div className="tool__body">
+          {changes.map((c, ci) => (
+            <div key={ci} className="filechange">
+              {changes.length > 1 && (
+                <div
+                  className="filechange__path" title={`Open in editor: ${c.path}`}
+                  onClick={() => c.path && post({ type: 'openFile', path: c.path })}
+                >{kindMark(c.kind)} {c.path}</div>
+              )}
+              <pre className="tool__diff">
+                {c.rows.map((r, idx) => (
+                  <div key={idx} className={`diffrow diffrow--${r.kind}`}>
+                    <span className="diffrow__sign">{r.kind === 'add' ? '+' : r.kind === 'del' ? '-' : ' '}</span>
+                    <span>{r.text || ' '}</span>
+                  </div>
+                ))}
+              </pre>
+            </div>
+          ))}
         </div>
       )}
     </div>
@@ -480,6 +530,7 @@ function renderStep(s: ToolStep, steps: ToolStep[]) {
   }
   if (s.name === 'AskUserQuestion') return <AskUserCard key={s.id} step={s} />;
   if (s.name === 'TodoWrite') return <TodoCard key={s.id} step={s} />;
+  if (s.name === 'FileChange') return <FileChangeCard key={s.id} step={s} />; // Codex file edits → red/green diff
   if (s.name === 'Agent') return <SubagentCard key={s.id} step={s} steps={steps} />;
   const mcp = parseMcpToolName(s.name);
   if (mcp) return <McpCard key={s.id} step={s} mcp={mcp} />;
@@ -1894,6 +1945,14 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
           >🔌 Manage</button>
         </div>
 
+        <label className="settings__row" title="Off keeps normal turns fast by not loading MCP servers into each agent session. The MCP manager still works.">
+          <span className="settings__lbl">Load MCP in turns</span>
+          <input
+            type="checkbox" checked={config.mcpEnabled}
+            onChange={(e) => onChange({ mcpEnabled: e.target.checked })}
+          />
+        </label>
+
         <div className="settings__field">
           <span className="settings__lbl">Allowed tools (comma-separated)</span>
           <input
@@ -1953,6 +2012,20 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
           <input
             type="number" min={1} max={100} value={config.autoCompactThreshold} disabled={!compact || !config.autoCompactEnabled}
             onChange={(e) => onChange({ autoCompactThreshold: Math.max(1, Math.min(100, Math.floor(Number(e.target.value) || 95))) })}
+          />
+        </label>
+        <label className="settings__row" title="Keep settled sessions warm briefly so linear continuations reuse the already-open engine process.">
+          <span className="settings__lbl">Warm sessions</span>
+          <input
+            type="checkbox" checked={config.warmSessionEnabled}
+            onChange={(e) => onChange({ warmSessionEnabled: e.target.checked })}
+          />
+        </label>
+        <label className={`settings__row ${config.warmSessionEnabled ? '' : 'settings__gated'}`}>
+          <span className="settings__lbl">Warm idle window (min)</span>
+          <input
+            type="number" min={1} max={120} value={config.warmSessionIdleCapMin} disabled={!config.warmSessionEnabled}
+            onChange={(e) => onChange({ warmSessionIdleCapMin: Math.max(1, Math.min(120, Math.floor(Number(e.target.value) || 10))) })}
           />
         </label>
       </div>

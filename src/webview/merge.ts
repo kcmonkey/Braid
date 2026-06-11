@@ -1296,6 +1296,61 @@ export function diffLines(oldText: string, newText: string): DiffRow[] {
   return rows;
 }
 
+/**
+ * Parse a unified-diff string into DiffRow[] for display. File headers (`diff --git` / `index` / `---` /
+ * `+++` / `new file` / …) are dropped; `@@` hunk headers are kept as muted context; `+`/`-` lines become
+ * add/del with the sign stripped; everything else is context (a leading space stripped). Codex's `fileChange`
+ * updates carry a ready-made unified diff, so this maps them onto the SAME DiffRow shape Claude's diffLines
+ * produces → identical red/green rendering. Pure → unit-tested. (M-Codex: fileChange diff rendering)
+ */
+export function unifiedDiffRows(diff: string): DiffRow[] {
+  const rows: DiffRow[] = [];
+  for (const line of diff.split('\n')) {
+    if (/^(diff --git |index |--- |\+\+\+ |new file mode|deleted file mode|rename |similarity |Binary files )/.test(line)) continue;
+    if (line.startsWith('@@')) { rows.push({ kind: 'ctx', text: line }); continue; } // hunk header
+    if (line.startsWith('+')) rows.push({ kind: 'add', text: line.slice(1) });
+    else if (line.startsWith('-')) rows.push({ kind: 'del', text: line.slice(1) });
+    else rows.push({ kind: 'ctx', text: line.startsWith(' ') ? line.slice(1) : line });
+  }
+  while (rows.length && rows[rows.length - 1].kind === 'ctx' && rows[rows.length - 1].text === '') rows.pop();
+  return rows;
+}
+
+/** One Codex `fileChange` entry, prepared for the FileChangeCard (path + change kind + red/green rows). */
+export interface CodexFileChange { path: string; kind: string; rows: DiffRow[] }
+
+const looksUnified = (s: string): boolean => /(^|\n)@@/.test(s) || /(^|\n)diff --git /.test(s) || /(^|\n)--- /.test(s);
+
+/**
+ * Parse a Codex `fileChange.changes[]` array (the tool step's `input.changes`) into per-file diff rows for
+ * the FileChangeCard. Codex provides a unified diff for `update`s and raw content for `add`/`delete`; each is
+ * mapped to DiffRow[] so it renders exactly like Claude's Edit/Write diff. Defensive: skips malformed
+ * entries; accepts `kind` as a string OR `{type}`; reads the diff from `unified_diff` | `diff` | `content`.
+ */
+export function codexFileChanges(changes: unknown): CodexFileChange[] {
+  if (!Array.isArray(changes)) return [];
+  const out: CodexFileChange[] = [];
+  for (const c of changes) {
+    if (!c || typeof c !== 'object') continue;
+    const ch = c as Record<string, unknown>;
+    const path = typeof ch.path === 'string' ? ch.path : '';
+    const kindRaw = ch.kind;
+    const kind = typeof kindRaw === 'string' ? kindRaw
+      : kindRaw && typeof kindRaw === 'object' && typeof (kindRaw as { type?: unknown }).type === 'string' ? (kindRaw as { type: string }).type
+      : 'update';
+    const unified = typeof ch.unified_diff === 'string' ? ch.unified_diff : '';
+    const payload = unified || (typeof ch.diff === 'string' ? ch.diff : typeof ch.content === 'string' ? ch.content : '');
+    let rows: DiffRow[];
+    if (unified) rows = unifiedDiffRows(unified);
+    else if (kind === 'add') rows = diffLines('', payload);
+    else if (kind === 'delete') rows = diffLines(payload, '');
+    else if (looksUnified(payload)) rows = unifiedDiffRows(payload); // update with the diff in the `diff` field
+    else rows = diffLines('', payload);                              // update w/o markers → best-effort additions
+    out.push({ path, kind, rows });
+  }
+  return out;
+}
+
 // ---- Settings-form parse helpers (M5 in-canvas settings UI) ----
 // The settings panel edits the array/object settings as plain text; these convert both ways.
 // Pure → unit-tested. Strict: malformed bits are dropped, not guessed at (principle 17).

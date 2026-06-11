@@ -14,6 +14,7 @@ const base = (extra: Partial<ProviderConfig> = {}): ProviderConfig => ({
   appendSystemPrompt: '',
   allowedTools: [],
   disallowedTools: [],
+  mcpEnabled: false,
   env: {},
   ...extra,
 });
@@ -23,6 +24,8 @@ describe('buildSdkOptions', () => {
     expect(buildSdkOptions(base())).toEqual({
       permissionMode: 'bypassPermissions',
       allowDangerouslySkipPermissions: true,
+      strictMcpConfig: true,
+      mcpServers: {},
     });
   });
 
@@ -93,20 +96,29 @@ describe('buildSdkOptions', () => {
     expect(buildSdkOptions(base({ env: { FOO: 'bar' } })).env).toEqual({ FOO: 'bar' });
     expect('env' in buildSdkOptions(base())).toBe(false);
   });
+
+  it('mcpEnabled=false isolates normal turns from MCP config; true leaves SDK defaults alone', () => {
+    const off = buildSdkOptions(base({ mcpEnabled: false }));
+    expect(off.strictMcpConfig).toBe(true);
+    expect(off.mcpServers).toEqual({});
+    const on = buildSdkOptions(base({ mcpEnabled: true }));
+    expect('strictMcpConfig' in on).toBe(false);
+    expect('mcpServers' in on).toBe(false);
+  });
 });
 
 describe('migrateLegacyConfig', () => {
   const fullLegacy: LegacyFlatProviderConfig = {
     authMethod: 'apiKey',
     model: 'opus', effort: 'max', thinking: 'disabled', permissionMode: 'acceptEdits', maxTurns: 7,
-    appendSystemPrompt: 'Be terse.', allowedTools: ['Read'], disallowedTools: ['Bash'], env: { FOO: 'bar' },
+    appendSystemPrompt: 'Be terse.', allowedTools: ['Read'], disallowedTools: ['Bash'], mcpEnabled: true, env: { FOO: 'bar' },
   };
 
   it('carries every set legacy value over verbatim (lossless)', () => {
     expect(migrateLegacyConfig(fullLegacy)).toEqual({
       authMethod: 'apiKey',
       model: 'opus', effort: 'max', thinking: 'disabled', permissionMode: 'acceptEdits', maxTurns: 7,
-      appendSystemPrompt: 'Be terse.', allowedTools: ['Read'], disallowedTools: ['Bash'], env: { FOO: 'bar' },
+      appendSystemPrompt: 'Be terse.', allowedTools: ['Read'], disallowedTools: ['Bash'], mcpEnabled: true, env: { FOO: 'bar' },
     });
   });
 

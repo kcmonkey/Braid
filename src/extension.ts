@@ -299,6 +299,7 @@ export function activate(context: vscode.ExtensionContext) {
     // Keep every open canvas's settings UI in sync — also fires for edits made in the native Settings page.
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('braid')) return;
+      for (const id of panels.keys()) retireLiveRunsForCanvas(id);
       void pushConfig();
     }),
   );
@@ -659,7 +660,7 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // Push FIRST, then interrupt: enqueuing synchronously means the interrupted turn's `result` sees a
       // non-empty queue → close-on-settle won't fire → the follow-up can't be dropped even if interrupt()
       // resolves slowly (>grace). The engine reads the queued message after the turn is cut. (principle 11)
-      if (h) { h.push(msg.text, msg.images); if (msg.interrupt) await h.interrupt(); break; }
+      if (h) { h.push(msg.text, msg.images, { boardId: msg.boardId, turnIndex: msg.turnIndex ?? 0 }); if (msg.interrupt) await h.interrupt(); break; }
       // Self-heal: the live query already closed (settled + grace expired in the race window). Run the
       // follow-up as a fresh send+resume into the SAME board so it isn't dropped and the board doesn't
       // hang in 'streaming' (principle 11). Nothing to interrupt — the prior turn is already done.
@@ -694,6 +695,7 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // Provider spine: switch only THIS canvas's default engine for new boards. Existing boards keep their
       // persisted BoardData.engine, and other projects/canvases keep their own active provider.
       if (engineHost.has(msg.provider)) {
+        retireLiveRunsForCanvas(canvasId);
         setCanvasActiveProvider(canvasId, msg.provider);
         slashCommandsCache.delete(msg.provider);
         closeMcp(canvasId); // any open MCP control session belonged to the previous canvas provider.
@@ -708,6 +710,7 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // UI changed a setting → write back to global VS Code settings (SSOT). The
       // onDidChangeConfiguration listener then broadcasts the new config to all panels.
       await applyConfig(msg.patch, canvasId);
+      retireLiveRunsForCanvas(canvasId);
       break;
     case 'getEditorContext':
       // User clicked "attach file/selection" → read the active (or last-focused) file editor.
@@ -1207,6 +1210,7 @@ async function clearApiKey(context: vscode.ExtensionContext, provider: EngineId)
 
 /** After any key/mode change: rebroadcast config (authMethod may have flipped) + key status to every canvas. */
 async function afterApiKeyChange() {
+  for (const id of panels.keys()) retireLiveRunsForCanvas(id);
   await pushConfig();
   for (const id of panels.keys()) pushApiKeyStatus(id);
 }
@@ -1506,11 +1510,27 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
     return;
   }
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-  const abort = new AbortController();
-  const k = aKey(canvasId, msg.boardId);
-  aborters.set(k, abort);
   const runProvider = msg.engine && engineHost.has(msg.engine) ? msg.engine : DEFAULT_ACTIVE_PROVIDER;
-  const sink = makeSink(canvasId, runProvider);
+  const k = aKey(canvasId, msg.boardId);
+  if (msg.resume && !msg.fork) {
+    const warm = liveRunsBySession.get(liveSessionKey(runProvider, msg.resume));
+    if (warm?.handle && !warm.retired && warm.canvasId === canvasId && warm.cwd === cwd && !warm.abort.signal.aborted) {
+      registerLiveKey(warm, k);
+      warm.handle.push(msg.prompt, msg.images, { boardId: msg.boardId, turnIndex: msg.turnIndex ?? 0 });
+      return;
+    }
+  }
+  const abort = new AbortController();
+  const run: LiveRun = { canvasId, provider: runProvider, cwd, abort, keys: new Set(), sessions: new Set() };
+  registerLiveKey(run, k);
+  const baseSink = makeSink(canvasId, runProvider);
+  const sink: EventSink = {
+    ...baseSink,
+    session: (boardId, sessionId) => {
+      baseSink.session(boardId, sessionId);
+      bindLiveSession(run, sessionId);
+    },
+  };
   const pre = makePreToolInterceptor(canvasId, msg.boardId, abort.signal);
   const canvas = readSettings().canvas;
   const req: TurnRequest = {
@@ -1524,12 +1544,14 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
     // wakeups, capped by the configured idle timeout (minutes → ms). (AD5)
     asyncContinuation: canvas.asyncContinuationEnabled,
     idleCapMs: Math.max(1, canvas.asyncContinuationIdleCapMin) * 60_000,
+    warmSession: canvas.warmSessionEnabled,
+    warmIdleMs: Math.max(1, canvas.warmSessionIdleCapMin) * 60_000,
   };
   try {
-    await engineFor(msg.engine).runTurn(req, sink, pre, { abort, onLive: (h: TurnHandle) => liveQueries.set(k, h) });
+    await engineHost.get(runProvider).runTurn(req, sink, pre, { abort, onLive: (h: TurnHandle) => bindLiveHandle(run, h) });
   } finally {
-    liveQueries.delete(k);
-    aborters.delete(k);
+    clearWaitingForRun(run);
+    cleanupLiveRun(run);
     // Async continuation: runTurn resolved ⇒ the held session (if any) has fully closed → finalize the
     // board from 'waiting' back to 'done' (empty pending = clear). No-op if it never entered 'waiting'.
     postTo(canvasId, { type: 'waiting', boardId: msg.boardId, turnIndex: msg.turnIndex ?? 0, pending: { background: [], crons: [] } });

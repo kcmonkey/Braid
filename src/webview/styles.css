@@ -1114,6 +1114,11 @@ body {
 .diffrow--del { background: rgba(229,100,93,.14); }
 .diffrow--del .diffrow__sign { color: var(--red); }
 
+/* Codex multi-file fileChange: a clickable path header above each file's diff (M-Codex). */
+.filechange + .filechange { margin-top: 8px; }
+.filechange__path { font-family: var(--mono, monospace); font-size: 11px; color: var(--accent); cursor: pointer; padding: 2px 0; opacity: .85; }
+.filechange__path:hover { text-decoration: underline; color: var(--text); }
+
 /* ---- In-canvas settings (M5): model dropdown + ⚙ gear panel ---- */
 .settings { position: relative; display: flex; align-items: center; gap: 6px; }
 .settings__model {

@@ -5,7 +5,7 @@ import type { EventSink, PreToolInterceptor, PreToolDecision, PermissionVerdict,
 
 const cfg: ProviderConfig = {
   model: '', effort: '', thinking: 'inherit', permissionMode: 'bypassPermissions', maxTurns: 0,
-  appendSystemPrompt: '', allowedTools: [], disallowedTools: [], env: {},
+  appendSystemPrompt: '', allowedTools: [], disallowedTools: [], mcpEnabled: true, env: {},
 };
 
 function recordingSink() {
@@ -257,6 +257,58 @@ describe('ClaudeAdapter.runTurn — streaming + settle', () => {
 
     // Both turns settled, on turnIndex 0 then 1 (each init advanced the round).
     expect(calls.filter((c) => c.t === 'done').map((d) => d.ti)).toEqual([0, 1]);
+  });
+
+  it('can route a warm continuation turn to a child board while reusing the same query', async () => {
+    const pulledInput: any[] = [];
+    const out: any[] = [];
+    let outWake: (() => void) | null = null;
+    let outDone = false;
+    let promptIterable: AsyncIterable<any> | null = null;
+    const emit = (m: any) => { out.push(m); if (outWake) { const w = outWake; outWake = null; w(); } };
+    const finish = () => { outDone = true; if (outWake) { const w = outWake; outWake = null; w(); } };
+    const q: any = {
+      async *[Symbol.asyncIterator]() {
+        (async () => { try { for await (const msg of promptIterable as AsyncIterable<any>) pulledInput.push(msg); } catch { /* generator closed */ } })();
+        while (true) {
+          while (out.length) yield out.shift();
+          if (outDone) return;
+          await new Promise<void>((r) => { outWake = r; });
+        }
+      },
+      interrupt: async () => {},
+    };
+    const sdk = { query: (args: any) => { promptIterable = args.prompt; return q; } };
+    const adapter = new ClaudeAdapter({ loadSdk: async () => sdk, readProviderConfig: () => cfg });
+    const { sink, calls } = recordingSink();
+    let handle: TurnHandle | undefined;
+    const p = adapter.runTurn(req({ kind: 'fresh' }, { warmSession: true, warmIdleMs: 500 }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } });
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+
+    await tick();
+    expect(pulledInput.length).toBe(1);
+    emit(init);
+    emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'parent' }] } });
+    emit({ type: 'result', is_error: false, session_id: 's1' });
+    await tick();
+    expect(calls.find((c) => c.t === 'done')).toMatchObject({ b: 'b1', ti: 0 });
+
+    handle!.push('child question', undefined, { boardId: 'b2', turnIndex: 0 });
+    await tick();
+    expect(pulledInput.length).toBe(2);
+    emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'child' }] } });
+    emit({ type: 'result', is_error: false, session_id: 's1' });
+    await tick();
+    await handle!.dispose();
+    finish();
+    await p;
+
+    expect(calls.filter((c) => c.t === 'session').map((c) => c.b)).toEqual(['b1', 'b2']);
+    expect(calls.filter((c) => c.t === 'done').map((d) => ({ b: d.b, ti: d.ti, text: d.d.text }))).toEqual([
+      { b: 'b1', ti: 0, text: 'parent' },
+      { b: 'b2', ti: 0, text: 'child' },
+    ]);
   });
 });
 
