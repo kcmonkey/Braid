@@ -104,11 +104,9 @@ function makeClient() {
   function handleServerRequest(msg) {
     log('  <<server-request>>', msg.method, JSON.stringify(msg.params));
     let result;
-    if (/requestApproval$/i.test(msg.method)) result = 'decline';          // never execute anything
-    else if (/requestUserInput$/i.test(msg.method)) {
-      // shape unknown across versions — answer best-effort, log so we learn the response schema
-      result = { answers: ['PROBE'] };
-    } else if (/AuthTokens\/refresh$/i.test(msg.method)) {
+    if (/requestApproval$/i.test(msg.method)) result = { decision: 'decline' }; // never execute/write anything
+    else if (/requestUserInput$/i.test(msg.method)) result = { answers: [] };    // experimental; decline-ish
+    else if (/AuthTokens\/refresh$/i.test(msg.method)) {
       send({ id: msg.id, error: { code: -32001, message: 'probe: cannot refresh' } }); return;
     } else result = {};
     send({ id: msg.id, result });
@@ -151,7 +149,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function main() {
   await step_version();
-  await step_generateSchema();
+  if (!process.env.SKIP_SCHEMA) await step_generateSchema();
+  else log('\n========== B. (schema dump skipped via SKIP_SCHEMA) ==========');
 
   section('C. live codex app-server session');
   const cli = makeClient();
@@ -181,7 +180,7 @@ async function main() {
 
   // thread (read-only sandbox, never approve)
   const ts = await cli.request('thread/start', {
-    cwd: SCRATCH, approvalPolicy: 'never', sandbox: 'readOnly',
+    cwd: SCRATCH, approvalPolicy: 'never', sandbox: 'read-only',
   });
   log('-- thread/start result:', JSON.stringify(ts.result ?? ts));
   const thread = ts.result?.thread ?? ts.result ?? {};
@@ -193,7 +192,7 @@ async function main() {
   let lastTurnId;
   {
     const r = await cli.request('turn/start', {
-      threadId, input: [{ type: 'text', text: 'Reply with exactly: PROBE_OK — then stop.' }],
+      threadId, input: [{ type: 'text', text: 'Reply with exactly: PROBE_OK — then stop.', text_elements: [] }],
     });
     log('-- turn/start result:', JSON.stringify(r.result ?? r));
     lastTurnId = r.result?.turn?.id ?? r.result?.turnId;
@@ -204,35 +203,41 @@ async function main() {
   section('C2. turn/start — elicit a commandExecution item (echo)');
   {
     const r = await cli.request('turn/start', {
-      threadId, input: [{ type: 'text', text: 'Run the shell command `echo PROBE_SHELL` and report its output.' }],
+      threadId, input: [{ type: 'text', text: 'Run the shell command `echo PROBE_SHELL` and report its output.', text_elements: [] }],
     });
     log('-- turn/start result:', JSON.stringify(r.result ?? r));
     await waitForTurnEnd(cli);
   }
 
-  // Turn 3: approval-capture — switch to an approving policy and a writing instruction; AUTO-DECLINE so
-  // nothing runs. We only want the requestApproval message shape (logged by handleServerRequest).
-  section('C3. turn/start — approval request shape (auto-declined, runs nothing)');
+  // Turn 3: approval-capture — a SEPARATE thread with workspace-write + on-request so a file write
+  // triggers a requestApproval; AUTO-DECLINE so nothing is written. We want the requestApproval shape.
+  section('C3. approval request shape (separate thread, auto-declined, writes nothing)');
   {
+    const ts2 = await cli.request('thread/start', { cwd: SCRATCH, approvalPolicy: 'on-request', sandbox: 'workspace-write' });
+    log('-- thread/start (approval thread):', JSON.stringify(ts2.result ?? ts2));
+    const t2 = ts2.result?.thread ?? ts2.result ?? {};
+    const tid2 = t2.id ?? t2.threadId ?? t2.sessionId;
     const r = await cli.request('turn/start', {
-      threadId,
-      approvalPolicy: 'unlessTrusted', sandbox: 'workspaceWrite',
-      input: [{ type: 'text', text: 'Create a file probe.txt containing "x" in the current directory.' }],
+      threadId: tid2,
+      input: [{ type: 'text', text: 'Create a file named probe.txt containing the text x in the current directory.', text_elements: [] }],
     });
     log('-- turn/start result:', JSON.stringify(r.result ?? r));
     await waitForTurnEnd(cli);
   }
 
-  // thread/fork — whole-thread, and a mid-point attempt (does it accept a turn anchor = Lazy-Fork equiv?)
-  section('C4. thread/fork (whole + mid-point turnId attempt)');
+  // thread/fork is whole-thread (no mid-point anchor per schema). Mid-point Lazy-Fork equivalent =
+  // fork → thread/rollback {numTurns} to truncate the fork at an earlier turn. Capture both.
+  section('C4. thread/fork (whole) + thread/rollback (mid-point truncation)');
   {
     const f1 = await cli.request('thread/fork', { threadId });
     log('-- thread/fork {threadId}:', JSON.stringify(f1.result ?? f1.error ?? f1));
-    const f2 = await cli.request('thread/fork', { threadId, turnId: lastTurnId });
-    log('-- thread/fork {threadId,turnId}:', JSON.stringify(f2.result ?? f2.error ?? f2));
-    // snake_case variant in case fields are snake_case on this version:
-    const f3 = await cli.request('thread/fork', { from_thread_id: threadId, turn_id: lastTurnId });
-    log('-- thread/fork {from_thread_id,turn_id}:', JSON.stringify(f3.result ?? f3.error ?? f3));
+    const fk = f1.result?.thread ?? f1.result ?? {};
+    const forkedId = fk.id ?? fk.threadId;
+    log('   → forkedId =', forkedId, ' forkedFromId =', fk.forkedFromId, ' sessionId =', fk.sessionId);
+    if (forkedId) {
+      const rb = await cli.request('thread/rollback', { threadId: forkedId, numTurns: 1 });
+      log('-- thread/rollback {forkedId, numTurns:1}:', JSON.stringify(rb.result ?? rb.error ?? rb));
+    }
   }
 
   // compact
