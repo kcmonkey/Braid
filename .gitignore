@@ -7,3 +7,8 @@ out/
 # Claude / agent infrastructure — not uploaded
 .claude/
 CLAUDE.md
+
+# M-Codex probe artifacts (throwaway evidence; a pinned schema copy lands in src/engine/codex/ later)
+probe-codex.mjs
+probe-codex-out.txt
+tmp-codex-schema/
