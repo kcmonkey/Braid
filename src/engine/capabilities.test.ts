@@ -18,6 +18,7 @@ describe('toCapabilitiesView', () => {
       id: 'claude',
       reasoning: true,
       steer: true,
+      routedFollowups: true,
       compact: true, // derived: compact.mode === 'native' !== 'none'
       images: true,  // Claude is a vision provider (M-MultiEngine)
       models: claudeModels,
@@ -49,6 +50,7 @@ describe('toCapabilitiesView', () => {
       id: 'deepseek',
       reasoning: true,
       steer: true,
+      routedFollowups: false,
       compact: true,
       images: false,
       models: deepSeekModels,

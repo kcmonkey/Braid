@@ -862,6 +862,7 @@ interface ProviderSwitchState {
   setActive: (id: EngineId) => void;
 }
 const ProviderCtx = React.createContext<ProviderSwitchState>({ activeProvider: 'claude', setActive: () => {} });
+const CapabilitiesCtx = React.createContext<Partial<Record<EngineId, ProviderCapabilitiesView>>>({});
 
 // One row's display data, plus the exact text spliced in on accept (incl. the trigger char + trailing space).
 interface AutofillItem { insert: string; primary: string; secondary?: string; hint?: string }
@@ -1148,6 +1149,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const [showRawCompact, setShowRawCompact] = useState(false);
   const imgCtx = React.useContext(ImageCtx);
   const provider = React.useContext(ProviderCtx);
+  const providerCaps = React.useContext(CapabilitiesCtx);
   const collapseCtx = React.useContext(CollapseCtx);
   const dir = React.useContext(DirCtx);
   const detailSet = React.useContext(DetailIdsCtx);
@@ -1188,6 +1190,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // A just-triggered compact node, still running /compact (no prompt yet) → show the compacting spinner.
   // Once the user asks a question in it, prompt is set and it renders as a normal streaming turn.
   const compacting = !!data.compact && data.status === 'streaming' && !data.prompt;
+  const queuedWaiting = !!data.queueParentId && data.status === 'streaming' && !data.queueStarted;
   // At far zoom the card shows ONE fused gist line (mini summary) instead of the long question + summary —
   // long questions are unreadable when shrunk, so we fold "what was asked + answered" into miniSummary.
   // Fallback chain covers boards summarized before miniSummary existed / still streaming.
@@ -1220,12 +1223,16 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // TB → bottom dot). Lives outside the overflow-hidden .board so it isn't clipped at the edge.
   // Fork "+" on done boards (their real session) AND on compacted-boundary nodes (idle, carrying the
   // compacted session as parentSessionId): a compact node takes no input of its own — you fork to continue.
+  const canQueueChild = (data.status === 'streaming' || data.status === 'waiting')
+    && !compacting
+    && providerCaps[boardEngine(data)]?.routedFollowups === true;
   const canFork = (data.status === 'done' && !!data.sessionId)
+    || canQueueChild
     || (!!data.compact && data.status === 'idle' && !!data.parentSessionId);
   const forkBtn = canFork ? (
     <button
       className={`board__add nodrag nopan ${dir === 'LR' ? 'board__add--r' : 'board__add--b'}`}
-      title={data.compact ? 'Fork to continue on the compacted context' : 'Branch a new conversation from here'}
+      title={canQueueChild ? 'Queue a child message after this running board' : data.compact ? 'Fork to continue on the compacted context' : 'Branch a new conversation from here'}
       onClick={(e) => { e.stopPropagation(); data.onFork(id); }}
     >+</button>
   ) : null;
@@ -4512,6 +4519,9 @@ function App() {
       {/* Top-right account bar (mockup parity): active-provider usage chip · account avatar · ⚙ settings.
           Each element floats separately (no wrapping dock chrome), like the official extension's top-right. */}
       <div className="toolbar toolbar--top">
+        {/* Fast provider switch (segmented): one click picks the active engine for new turns, without opening
+            a composer or the Accounts/Settings panel. Self-hides when <2 providers are implemented. */}
+        <ProviderQuickSwitch activeProvider={activeProvider} onSetActive={onSetActiveProvider} />
         {config && (
           <UsageChip
             snapshot={rateLimits[activeProvider] ?? null}

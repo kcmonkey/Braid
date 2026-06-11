@@ -74,7 +74,7 @@ export class DeepSeekAdapter implements Engine {
 
   async capabilities(): Promise<EngineCapabilities> {
     const desc = PROVIDER_CATALOG.find((p) => p.id === this.id);
-    return { fork: 'replay', steer: true, reasoning: true, images: false, models: desc?.models ?? [] };
+    return { fork: 'replay', steer: true, reasoning: true, routedFollowups: false, images: false, models: desc?.models ?? [] };
   }
 
   async runTurn(req: TurnRequest, sink: EventSink, pre: PreToolInterceptor, ctl: TurnControl): Promise<void> {

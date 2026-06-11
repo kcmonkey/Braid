@@ -10,6 +10,7 @@ export async function toCapabilitiesView(engine: Engine): Promise<ProviderCapabi
     id: engine.id,
     reasoning: caps.reasoning,
     steer: caps.steer,
+    routedFollowups: caps.routedFollowups,
     compact: engine.compact.mode !== 'none',
     images: caps.images,
     models: caps.models,

@@ -94,6 +94,9 @@ export interface ProviderCapabilitiesView {
   reasoning: boolean;
   compact: boolean;
   steer: boolean;
+  // Can a live follow-up be routed to a different board id than the board that owns the open session?
+  // Needed for "queued child node after a running parent" without leaking provider-specific session details.
+  routedFollowups: boolean;
   // Whether this provider accepts image content blocks. Drives gating of paste/drop image attachments per the
   // active provider (a no-vision provider rejects images). Claude = true. (M-MultiEngine)
   images: boolean;
@@ -208,7 +211,7 @@ export type WebviewMessage =
   // follow-up steers immediately. Same session, no fork — it becomes the next turn IN THE SAME board.
   // `resume`/`turnIndex` are a self-heal fallback: if the query already closed (settled + grace expired
   // in the race window), the host runs this as a `send`+resume into the same board instead of dropping it.
-  | { type: 'followup'; boardId: string; text: string; interrupt: boolean; resume?: string; turnIndex?: number; images?: ImageInput[]; engine?: EngineId }
+  | { type: 'followup'; boardId: string; text: string; interrupt: boolean; resume?: string; turnIndex?: number; images?: ImageInput[]; engine?: EngineId; routeBoardId?: string }
   | { type: 'summarize'; boardId: string; prompt: string; answer: string; engine?: EngineId }
   // Branch-Signposts: synthesize a one-line "this branch explores X" label for a signpost node. `text` =
   // the segment's concatenated Q/A (built webview-side from branchSegment); `boardId` = the signpost to

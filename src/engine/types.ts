@@ -198,6 +198,9 @@ export interface EngineCapabilities {
   fork: 'native' | 'replay';
   steer: boolean;
   reasoning: boolean;
+  // True when TurnHandle.push honors its optional route argument and emits the queued turn's events under
+  // that route board id. Engines that ignore the route must return false.
+  routedFollowups: boolean;
   // Whether the engine accepts image content blocks (vision). Claude = true; a text-only provider returns
   // false so the webview can gate image paste/drop per the active provider. (M-MultiEngine)
   images: boolean;

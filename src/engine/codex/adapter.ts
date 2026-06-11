@@ -87,7 +87,7 @@ export class CodexAdapter implements Engine {
 
   async capabilities(): Promise<EngineCapabilities> {
     const codex = PROVIDER_CATALOG.find((p) => p.id === 'codex');
-    return { fork: 'native', steer: true, reasoning: true, images: true, models: codex?.models ?? [] };
+    return { fork: 'native', steer: true, reasoning: true, routedFollowups: false, images: true, models: codex?.models ?? [] };
   }
 
   /** Open a connected app-server: spawn + `initialize` handshake + `initialized`. Caller disposes. */

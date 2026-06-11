@@ -281,6 +281,11 @@ export interface BoardData {
   // of these so merge/summary (which read prompt+answer) include the fused content unchanged. Persisted
   // via `...data`, like steps. (decisions.md M12)
   turns?: Turn[];
+  // Transient queued-child state: a child created under a live parent queues its first prompt through the
+  // parent's open session, but renders as its own board. `queueStarted` flips once events route to this
+  // child; both fields are stripped on persistence and cleared when the child settles.
+  queueParentId?: string;
+  queueStarted?: boolean;
   // M11: context-window usage after this turn. contextTokens = the model's input+cache on its final
   // response (≈ getContextUsage totalTokens); contextWindow = that model's window. Drives the % badge
   // + auto-compact. autoCompacted = the ENGINE auto-compacted this turn internally (defensive flag →
@@ -1364,7 +1369,7 @@ export function serializeGraph(nodes: BoardNodeT[], edges: Edge[], idCounter: nu
   return {
     version: GRAPH_VERSION,
     nodes: nodes.map((n) => {
-      const { onSend, onFork, onStop, onCompact, summarizing, branchSummarizing, asyncPending, ...data } = n.data; // drop callbacks + transient flags (incl. live async-pending)
+      const { onSend, onFork, onStop, onCompact, summarizing, branchSummarizing, asyncPending, queueParentId, queueStarted, ...data } = n.data; // drop callbacks + transient flags (incl. live async-pending / queued-child route)
       data.steps = stripStepPermissions(data.steps);
       if (data.turns) data.turns = data.turns.map((t) => (t.steps ? { ...t, steps: stripStepPermissions(t.steps) } : t));
       // Async continuation (AD6): a board held open for async work can't still be waiting in a fresh session →

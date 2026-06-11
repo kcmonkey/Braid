@@ -664,15 +664,23 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // M11 mid-stream follow-up: inject into the board's OPEN streaming-input query. interrupt → cut the current
       // turn first (send-now); otherwise the engine queues it to run after the current turn (queue).
       const h = liveQueries.get(aKey(canvasId, msg.boardId));
+      const routeBoardId = msg.routeBoardId ?? msg.boardId;
+      const route = { boardId: routeBoardId, turnIndex: msg.turnIndex ?? 0 };
       // Push FIRST, then interrupt: enqueuing synchronously means the interrupted turn's `result` sees a
       // non-empty queue → close-on-settle won't fire → the follow-up can't be dropped even if interrupt()
       // resolves slowly (>grace). The engine reads the queued message after the turn is cut. (principle 11)
-      if (h) { h.push(msg.text, msg.images, { boardId: msg.boardId, turnIndex: msg.turnIndex ?? 0 }); if (msg.interrupt) await h.interrupt(); break; }
+      if (h) {
+        const run = liveRunsByHandle.get(h);
+        if (run) registerLiveKey(run, aKey(canvasId, routeBoardId));
+        h.push(msg.text, msg.images, route);
+        if (msg.interrupt) await h.interrupt();
+        break;
+      }
       // Self-heal: the live query already closed (settled + grace expired in the race window). Run the
       // follow-up as a fresh send+resume into the SAME board so it isn't dropped and the board doesn't
       // hang in 'streaming' (principle 11). Nothing to interrupt — the prior turn is already done.
       if (msg.resume) {
-        await runSend({ type: 'send', boardId: msg.boardId, prompt: msg.text, resume: msg.resume, fork: false, turnIndex: msg.turnIndex, images: msg.images, engine: msg.engine }, canvasId);
+        await runSend({ type: 'send', boardId: routeBoardId, prompt: msg.text, resume: msg.resume, fork: false, turnIndex: msg.turnIndex, images: msg.images, engine: msg.engine }, canvasId);
       } else {
         console.warn('[Braid] followup with no live query and no resume:', msg.boardId);
       }
@@ -762,7 +770,7 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       await accountAuth(canvasId, 'out', msg.provider);
       break;
     case 'setApiKey':
-      // Store a Claude API key (SecretStorage) + switch to apiKey auth. The key value never echoes back.
+      // Store a provider API key (SecretStorage) + switch to apiKey auth. The key value never echoes back.
       await setApiKey(context, msg.provider, msg.key);
       break;
     case 'clearApiKey':
@@ -1171,7 +1179,7 @@ async function pushAccountIdentity(canvasId: string) {
   postTo(canvasId, { type: 'account', provider: active, account, usage: null });
 }
 
-// ---- Claude API-key auth method (SecretStorage-backed; the key never enters settings.json / the webview) ----
+// ---- Provider API-key auth method (SecretStorage-backed; the key never enters settings.json / the webview) ----
 
 /** Load each provider's SecretStorage-backed API key into the sync cache (called on activate). */
 async function loadApiKeys(context: vscode.ExtensionContext) {

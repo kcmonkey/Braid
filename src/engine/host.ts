@@ -1,5 +1,4 @@
-// EngineHost — the registry the host routes turns through. Only 'claude' is registered for now;
-// `get()` defaults to it. Multi-engine (per-Board attribution) is a Future Milestone. (plans/Engine-Abstraction)
+// EngineHost: the registry the host routes turns through. `get()` defaults to Claude for legacy fallback.
 import type { ProviderConfig, CanvasConfig } from '../sdkOptions';
 import { DEFAULT_PROVIDER_CONFIG } from '../sdkOptions';
 import type { Engine, EngineId } from './types';
