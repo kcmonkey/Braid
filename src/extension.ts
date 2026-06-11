@@ -1103,15 +1103,31 @@ async function openAccount(canvasId: string) {
   pushApiKeyStatus(canvasId); // refresh the API-key face + adopt offer when the panel opens
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   const active = readSettings().activeProvider;
-  // Resolve EVERY non-active implemented provider's card with a fast identity push (one-shot, no control
-  // session), so a non-active provider (e.g. Codex while Claude is active) doesn't spin "Checking
-  // subscription…" forever. Fire-and-forget (concurrent) so they never block the active card's usage refresh.
+  // Resolve EVERY non-active implemented provider's card with a lazy control session + identity/usage refresh
+  // (NOT identity-only) — so a non-active provider (e.g. Codex while Claude is active) shows BOTH its identity
+  // AND its plan-usage bars, not just identity. `refreshAccount` pushes identity first (fast) then polls usage,
+  // so the card still resolves immediately and never spins. Fire-and-forget (concurrent) so they never block
+  // the active card. The session is keyed canvasId::provider and torn down by closeAccount, so the only cost is
+  // one extra control subprocess WHILE the panel is open. (M-Codex: non-active providers couldn't show usage)
   for (const p of PROVIDER_CATALOG.filter((q) => q.implemented && engineHost.has(q.id) && q.id !== active && !accountControls.has(acctKey(canvasId, q.id)))) {
     void (async () => {
-      let account: ProviderAccount | null = null;
-      try { account = await engineHost.get(p.id).accountIdentity(cwd); }
-      catch (e: any) { console.error(`[Braid] ${p.id} identity fetch failed:`, e?.message ?? e); }
-      if (panels.has(canvasId) && !accountControls.has(acctKey(canvasId, p.id))) postTo(canvasId, { type: 'account', provider: p.id, account, usage: null });
+      const key = acctKey(canvasId, p.id);
+      let ctrl: AccountController | null = null;
+      try { ctrl = await engineHost.get(p.id).accountControl(cwd); }
+      catch (e: any) { console.error(`[Braid] ${p.id} accountControl failed:`, e?.message ?? e); }
+      // No control session → fall back to the fast identity-only push (the prior behavior), so the card still
+      // resolves with whatever identity we can get instead of spinning or showing a false "Not signed in".
+      if (!ctrl) {
+        let account: ProviderAccount | null = null;
+        try { account = await engineHost.get(p.id).accountIdentity(cwd); }
+        catch (e: any) { console.error(`[Braid] ${p.id} identity fetch failed:`, e?.message ?? e); }
+        if (panels.has(canvasId) && !accountControls.has(key)) postTo(canvasId, { type: 'account', provider: p.id, account, usage: null });
+        return;
+      }
+      // Panel closed during the async create, or another open raced us to it → don't leak this session.
+      if (!panels.has(canvasId) || accountControls.has(key)) { ctrl.dispose(); return; }
+      accountControls.set(key, ctrl);
+      await refreshAccount(canvasId, p.id);
     })();
   }
   // The ACTIVE provider gets a persistent control session (identity + usage windows + sign-in/out).
