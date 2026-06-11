@@ -745,6 +745,28 @@ export function dropQueuedTurns(turns: Turn[]): Turn[] {
   return turns.slice(0, liveIdx + 1);
 }
 
+// Box-select fidelity. React Flow's getNodesInside force-includes any node it can't measure — one with
+// no handle bounds, or zero measured area where the containment test `overlappingArea >= area` collapses
+// to `0 >= 0` — into EVERY rubber-band selection. Result: a stray far-off board gets picked no matter
+// where you draw the box. This recomputes the boxed set from geometry the way React Flow's default (Full)
+// mode SHOULD: a board is selected only when its measured rect lies fully inside the selection rect;
+// unmeasured / zero-area boards are never force-added. `box` and node positions are both in FLOW
+// coordinates. Overlap math mirrors @xyflow/system's getOverlappingArea (ceil). Pure → unit-tested.
+export function boxSelectedIds(
+  nodes: { id: string; position: { x: number; y: number }; measured?: { width?: number; height?: number } }[],
+  box: { x: number; y: number; width: number; height: number },
+): string[] {
+  const ids: string[] = [];
+  for (const n of nodes) {
+    const w = n.measured?.width, h = n.measured?.height;
+    if (!w || !h) continue; // unmeasured / zero-area = exactly React Flow's force-include bug — never select
+    const xOverlap = Math.max(0, Math.min(box.x + box.width, n.position.x + w) - Math.max(box.x, n.position.x));
+    const yOverlap = Math.max(0, Math.min(box.y + box.height, n.position.y + h) - Math.max(box.y, n.position.y));
+    if (Math.ceil(xOverlap * yOverlap) >= w * h) ids.push(n.id); // Full mode: the whole board sits inside the box
+  }
+  return ids;
+}
+
 // Node-Delete Phase 1: text seed to rebuild a lineage-dirty board's context after an ancestor was deleted.
 // The board (and any surviving dirty ancestors between it and the nearest clean ancestor) fork natively
 // from that clean ancestor; this replays their own Q/A on top so the deleted node is excluded. Q AND A of

@@ -3,7 +3,7 @@ import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
-  boardEngine, diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
+  boardEngine, diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
@@ -700,6 +700,48 @@ describe('dropQueuedTurns (abort drops queued follow-ups so the board can settle
   it('single live round → returns the SAME reference (no-op)', () => {
     const turns: Turn[] = [{ prompt: 'q0', answer: 'partial' }];
     expect(dropQueuedTurns(turns)).toBe(turns);
+  });
+});
+
+describe('boxSelectedIds (rubber-band selection, no far-node force-include)', () => {
+  // A small graph: 'far' sits at the top-left, the rest are near where the box is drawn.
+  const nodes = [
+    { id: 'far', position: { x: 0, y: 0 }, measured: { width: 320, height: 200 } },
+    { id: 'a', position: { x: 1000, y: 1000 }, measured: { width: 320, height: 200 } },
+    { id: 'b', position: { x: 1000, y: 1300 }, measured: { width: 320, height: 200 } },
+  ];
+
+  it('selects only the boards fully inside the box — NOT the far top-left node', () => {
+    // Box around a + b (x:960–1400, y:960–1560). 'far' at (0,0) is nowhere near it.
+    const box = { x: 960, y: 960, width: 440, height: 600 };
+    expect(boxSelectedIds(nodes, box).sort()).toEqual(['a', 'b']);
+  });
+
+  it('a box drawn in empty space far from every node selects nothing', () => {
+    const box = { x: 5000, y: 5000, width: 100, height: 100 };
+    expect(boxSelectedIds(nodes, box)).toEqual([]);
+  });
+
+  it('Full mode: a box that only partially overlaps a board does NOT select it', () => {
+    // Box covers the left half of 'a' only (x:1000–1160 of its 1000–1320 span).
+    const box = { x: 1000, y: 1000, width: 160, height: 200 };
+    expect(boxSelectedIds(nodes, box)).toEqual([]);
+  });
+
+  it('a box enclosing a board exactly selects it', () => {
+    const box = { x: 1000, y: 1000, width: 320, height: 200 };
+    expect(boxSelectedIds(nodes, box)).toEqual(['a']);
+  });
+
+  it('NEVER selects an unmeasured / zero-area board (this is the force-include bug being fixed)', () => {
+    // Even a box drawn right on top of an unmeasured node must not select it (RF would force-include it).
+    const withUnmeasured = [
+      { id: 'ghost', position: { x: 1000, y: 1000 }, measured: undefined },
+      { id: 'zero', position: { x: 1000, y: 1000 }, measured: { width: 0, height: 0 } },
+      ...nodes,
+    ];
+    const box = { x: 960, y: 960, width: 440, height: 300 };
+    expect(boxSelectedIds(withUnmeasured, box)).toEqual(['a']);
   });
 });
 

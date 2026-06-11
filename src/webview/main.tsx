@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import {
   ReactFlow, ReactFlowProvider, Background, MiniMap, Handle, Position,
-  applyNodeChanges, useUpdateNodeInternals, useStore, type Edge, type NodeChange, type Node,
+  applyNodeChanges, useUpdateNodeInternals, useStore, useStoreApi, type Edge, type NodeChange, type Node,
   type ReactFlowInstance, type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
@@ -17,7 +17,7 @@ import {
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
   GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, mergeUnion, modelWindowFor, forkableSession,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
-  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
+  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
@@ -3440,11 +3440,40 @@ function App() {
     enterFocus(node.id);
   }, [enterFocus]);
 
+  // Box-select fidelity: capture the live rubber-band rect so we can recompute the boxed set ourselves on
+  // release. React Flow's getNodesInside force-includes any board it can't measure (no handle bounds / zero
+  // measured area → `0 >= 0`) into EVERY selection — so a stray far node gets picked no matter where you
+  // drag the box. useStoreApi gives an imperative subscription that only writes a ref (no per-tick
+  // re-render). `userSelectionRect` is in PANE pixels; the store transform [tx,ty,zoom] converts it to flow
+  // space (pointToRendererPoint). React Flow nulls the rect BEFORE onSelectionEnd fires, so we must capture
+  // it during the drag, not read it on release.
+  const storeApi = useStoreApi();
+  const boxCaptureRef = useRef<{ x: number; y: number; width: number; height: number; transform: [number, number, number] } | null>(null);
+  useEffect(() => storeApi.subscribe((s) => {
+    const r = s.userSelectionRect;
+    if (r) boxCaptureRef.current = { x: r.x, y: r.y, width: r.width, height: r.height, transform: s.transform };
+  }), [storeApi]);
+
   // Req 2: while a box-select rubber-band is dragging, pause committing the live selection (the commit
   // effect skips when `selecting`), so boards don't flip to detail / reflow mid-drag. On release the
   // final boxed selection commits once. React Flow still shows its own highlight during the drag.
-  const onSelectionStart = useCallback(() => setSelecting(true), []);
-  const onSelectionEnd = useCallback(() => setSelecting(false), []);
+  const onSelectionStart = useCallback(() => { boxCaptureRef.current = null; setSelecting(true); }, []);
+  const onSelectionEnd = useCallback(() => {
+    // Drop React Flow's spurious force-includes: keep only boards whose measured rect truly lies inside the
+    // final rubber-band. Geometry from nodesRef (positions + measured) matches RF's own nodeLookup, so
+    // legitimately-boxed boards are untouched — only the unmeasurable / outside force-adds are removed. The
+    // corrected `selected` flags drive both React Flow's highlight and our `selectedIds` commit (derived
+    // from the same nodes state, so the commit effect — re-run once `selecting` flips false — sees them).
+    const cap = boxCaptureRef.current;
+    boxCaptureRef.current = null;
+    if (cap) {
+      const [tx, ty, zoom] = cap.transform;
+      const box = { x: (cap.x - tx) / zoom, y: (cap.y - ty) / zoom, width: cap.width / zoom, height: cap.height / zoom };
+      const keep = new Set(boxSelectedIds(nodesRef.current, box));
+      setNodes((ns) => ns.map((n) => (n.selected === keep.has(n.id) ? n : { ...n, selected: keep.has(n.id) })));
+    }
+    setSelecting(false);
+  }, []);
 
   const seedRoot = useCallback(() => {
     setNodes([{
