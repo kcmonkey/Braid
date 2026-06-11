@@ -60,6 +60,11 @@ body {
    trailing slowly past it — a 300ms glide read as "nodes rearrange with a severe delay after the flip". */
 .react-flow__node { transition: transform 150ms cubic-bezier(.4, 0, .2, 1); }
 .react-flow__node.dragging { transition: none; }
+/* One-frame transition kill during a far↔detail LOD flip: main.tsx nudges the board's x to keep its CENTER
+   fixed as the card width changes (320↔480) and toggles this class for that single paint, so the recenter
+   applies INSTANTLY (in the same frame the width changes) instead of gliding 150ms — symmetric grow, no
+   horizontal drift. Cleared on the next animation frame so ordinary fork/merge/delete reflows still glide. */
+.react-flow.snap-lod .react-flow__node { transition: none; }
 @media (prefers-reduced-motion: reduce) {
   .react-flow__node { transition: none; }
 }

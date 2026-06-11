@@ -2359,6 +2359,14 @@ const UNDO_STACK_CAP = 50;
 // (cheap) dagre runs during streaming. 160→60→30: kept just large enough to coalesce a single LOD flip's
 // ResizeObserver burst, small enough that the reflow starts almost immediately (policy/mechanism).
 const RELAYOUT_DEBOUNCE_MS = 30;
+// Board widths by LOD, MIRRORING styles.css (`.board` 320px far/far-far, `.board.lod-detail` 480px). Half
+// their difference is how far a board must shift horizontally to keep its CENTER fixed as it grows far→detail
+// (or shrinks back). The 1px borders cancel in the difference, so this matches the measured-width delta too.
+// Applied pre-paint by the detail-centering layout effect so the grow looks symmetric with no settling slide
+// (policy/mechanism: change the numbers here + in styles.css together — they are two halves of one SSOT).
+const FAR_BOARD_W = 320;
+const DETAIL_BOARD_W = 480;
+const LOD_CENTER_SHIFT = (DETAIL_BOARD_W - FAR_BOARD_W) / 2; // 80px
 // Auto-summary (collapsed-digest) retry policy. A summarize request can come back empty — a transient
 // rate-limit/model hiccup, or the SDK momentarily unavailable. Without bounded retry the board would
 // show its raw answer forever (the request set was added optimistically and never released). Retry up
@@ -2476,6 +2484,13 @@ function App() {
   const pickDir = (): LayoutDir => (window.innerWidth >= window.innerHeight ? 'LR' : 'TB');
   const [dir, setDir] = useState<LayoutDir>(() => pickDir());
   const dirRef = useRef<LayoutDir>(dir);
+  // Detail-WIDTH board set as of the last paint — the centering layout effect diffs it to find which boards
+  // just changed width (far↔detail), and the last zoom band to tell a selection change from a zoom-band flip.
+  // `snapLod` suppresses the node transition for that one frame so the recenter applies WITHOUT the 150ms
+  // glide → far↔detail growth is symmetric with no settling slide.
+  const prevWideRef = useRef<Set<string>>(new Set());
+  const prevZoomComprRef = useRef<boolean | null>(null);
+  const [snapLod, setSnapLod] = useState(false);
   // Layout uses each node's REAL measured height (detail-expanded boards are tall, far gists are short),
   // so the graph packs compactly and reflows whenever the selection (→ which boards are detail) changes.
   const autoLayout = useCallback((ns: BoardNodeT[], es: Edge[]) => {
@@ -2807,6 +2822,23 @@ function App() {
     if (expandAncestors) for (const id of selectedIds) for (const a of ancestorsOf(id, edges)) s.add(a);
     return s;
   }, [selectedIds, edges, expandAncestors]);
+
+  // Boards that currently RENDER at detail width (480px, vs the 320px far/far-far gist). Mirrors BoardNode's
+  // `lod` predicate: a board is wide only at detail zoom (≥ COMPRESS_ZOOM) AND when it's selected/an ancestor
+  // (detailIds) OR a fresh idle compose card. The detail-centering layout effect diffs THIS set (not raw
+  // detailIds) so it nudges a board exactly when its width really changes — never at low zoom (no width
+  // change there) and never for an already-wide fresh card just being selected.
+  const zoomCompressed = useStore((s) => s.transform[2] < COMPRESS_ZOOM);
+  const wideIds = useMemo(() => {
+    const s = new Set<string>();
+    if (zoomCompressed) return s; // every board is a far gist → none is detail-wide
+    for (const n of nodes) {
+      const fresh = !n.data.prompt && n.data.status === 'idle' && !n.data.compact;
+      if (detailIds.has(n.id) || fresh) s.add(n.id);
+    }
+    return s;
+  }, [nodes, detailIds, zoomCompressed]);
+  const wideSig = useMemo(() => [...wideIds].sort().join('|'), [wideIds]);
 
   // Branch-Signposts: the floating label text for each signpost (root / branch head / merge / compact).
   // Multi-node segments use the synthesized branchSummary; single-node segments (and multi-node ones whose
@@ -3569,6 +3601,36 @@ function App() {
     return () => clearTimeout(t);
   }, [sizeSig]);
 
+  // Detail-centering: when a board enters/leaves DETAIL its width jumps 320↔480. Left alone it would grow
+  // rightward from its left edge, then the measured→dagre relayout (above) would glide it back to centered —
+  // that settling slide read as the board "drifting horizontally". Fix: nudge each entering/leaving board by
+  // ±LOD_CENTER_SHIFT here in a LAYOUT effect — it runs after the detail class (→ CSS width) is committed to
+  // the DOM but BEFORE the browser paints, and `snapLod` suppresses the node transition for that one frame.
+  // So the board paints at its new width AND its recentered x in the SAME frame: symmetric grow, zero slide.
+  // The dagre relayout that follows keeps the simple top-left pin, so it preserves (never re-applies) this
+  // recenter. Two guards: (a) a freshly forked board (no `measured` yet) is born detail via autoLayout, not a
+  // far→detail transition, so skip it; (b) a zoom-band crossing flips many boards' width at once while the
+  // viewport is already scaling — re-sync the baseline without nudging, so we only animate selection-driven
+  // changes. Keyed on `wideSig` (the 480px-rendered set), NOT raw detailIds, so it fires exactly on real
+  // width changes. (Width constants mirror styles.css.)
+  useLayoutEffect(() => {
+    const prevWide = prevWideRef.current;
+    const zoomFlip = prevZoomComprRef.current !== zoomCompressed;
+    prevZoomComprRef.current = zoomCompressed;
+    const shift = new Map<string, number>();
+    for (const id of wideIds) if (!prevWide.has(id)) shift.set(id, -LOD_CENTER_SHIFT); // entered detail width → move left
+    for (const id of prevWide) if (!wideIds.has(id)) shift.set(id, +LOD_CENTER_SHIFT);  // left detail width → move right
+    prevWideRef.current = wideIds;
+    if (zoomFlip || !shift.size) return;
+    setNodes((ns) => ns.map((n) => {
+      const dx = shift.get(n.id);
+      return dx !== undefined && n.measured ? { ...n, position: { x: n.position.x + dx, y: n.position.y } } : n;
+    }));
+    setSnapLod(true);
+    const raf = requestAnimationFrame(() => setSnapLod(false));
+    return () => cancelAnimationFrame(raf);
+  }, [wideSig]);
+
   // auto-direction: when the viewport aspect ratio crosses over (wide↔tall), flip dagre's flow
   // direction and re-lay out. Guard on `d === dirRef.current` so plain resizes within one orientation
   // don't churn or override manual drags — only an actual orientation flip re-arranges the graph.
@@ -3961,6 +4023,7 @@ function App() {
       onContextMenu={onPaneContextMenu}
     >
       <ReactFlow
+        className={snapLod ? 'snap-lod' : undefined}
         nodes={nodes} edges={edges} nodeTypes={nodeTypes}
         onNodesChange={onNodesChange}
         onNodesDelete={onNodesDelete}
