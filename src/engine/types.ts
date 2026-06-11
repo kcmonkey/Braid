@@ -39,6 +39,10 @@ export interface TurnRequest {
   asyncContinuation?: boolean;
   // Safety cap: close a held-open (waiting) session after this much inactivity. Omitted ⇒ adapter default.
   idleCapMs?: number;
+  // Warm-process reuse: after a normal turn settles with no pending async work, keep the streaming-input
+  // session open for this bounded idle window so a linear continuation can push into it.
+  warmSession?: boolean;
+  warmIdleMs?: number;
 }
 
 export interface ToolUseEvent {
@@ -129,13 +133,19 @@ export interface PreToolInterceptor {
   ): Promise<PermissionVerdict>;
 }
 
+export interface TurnRoute {
+  boardId: string;
+  turnIndex: number;
+}
+
 /** Live handle to an in-flight turn burst (multi-turn streaming-input). */
 export interface TurnHandle {
-  push(text: string, images?: ImageInput[]): void;   // inject a follow-up (engine queues it as next turn)
+  push(text: string, images?: ImageInput[], route?: TurnRoute): void; // inject a follow-up/continuation turn
   interrupt(): Promise<void>;                          // cut the current turn (send-now)
   // Async continuation: end a `waiting` hold — stop in-flight background tasks (q.stopTask) + close the
   // held session so the board finalizes. The escape hatch behind the UI Stop-waiting button. (AD5/AD8)
   stopWaiting(): Promise<void>;
+  dispose(): Promise<void>;                             // gracefully close a warm/idle session
 }
 
 /** Host-owned turn control passed into runTurn. The host owns the AbortController (its `abort` message

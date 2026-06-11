@@ -24,6 +24,7 @@ export interface ProviderConfig {
   appendSystemPrompt: string; // '' = omit
   allowedTools: string[];   // [] = omit
   disallowedTools: string[]; // [] = omit
+  mcpEnabled: boolean;      // false = strict empty MCP config for faster normal turns
   env: Record<string, string>; // {} = omit
 }
 
@@ -45,6 +46,10 @@ export interface CanvasConfig {
   // Safety cap (minutes): close a held-open (waiting) session after this much inactivity. Mechanism lives in
   // the adapter; this is the policy knob (principle 14). → TurnRequest.idleCapMs.
   asyncContinuationIdleCapMin: number;
+  // Keep a settled work session warm for a bounded idle window, so a linear continuation can reuse the
+  // already-open engine process instead of cold-spawning and replaying the session.
+  warmSessionEnabled: boolean;
+  warmSessionIdleCapMin: number;
 }
 
 /** Flat webview-facing config view = the active provider's ProviderConfig ∪ the CanvasConfig.
@@ -68,6 +73,7 @@ export const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
   appendSystemPrompt: '',
   allowedTools: [],
   disallowedTools: [],
+  mcpEnabled: false,
   env: {},
 };
 
@@ -78,6 +84,8 @@ export const DEFAULT_CANVAS_CONFIG: CanvasConfig = {
   expandAncestorsOnSelect: false,
   asyncContinuationEnabled: true,
   asyncContinuationIdleCapMin: 30,
+  warmSessionEnabled: true,
+  warmSessionIdleCapMin: 10,
 };
 
 /** The legacy flat provider keys (pre-multi-provider `braid.model`, `braid.effort`, …) as read from config.
@@ -92,6 +100,7 @@ export interface LegacyFlatProviderConfig {
   appendSystemPrompt?: string;
   allowedTools?: string[];
   disallowedTools?: string[];
+  mcpEnabled?: boolean;
   env?: Record<string, string>;
 }
 
@@ -111,6 +120,7 @@ export function migrateLegacyConfig(legacy: LegacyFlatProviderConfig): ProviderC
     appendSystemPrompt: legacy.appendSystemPrompt ?? DEFAULT_PROVIDER_CONFIG.appendSystemPrompt,
     allowedTools: legacy.allowedTools ?? DEFAULT_PROVIDER_CONFIG.allowedTools,
     disallowedTools: legacy.disallowedTools ?? DEFAULT_PROVIDER_CONFIG.disallowedTools,
+    mcpEnabled: legacy.mcpEnabled ?? DEFAULT_PROVIDER_CONFIG.mcpEnabled,
     env: legacy.env ?? DEFAULT_PROVIDER_CONFIG.env,
   };
 }
@@ -150,6 +160,11 @@ export function buildSdkOptions(cfg: ProviderConfig): Record<string, unknown> {
 
   if (cfg.allowedTools.length) out.allowedTools = cfg.allowedTools;
   if (cfg.disallowedTools.length) out.disallowedTools = cfg.disallowedTools;
+
+  if (!cfg.mcpEnabled) {
+    out.strictMcpConfig = true;
+    out.mcpServers = {};
+  }
 
   if (Object.keys(cfg.env).length) out.env = cfg.env;
 

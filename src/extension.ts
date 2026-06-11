@@ -88,6 +88,78 @@ function startTabSpinner(context: vscode.ExtensionContext, canvasId: string) {
 // runs, deleted when the burst ends. (knowledge.md "mid-stream follow-up / streaming-input multi-turn injection")
 const liveQueries = new Map<string, TurnHandle>();
 
+interface LiveRun {
+  canvasId: string;
+  provider: EngineId;
+  cwd: string;
+  abort: AbortController;
+  handle?: TurnHandle;
+  keys: Set<string>;
+  sessions: Set<string>;
+  retired?: boolean;
+}
+const liveRunsByHandle = new Map<TurnHandle, LiveRun>();
+const liveRunsBySession = new Map<string, LiveRun>();
+const liveSessionKey = (provider: EngineId, sessionId: string) => `${provider}::${sessionId}`;
+
+function registerLiveKey(run: LiveRun, key: string) {
+  run.keys.add(key);
+  aborters.set(key, run.abort);
+  if (run.handle) liveQueries.set(key, run.handle);
+}
+
+function bindLiveHandle(run: LiveRun, handle: TurnHandle) {
+  run.handle = handle;
+  liveRunsByHandle.set(handle, run);
+  for (const key of run.keys) liveQueries.set(key, handle);
+}
+
+function bindLiveSession(run: LiveRun, sessionId: string) {
+  const key = liveSessionKey(run.provider, sessionId);
+  run.sessions.add(key);
+  if (!run.retired) liveRunsBySession.set(key, run);
+}
+
+function cleanupLiveRun(run: LiveRun) {
+  for (const key of run.keys) {
+    if (!run.handle || liveQueries.get(key) === run.handle) liveQueries.delete(key);
+    if (aborters.get(key) === run.abort) aborters.delete(key);
+  }
+  for (const key of run.sessions) {
+    if (liveRunsBySession.get(key) === run) liveRunsBySession.delete(key);
+  }
+  if (run.handle && liveRunsByHandle.get(run.handle) === run) liveRunsByHandle.delete(run.handle);
+  run.keys.clear();
+  run.sessions.clear();
+}
+
+function retireLiveRun(run: LiveRun) {
+  run.retired = true;
+  for (const key of run.sessions) {
+    if (liveRunsBySession.get(key) === run) liveRunsBySession.delete(key);
+  }
+  void run.handle?.dispose().catch((e: any) => console.error('[Braid] warm session dispose failed:', e?.message ?? e));
+}
+
+function retireLiveRunsForCanvas(canvasId: string) {
+  const prefix = canvasId + '::';
+  const seen = new Set<LiveRun>();
+  for (const [key, handle] of liveQueries) {
+    if (!key.startsWith(prefix)) continue;
+    const run = liveRunsByHandle.get(handle);
+    if (run && !seen.has(run)) { seen.add(run); retireLiveRun(run); }
+  }
+}
+
+function clearWaitingForRun(run: LiveRun) {
+  const prefix = run.canvasId + '::';
+  for (const key of run.keys) {
+    if (!key.startsWith(prefix)) continue;
+    const boardId = key.slice(prefix.length);
+    postTo(run.canvasId, { type: 'waiting', boardId, turnIndex: 0, pending: { background: [], crons: [] } });
+  }
+}
+
 // M10 AskUserQuestion: a PreToolUse hook intercepts the model's AskUserQuestion call and blocks on a
 // promise here until the webview replies with the user's choice. Keyed canvasId::toolUseId (same
 // compound-key discipline as aborters) so concurrent canvases never cross-resolve. Value = the
@@ -909,7 +981,7 @@ function restoreRolledBackFiles(canvasId: string, boardIds: string[]) {
 }
 
 // The provider-NEUTRAL canvas keys (kept as flat `braid.*` settings, outside the provider hierarchy).
-const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin'];
+const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin', 'warmSessionEnabled', 'warmSessionIdleCapMin'];
 
 /** Read the legacy flat `braid.*` provider keys (pre-multi-provider). Fallbacks reproduce the OLD package.json
  * per-key defaults (effort 'xhigh', thinking 'adaptive', …) so an unconfigured install migrates to identical
@@ -924,6 +996,7 @@ function readLegacyFlatProviderConfig(c: vscode.WorkspaceConfiguration): LegacyF
     appendSystemPrompt: c.get<string>('appendSystemPrompt', DEFAULT_PROVIDER_CONFIG.appendSystemPrompt),
     allowedTools: c.get<string[]>('allowedTools', DEFAULT_PROVIDER_CONFIG.allowedTools),
     disallowedTools: c.get<string[]>('disallowedTools', DEFAULT_PROVIDER_CONFIG.disallowedTools),
+    mcpEnabled: c.get<boolean>('mcpEnabled', DEFAULT_PROVIDER_CONFIG.mcpEnabled),
     env: c.get<Record<string, string>>('env', DEFAULT_PROVIDER_CONFIG.env),
   };
 }
@@ -950,6 +1023,8 @@ function readSettings(canvasId?: string): BraidSettings {
     expandAncestorsOnSelect: c.get<boolean>('expandAncestorsOnSelect', DEFAULT_CANVAS_CONFIG.expandAncestorsOnSelect),
     asyncContinuationEnabled: c.get<boolean>('asyncContinuationEnabled', DEFAULT_CANVAS_CONFIG.asyncContinuationEnabled),
     asyncContinuationIdleCapMin: c.get<number>('asyncContinuationIdleCapMin', DEFAULT_CANVAS_CONFIG.asyncContinuationIdleCapMin),
+    warmSessionEnabled: c.get<boolean>('warmSessionEnabled', DEFAULT_CANVAS_CONFIG.warmSessionEnabled),
+    warmSessionIdleCapMin: c.get<number>('warmSessionIdleCapMin', DEFAULT_CANVAS_CONFIG.warmSessionIdleCapMin),
   };
   return { activeProvider, providers: { claude: readProviderConfig(c, 'claude'), codex: readProviderConfig(c, 'codex') }, canvas };
 }
@@ -1280,11 +1355,12 @@ function makeSink(canvasId: string, provider?: EngineId): EventSink {
  * same-turn tool_result). `boardSignal` = the board's abort signal (stop/delete). (plans/Engine-Abstraction) */
 function makePreToolInterceptor(canvasId: string, boardId: string, boardSignal: AbortSignal): PreToolInterceptor {
   return {
-    onPreToolUse: async (_bId, toolUseId, toolName, input, ctxSignal): Promise<PreToolDecision> => {
+    onPreToolUse: async (bId, toolUseId, toolName, input, ctxSignal): Promise<PreToolDecision> => {
+      const routeBoardId = bId || boardId;
       // Node-Delete Phase 2: snapshot a mutating tool's target file (once per file per board) before it runs.
       if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') {
         const fp = input?.file_path;
-        if (typeof fp === 'string' && fp) captureFileSnapshot(canvasId, boardId, fp);
+        if (typeof fp === 'string' && fp) captureFileSnapshot(canvasId, routeBoardId, fp);
       }
       if (toolName !== 'AskUserQuestion') return { proceed: true };
       // The webview already learned of this AskUserQuestion via the `toolUse` message and renders the card
@@ -1306,10 +1382,11 @@ function makePreToolInterceptor(canvasId: string, boardId: string, boardSignal: 
     // UI on the board card + ChatView and joins the attention/notification SSOT), then block until the
     // user answers. A board stop/delete (boardSignal) or the engine's own abort (ctxSignal) resolves to
     // deny so the turn never hangs. The adapter maps the verdict to the Claude PermissionResult.
-    onPermissionRequest: async (_bId, turnIndex, ask, ctxSignal): Promise<PermissionVerdict> => {
+    onPermissionRequest: async (bId, turnIndex, ask, ctxSignal): Promise<PermissionVerdict> => {
+      const routeBoardId = bId || boardId;
       const pk = `${canvasId}::${ask.toolUseId}`;
       postTo(canvasId, {
-        type: 'permissionRequest', boardId, turnIndex,
+        type: 'permissionRequest', boardId: routeBoardId, turnIndex,
         toolUseId: ask.toolUseId, toolName: ask.toolName, input: ask.input,
         title: ask.title, description: ask.description, displayName: ask.displayName, canAlways: ask.canAlways,
       });

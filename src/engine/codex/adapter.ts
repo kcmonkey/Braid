@@ -173,7 +173,7 @@ export class CodexAdapter implements Engine {
           case 'thinking': sink.thinking(req.boardId, e.turnIndex, e.thinks); break;
           case 'toolUse': sink.toolUse(req.boardId, e.turnIndex, e.ev); break;
           case 'toolResult': sink.toolResult(req.boardId, e.turnIndex, e.ev); break;
-          case 'rateLimit': sink.rateLimit({ ...e.snapshot, provider: this.id }); break;
+          case 'rateLimit': sink.rateLimit(e.snapshot); break;
           case 'result':
             settle(e.isError && !interrupted);
             if (resolveTurnEnd) { const r = resolveTurnEnd; resolveTurnEnd = null; r(); }
@@ -214,6 +214,7 @@ export class CodexAdapter implements Engine {
         push: (text, images) => { queue.push({ text, images }); },
         interrupt: async () => { interrupted = true; if (currentTurnId) { try { await rpc!.request('turn/interrupt', { threadId, turnId: currentTurnId }); } catch (e: any) { console.error('[Braid] codex interrupt failed:', e?.message ?? e); } } },
         stopWaiting: async () => { /* no async-continuation hold in v1 */ },
+        dispose: async () => { queue.length = 0; },
       });
 
       // Turn loop: run the first turn, then drain any queued follow-ups as their own rounds. Each turn's
@@ -280,8 +281,16 @@ export class CodexAdapter implements Engine {
   };
 
   /** One-shot ephemeral turn used for summaries: spawn → start an ephemeral read-only thread with the system
-   * prompt as developer instructions → run one turn → collect the final agentMessage text → dispose. */
-  private async oneShot(cwd: string, system: string, content: string): Promise<string> {
+   * prompt as developer instructions → run one turn → collect the final agentMessage text → dispose.
+   *
+   * Runs in a NEUTRAL temp cwd, NOT the project dir (the `_cwd` arg is intentionally ignored). Codex — like
+   * Claude Code — auto-loads the project's AGENTS.md from the thread cwd; this repo's AGENTS.md is ~10KB of
+   * mostly Chinese, which biases the summarizer's OUTPUT language to Chinese, overriding our "same language as
+   * the Q/A" developer instruction. Summaries are self-contained (the Q/A is inlined in `content`) → no project
+   * context needed. Codex's analog of the Claude summarizer's settingSources:[] + autoMemoryEnabled:false guard;
+   * the main runTurn keeps the project cwd (real turns SHOULD read AGENTS.md). (knowledge.md "摘要/digest 语言") */
+  private async oneShot(_cwd: string, system: string, content: string): Promise<string> {
+    const cwd = os.tmpdir(); // neutral cwd → Codex discovers no project AGENTS.md / instruction files
     let rpc: CodexRpc | null = null;
     let text = '';
     try {

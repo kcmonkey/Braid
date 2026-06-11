@@ -8,7 +8,7 @@ import { buildSdkOptions } from '../../sdkOptions';
 import type { ImageInput, McpServerInfo, SlashCommandSpec, ProviderAccount } from '../../protocol';
 import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
-  Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle, Attach,
+  Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle, Attach, TurnRoute,
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
   AsyncPending, BranchSummarizeRequest,
 } from '../types';
@@ -25,6 +25,7 @@ const SUMMARY_MODEL = 'claude-haiku-4-5-20251001'; // M3 collapsed-summary model
 // close it. Mechanism here; policy overridable per-turn via TurnRequest.idleCapMs (Phase 1 plumbs the
 // setting). 30 min comfortably covers normal background tasks / minute-granularity wakeups. (AD5, 异步续接)
 const DEFAULT_IDLE_CAP_MS = 30 * 60_000;
+const DEFAULT_WARM_IDLE_MS = 10 * 60_000;
 
 // System prompt for condensing a verbose native /compact <analysis> summary into a short, glanceable
 // digest card shown on the compacted board (compacted-context digest). Mirrors the Q/A card summarizer's
@@ -121,6 +122,9 @@ export class ClaudeAdapter implements Engine {
     if (!sdk) { sink.error(req.boardId, req.turnIndex, 'Failed to load Claude Agent SDK'); return; }
 
     const boardId = req.boardId;
+    const initialRoute: TurnRoute = { boardId, turnIndex: req.turnIndex ?? 0 };
+    let activeRoute: TurnRoute = initialRoute;
+    let nextUserRoute: TurnRoute | undefined = initialRoute;
     // Async continuation gate: the latest Stop-hook snapshot of pending in-flight work. The Stop hook fires
     // each turn-stop (verified probe-async.mjs) and is the SSOT for "session is done" vs "paused waiting for
     // background work to wake it". Captured below; read in the `result` case to decide whether to hold open.
@@ -136,7 +140,7 @@ export class ClaudeAdapter implements Engine {
           {
             hooks: [
               async (input: any, toolUseID: string, ctx: { signal: AbortSignal }) => {
-                const d = await pre.onPreToolUse(boardId, toolUseID, input?.tool_name, input?.tool_input, ctx.signal);
+                const d = await pre.onPreToolUse(activeRoute.boardId, toolUseID, input?.tool_name, input?.tool_input, ctx.signal);
                 if ('deny' in d) {
                   return {
                     decision: 'block',
@@ -173,7 +177,7 @@ export class ClaudeAdapter implements Engine {
       // modes); dormant under bypassPermissions, so wiring it unconditionally is safe. AskUserQuestion is
       // handled by the PreToolUse deny above, which short-circuits canUseTool (sdk.d.ts:3748) → never here.
       canUseTool: async (toolName: string, toolInput: Record<string, unknown>, opts: any) => {
-        const verdict = await pre.onPermissionRequest(boardId, state.turnIndex, {
+        const verdict = await pre.onPermissionRequest(activeRoute.boardId, activeRoute.turnIndex, {
           toolUseId: opts?.toolUseID,
           toolName,
           input: toolInput ?? {},
@@ -224,7 +228,7 @@ export class ClaudeAdapter implements Engine {
     if (spawnEnv) options.env = spawnEnv;
 
     // streaming-input multi-turn lifecycle (host-agnostic; identical invariants to the old runQuery)
-    const queue: any[] = [];
+    const queue: { message: any; route?: TurnRoute }[] = [];
     let wake: (() => void) | null = null;
     let closed = false;
     let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -245,6 +249,7 @@ export class ClaudeAdapter implements Engine {
     let waiting = false;
     const holdEnabled = req.asyncContinuation !== false;
     const idleCapMs = req.idleCapMs ?? DEFAULT_IDLE_CAP_MS;
+    const warmIdleMs = req.warmIdleMs ?? DEFAULT_WARM_IDLE_MS;
     const armIdleCap = () => { cancelIdle(); idleTimer = setTimeout(() => { closed = true; wakeUp(); }, idleCapMs); };
     // A pending background task = an async-continuation turn is IMMINENT (the SDK will re-drive the agent in
     // this same session when the task settles). Yielding a queued follow-up into that window makes the CLI
@@ -256,6 +261,7 @@ export class ClaudeAdapter implements Engine {
     const state = initParseState(req.turnIndex ?? 0);
     async function* input() {
       state.pendingUserInit = true;               // turn 1's init is a USER turn (not an async continuation)
+      nextUserRoute = initialRoute;
       yield userMessage(req.prompt, req.images);  // turn 1 — turnInFlight already true
       while (!closed) {
         // Release a queued follow-up only at a SAFE input boundary: the prior turn settled (gate open) AND no
@@ -263,20 +269,22 @@ export class ClaudeAdapter implements Engine {
         if (turnInFlight || queue.length === 0 || continuationImminent()) { await new Promise<void>((r) => { wake = r; }); if (closed) break; continue; }
         turnInFlight = true;
         state.pendingUserInit = true;             // the next init is THIS follow-up = a USER turn (advances turnIndex)
-        yield queue.shift();
+        const next = queue.shift()!;
+        nextUserRoute = next.route;
+        yield next.message;
       }
     }
     let turnSettled = false;
     let interrupted = false;
     const settle = (isError: boolean) => {
       turnSettled = true;
-      sink.done(boardId, state.turnIndex, buildTurnDone(state, isError, Date.now()));
+      sink.done(activeRoute.boardId, activeRoute.turnIndex, buildTurnDone(state, isError, Date.now()));
     };
 
     try {
       const q = sdk.query({ prompt: input(), options });
       ctl.onLive({
-        push: (text, images) => { outstanding++; cancelIdle(); queue.push(userMessage(text, images)); wakeUp(); },
+        push: (text, images, route) => { outstanding++; cancelIdle(); queue.push({ message: userMessage(text, images), route }); wakeUp(); },
         interrupt: async () => { interrupted = true; try { await q.interrupt(); } catch (e: any) { console.error('[Braid] interrupt failed:', e?.message ?? e); } },
         // End a waiting hold (UI Stop-waiting / delete): stop in-flight background tasks, then close the
         // input so the session ends and the board finalizes. Crons are session-scoped → closing drops them.
@@ -286,6 +294,7 @@ export class ClaudeAdapter implements Engine {
           }
           closed = true; cancelIdle(); wakeUp();
         },
+        dispose: async () => { closed = true; cancelIdle(); wakeUp(); },
       });
       for await (const m of q as AsyncIterable<any>) {
         if (waiting) armIdleCap(); // any inbound activity during a held-open wait resets the idle cap
@@ -298,16 +307,20 @@ export class ClaudeAdapter implements Engine {
               // follow-up) and any waiting hold is over; this round's own `result` re-decides whether to hold
               // again. The very first init (turn 1: reset=false, continuation=false) needs none of this — it's
               // already in flight. (async continuation 异步续接 + follow-up desync fix)
+              if (!e.continuation) {
+                activeRoute = nextUserRoute ?? { boardId, turnIndex: e.turnIndex };
+                nextUserRoute = undefined;
+              }
               if (e.reset || e.continuation) { turnSettled = false; interrupted = false; turnInFlight = true; waiting = false; cancelIdle(); }
               break;
-            case 'session': sink.session(boardId, e.sessionId); break;
+            case 'session': sink.session(activeRoute.boardId, e.sessionId); break;
             case 'model': sink.model(e.model); break;
-            case 'update': sink.update(boardId, e.turnIndex, e.text, e.thinking); break;
-            case 'thinking': sink.thinking(boardId, e.turnIndex, e.thinks); break;
-            case 'toolUse': sink.toolUse(boardId, e.turnIndex, e.ev); break;
-            case 'toolResult': sink.toolResult(boardId, e.turnIndex, e.ev); break;
-            case 'task': sink.task(boardId, e.turnIndex, e.ev); break;
-            case 'rateLimit': sink.rateLimit({ ...e.snapshot, provider: this.id }); break;
+            case 'update': sink.update(activeRoute.boardId, activeRoute.turnIndex, e.text, e.thinking); break;
+            case 'thinking': sink.thinking(activeRoute.boardId, activeRoute.turnIndex, e.thinks); break;
+            case 'toolUse': sink.toolUse(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
+            case 'toolResult': sink.toolResult(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
+            case 'task': sink.task(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
+            case 'rateLimit': sink.rateLimit(e.snapshot); break;
             case 'commands': sink.commands(e.commands); break;
             case 'result':
               // interrupted turn ends as error_during_execution/is_error — the user's send-now cut, NOT a
@@ -326,11 +339,11 @@ export class ClaudeAdapter implements Engine {
                   // the task settles / the wakeup fires → another round. The host finalizes the board to
                   // `done` when runTurn resolves (session fully closed). (AD1, 异步续接)
                   waiting = true;
-                  sink.waiting(boardId, state.turnIndex, latestPending);
+                  sink.waiting(activeRoute.boardId, activeRoute.turnIndex, latestPending);
                   armIdleCap();
                 } else {
                   waiting = false;
-                  idleTimer = setTimeout(() => { closed = true; wakeUp(); }, FOLLOWUP_GRACE_MS);
+                  idleTimer = setTimeout(() => { closed = true; wakeUp(); }, req.warmSession ? warmIdleMs : FOLLOWUP_GRACE_MS);
                 }
               }
               wakeUp(); // release a held follow-up now, or let the generator re-await / observe `closed`
@@ -341,11 +354,11 @@ export class ClaudeAdapter implements Engine {
       // Loop ended (input closed). Settle a never-settled turn so the board never hangs in 'streaming'.
       if (!turnSettled) {
         if (ctl.abort.signal.aborted || turnView(state)) settle(false);
-        else sink.error(boardId, state.turnIndex, 'Query ended with no output (stream closed unexpectedly)');
+        else sink.error(activeRoute.boardId, activeRoute.turnIndex, 'Query ended with no output (stream closed unexpectedly)');
       }
     } catch (e: any) {
       if (ctl.abort.signal.aborted) { if (!turnSettled) settle(false); }
-      else if (!turnSettled) sink.error(boardId, state.turnIndex, String(e?.message ?? e));
+      else if (!turnSettled) sink.error(activeRoute.boardId, activeRoute.turnIndex, String(e?.message ?? e));
     } finally {
       closed = true; cancelIdle(); wakeUp();
     }

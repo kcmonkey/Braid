@@ -120,9 +120,6 @@ export interface RateLimitSnapshot {
   windowId?: string;         // 'five_hour' | 'seven_day' | …
   utilizationPct?: number;
   resetsAt?: number;
-  // Which provider this snapshot came from (stamped by the adapter). The usage chip is keyed by provider so a
-  // Codex turn's snapshot never shows under the Claude chip (or vice versa). Absent ⇒ legacy/claude. (M-Codex)
-  provider?: EngineId;
 }
 
 // MCP manager: serializable subset of the SDK's McpServerStatus, pushed to the panel for rendering.
