@@ -1248,7 +1248,7 @@ function closeAccount(canvasId: string) {
 
 /** Build the canvas-bound EventSink: each neutral output → the matching HostMessage via postTo.
  * 1:1 with the pre-refactor `postTo(canvasId, {...})` calls inside runQuery, so behavior is unchanged. */
-function makeSink(canvasId: string): EventSink {
+function makeSink(canvasId: string, provider?: EngineId): EventSink {
   return {
     session: (boardId, sessionId) => postTo(canvasId, { type: 'session', boardId, sessionId }),
     model: (model) => postTo(canvasId, { type: 'model', model }),
@@ -1258,10 +1258,16 @@ function makeSink(canvasId: string): EventSink {
     toolResult: (boardId, turnIndex, ev) => postTo(canvasId, { type: 'toolResult', boardId, turnIndex, toolUseId: ev.toolUseId, content: ev.content, isError: ev.isError }),
     done: (boardId, turnIndex, d) => postTo(canvasId, { type: 'done', boardId, turnIndex, sessionId: d.sessionId, messageUuid: d.messageUuid, isError: d.isError, text: d.text, thinking: d.thinking, thinks: d.thinks, contextTokens: d.contextTokens, contextWindow: d.contextWindow, autoCompacted: d.autoCompacted }),
     error: (boardId, turnIndex, message) => postTo(canvasId, { type: 'error', boardId, turnIndex, message }),
-    rateLimit: (snapshot) => postTo(canvasId, { type: 'rateLimit', snapshot }),
+    rateLimit: (snapshot) => {
+      if (!provider || canvasActiveProvider(canvasId) === provider) postTo(canvasId, { type: 'rateLimit', snapshot });
+    },
     // Live slash-command refresh (commands_changed) → update the host cache + push to this canvas. The
     // cold-start list is served by the getSlashCommands handler (Phase 2).
-    commands: (commands) => { slashCommandsCache.set(canvasActiveProvider(canvasId), commands); postTo(canvasId, { type: 'slashCommands', commands }); },
+    commands: (commands) => {
+      const p = provider ?? canvasActiveProvider(canvasId);
+      slashCommandsCache.set(p, commands);
+      if (canvasActiveProvider(canvasId) === p) postTo(canvasId, { type: 'slashCommands', commands });
+    },
     // Async continuation (异步续接): a board held open for background tasks / scheduled wakeups, and the
     // folded task lifecycle events for chip display. The webview renders the 'waiting' state + chips.
     waiting: (boardId, turnIndex, pending) => postTo(canvasId, { type: 'waiting', boardId, turnIndex, pending }),
@@ -1426,7 +1432,8 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
   const abort = new AbortController();
   const k = aKey(canvasId, msg.boardId);
   aborters.set(k, abort);
-  const sink = makeSink(canvasId);
+  const runProvider = msg.engine && engineHost.has(msg.engine) ? msg.engine : DEFAULT_ACTIVE_PROVIDER;
+  const sink = makeSink(canvasId, runProvider);
   const pre = makePreToolInterceptor(canvasId, msg.boardId, abort.signal);
   const canvas = readSettings().canvas;
   const req: TurnRequest = {
