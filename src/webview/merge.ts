@@ -732,6 +732,19 @@ export function turnViewStatus(turns: Turn[], boardStatus: Status, i: number): T
   return 'queued';
 }
 
+// Aborting a streaming multi-turn board (the ■ Stop button) stops the WHOLE board. The engine never reaches
+// rounds the user QUEUED behind the one being generated — the abort kills the session first — so those
+// trailing rounds never receive a `done`. Being non-final rounds, they would pin the board in 'streaming'
+// forever ("Generating…" that never clears — the bug). Drop them so the LIVE round (the first not-done one)
+// becomes the last round: its abort `done` is then "final" and settles the board to 'done' (partial kept).
+// Returns the SAME array reference when there's no queued tail to drop (no live round, or it's already last)
+// so callers can cheaply skip the state update. Pure → unit-tested.
+export function dropQueuedTurns(turns: Turn[]): Turn[] {
+  const liveIdx = turns.findIndex((t) => !t.done);
+  if (liveIdx < 0 || liveIdx >= turns.length - 1) return turns;
+  return turns.slice(0, liveIdx + 1);
+}
+
 // Node-Delete Phase 1: text seed to rebuild a lineage-dirty board's context after an ancestor was deleted.
 // The board (and any surviving dirty ancestors between it and the nearest clean ancestor) fork natively
 // from that clean ancestor; this replays their own Q/A on top so the deleted node is excluded. Q AND A of

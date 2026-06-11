@@ -17,7 +17,7 @@ import {
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
   GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, mergeUnion, modelWindowFor, forkableSession,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
-  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
+  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, buildEditorContextBlock, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
@@ -2751,8 +2751,22 @@ function App() {
     // A 'waiting' board (held open for async work) is stopped GRACEFULLY: close the held session + stop its
     // background tasks (stopWaiting) → it finalizes to 'done'. A streaming board is aborted. (异步续接 AD5)
     const b = nodesRef.current.find((n) => n.id === boardId);
-    if (b?.data.status === 'waiting') post({ type: 'stopWaiting', boardId });
-    else post({ type: 'abort', boardId });
+    if (b?.data.status === 'waiting') { post({ type: 'stopWaiting', boardId }); return; }
+    // Bug fix: if the user QUEUED a follow-up then hit Stop, the abort kills the session before the engine
+    // reaches that queued round → it never settles and, being a trailing non-final round, pins the board in
+    // 'streaming' forever ("Generating…" that never clears). Drop the queued tail NOW so the live round
+    // becomes final and the abort `done` settles the board. Sync nodesRef this tick so the live round's
+    // incoming `done` sees the trimmed turns[] and treats itself as final. (live round's partial is kept)
+    const turns = b?.data.turns;
+    if (turns && turns.length > 1) {
+      const trimmed = dropQueuedTurns(turns);
+      if (trimmed !== turns) {
+        const newNodes = nodesRef.current.map((n) => (n.id === boardId ? { ...n, data: { ...n.data, turns: trimmed, answer: flattenTurns(trimmed) } } : n));
+        setNodes(newNodes);
+        nodesRef.current = newNodes;
+      }
+    }
+    post({ type: 'abort', boardId });
   }, []);
 
   // M11 mid-stream follow-up: a follow-up stays in THIS board as a new round (no child board). Materialize turns[]

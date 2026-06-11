@@ -3,7 +3,7 @@ import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
-  boardEngine, diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
+  boardEngine, diffLines, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
@@ -665,6 +665,41 @@ describe('turnViewStatus (queued follow-up display order)', () => {
   it("'waiting' (async-continuation hold): every round renders as done — the wait is board-level", () => {
     const turns: Turn[] = [{ prompt: 'q0', answer: 'a0', done: true }, { prompt: 'q1', answer: 'a1' }];
     expect(ts(turns, 'waiting')).toEqual(['done', 'done']);
+  });
+});
+
+describe('dropQueuedTurns (abort drops queued follow-ups so the board can settle)', () => {
+  it('streaming with a queued follow-up: drops the queued tail, keeps the live round', () => {
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'partial' }, { prompt: 'q1', answer: '', done: false }];
+    expect(dropQueuedTurns(turns)).toEqual([{ prompt: 'q0', answer: 'partial' }]);
+  });
+
+  it('keeps settled earlier rounds, drops everything queued after the live round', () => {
+    const turns: Turn[] = [
+      { prompt: 'q0', answer: 'a0', done: true }, // settled
+      { prompt: 'q1', answer: 'now writing' },    // live (done unset)
+      { prompt: 'q2', answer: '', done: false },  // queued
+      { prompt: 'q3', answer: '', done: false },  // queued
+    ];
+    expect(dropQueuedTurns(turns)).toEqual([
+      { prompt: 'q0', answer: 'a0', done: true },
+      { prompt: 'q1', answer: 'now writing' },
+    ]);
+  });
+
+  it('no queued tail (live round is last) → returns the SAME reference (no-op)', () => {
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'a0', done: true }, { prompt: 'q1', answer: 'partial' }];
+    expect(dropQueuedTurns(turns)).toBe(turns);
+  });
+
+  it('all rounds settled (transient: no live round) → returns the SAME reference (no-op)', () => {
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'a0', done: true }, { prompt: 'q1', answer: 'a1', done: true }];
+    expect(dropQueuedTurns(turns)).toBe(turns);
+  });
+
+  it('single live round → returns the SAME reference (no-op)', () => {
+    const turns: Turn[] = [{ prompt: 'q0', answer: 'partial' }];
+    expect(dropQueuedTurns(turns)).toBe(turns);
   });
 });
 
