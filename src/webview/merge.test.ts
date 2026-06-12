@@ -157,6 +157,26 @@ describe('buildRebuildSeed', () => {
     expect(s.indexOf('q1')).toBeLessThan(s.indexOf('q2'));
     expect(s).toContain('A: a2');
   });
+  // Cross-engine compact boundary: a compact source must replay its DIGEST, not the raw pre-compact history —
+  // otherwise switching provider after a long session overflows the new window (empty answer + 100%).
+  it('substitutes a compact source with its digest instead of raw history', () => {
+    const s = buildRebuildSeed(
+      [{ prompt: 'q1', answer: 'a1' }, { compact: true, compactSummary: 'COMPACT-DIGEST' }],
+      { withSteps: true },
+    );
+    expect(s).toContain('Q: q1');                       // normal board → raw Q/A
+    expect(s).toContain('[Compacted history context]'); // compact board → digest framing, not raw
+    expect(s).toContain('COMPACT-DIGEST');
+    expect(s.indexOf('q1')).toBeLessThan(s.indexOf('COMPACT-DIGEST')); // order preserved
+  });
+  it('a compact-only source emits just its digest (no raw Q/A, no tool steps even with withSteps)', () => {
+    const s = buildRebuildSeed(
+      [{ compact: true, compactSummary: 'DIGEST', steps: [{ name: 'Bash', input: { command: 'ls' } } as any] }],
+      { withSteps: true },
+    );
+    expect(s).toContain('DIGEST');
+    expect(s).not.toMatch(/\nQ: /); // compact node has no own prompt → no raw Q/A; steps logic never reached
+  });
 });
 
 describe('ancestorsOf', () => {

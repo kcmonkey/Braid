@@ -3188,7 +3188,13 @@ function App() {
       es.find((e) => e.target === id && ((e.data?.kind as string) ?? 'fork') !== 'merge')?.source;
     const chain: BoardNodeT[] = [parent];
     let anchor: BoardNodeT | undefined;
-    let cur: string | undefined = parent.id;
+    // A COMPACT node is a context boundary in BOTH layers: its compactSummary stands in for everything above
+    // it, so the walk must STOP there and the seed replays the digest (not the pre-compact transcript). This is
+    // engine-independent — a same-engine compact PARENT already early-returned above (native fork of the
+    // compacted session); reaching here with a compact parent means cross-engine, where there's no native
+    // anchor to stop the walk otherwise. Without it a cross-engine continuation strolls past the compact node
+    // to the root and overflows the new provider's window (the "switch provider → empty answer + 100%" bug).
+    let cur: string | undefined = parent.data.compact ? undefined : parent.id;
     const guard = new Set<string>([parent.id]);
     while (cur) {
       const p = forkParentOf(cur);
@@ -3200,16 +3206,18 @@ function App() {
       // "transparent" (skipped + replayed as text), exactly like deleted/dirty nodes. (M-MultiEngine AD4)
       if (!pn.data.lineageDirty && pn.data.sessionId && sameEngine(pn.data)) { anchor = pn; break; }
       chain.unshift(pn); // dirty / foreign ancestor → replay its turns too
+      if (pn.data.compact) break; // compact boundary reached → its summary covers everything above; stop walking
       cur = p;
     }
     // Cross-engine seed (any skipped node is a different engine) carries tool steps (AD5); a pure same-engine
     // Node-Delete rebuild stays Q/A-only (byte-identical to before, the no-op). No anchor → fresh + full text.
+    // Pass the chain as BOARDS (not flattened turns) so a compact node's summary survives — buildRebuildSeed
+    // substitutes its digest for the raw history the walk stopped collecting above it. (compact boundary)
     const crossEngine = chain.some((n) => !sameEngine(n.data));
-    const seedTurns = chain.flatMap((n) => boardTurns(n.data));
     // Lazy Fork: truncate the anchor's session to the anchor's own point (resumeSessionAt). Under lazy
     // fork the anchor's session is the SHARED spine — its end may contain the deleted node(s); truncating
     // to the anchor's messageUuid excludes them, then the replayed chain turns re-add only the kept turns.
-    return { parentSessionId: anchor?.data.sessionId, resumeAt: anchor?.data.messageUuid, mergeContext: buildRebuildSeed(seedTurns, { withSteps: crossEngine }) };
+    return { parentSessionId: anchor?.data.sessionId, resumeAt: anchor?.data.messageUuid, mergeContext: buildRebuildSeed(chain.map((n) => n.data), { withSteps: crossEngine }) };
   }, []);
 
   // NOTE on deps: the node-data callbacks (onSend/onFork/onStop/onCompact) reference each other —

@@ -984,18 +984,46 @@ export function boxSelectedIds(
   return ids;
 }
 
-// Node-Delete Phase 1: text seed to rebuild a lineage-dirty board's context after an ancestor was deleted.
-// The board (and any surviving dirty ancestors between it and the nearest clean ancestor) fork natively
-// from that clean ancestor; this replays their own Q/A on top so the deleted node is excluded. Q AND A of
-// every round (unlike flattenTurns, which only flattens answers). (plans/Node-Delete)
-export function buildRebuildSeed(turns: Turn[], opts?: { withSteps?: boolean }): string {
+// Node-Delete Phase 1 + M-MultiEngine: text seed to rebuild a board's context when no native session attach
+// is possible — an ancestor was deleted (lineage-dirty rebuild), OR the continuation crosses engines (a foreign
+// provider can't `resume` another's session). Replays each source board's Q/A so the excluded node(s) drop out.
+// Q AND A of every round (unlike flattenTurns, which only flattens answers). (plans/Node-Delete)
+//
+// A COMPACT source is a context boundary: its compactSummary already compresses everything above it (the fork
+// walk stops there, engine-independent), so emit the digest in place of raw Q/A — exactly as the merge builder's
+// block() does (merge SSOT). Without this a cross-engine seed replays the whole pre-compact transcript and
+// overflows the new provider's window (the "switch provider after a long session → empty answer + 100%" bug).
+//
+// Takes board-like sources (BoardData or a bare Turn) so the compact fields SURVIVE — flattening to Turn[] up
+// front strips them. Non-compact, same-engine output is byte-identical to the prior Turn[] version (the
+// Node-Delete no-op): one source's rounds joined by \n\n, sources joined by \n\n == the old flat join.
+export interface RebuildSource {
+  prompt?: string;
+  answer?: string;
+  steps?: ToolStep[];
+  turns?: Turn[];
+  compact?: boolean;
+  compactSummary?: string;
+}
+export function buildRebuildSeed(sources: RebuildSource[], opts?: { withSteps?: boolean }): string {
   // M-MultiEngine (AD5): a CROSS-ENGINE seed carries Q/A + tool steps (the foreign branch's tool narrative the
   // new engine's session can't inherit). A same-engine Node-Delete rebuild stays Q/A-only (withSteps=false
   // default → byte-identical to before, the no-op invariant). Steps reuse formatSteps (SSOT).
   const withSteps = opts?.withSteps ?? false;
-  const body = turns.map((t) => {
-    const qa = `Q: ${t.prompt}\nA: ${t.answer}`;
-    return withSteps && t.steps && t.steps.length ? `${qa}\n${formatSteps(t.steps)}` : qa;
+  const body = sources.map((d) => {
+    // Compact boundary → its digest stands in for ALL history above it; no tool steps (already compressed).
+    if (d.compact && d.compactSummary) {
+      let s = `[Compacted history context]\n${d.compactSummary}`;
+      if (d.prompt) s += `\nQ: ${d.prompt}\nA: ${d.answer ?? ''}`; // own post-compact follow-up turn, if any (mirrors block())
+      return s;
+    }
+    const rounds: Turn[] = d.turns && d.turns.length
+      ? d.turns
+      : [{ prompt: d.prompt ?? '', answer: d.answer ?? '', steps: d.steps }];
+    return rounds.map((t) => {
+      const qa = `Q: ${t.prompt}\nA: ${t.answer}`;
+      return withSteps && t.steps && t.steps.length ? `${qa}\n${formatSteps(t.steps)}` : qa;
+    }).join('\n\n');
   }).join('\n\n');
   return `Below is the prior conversation leading up to here (an intermediate step was removed). Continue from this context:\n\n${body}`;
 }
