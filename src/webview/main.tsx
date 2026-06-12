@@ -2282,31 +2282,33 @@ function formatReset(iso?: string | null): string {
   return 'resets ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-// Direct provider selector for composers. This is intentionally about NEW turns only: historical boards keep
-// their stamped `BoardData.engine`, while sends/forks/merges read the current active provider at creation.
+// Direct provider selector for the composers + the canvas top bar. Rendered as a COMPACT DROPDOWN (native
+// <select> — its OS-drawn option menu escapes a board card's overflow:hidden, which a CSS popover would not).
+// Switching sets the canvas-local active provider for NEW turns: an already-run board keeps its immutable
+// stamped `BoardData.engine` (its session lives on that engine), while every FRESH (never-run) board is
+// re-stamped to the new engine so the switch visibly takes effect on it (see onSetActiveProvider).
 function ProviderQuickSwitch({ activeProvider, onSetActive }: {
   activeProvider: EngineId;
   onSetActive: (id: EngineId) => void;
 }) {
   if (PROVIDER_CATALOG.filter((p) => p.implemented).length < 2) return null;
+  const active = PROVIDER_CATALOG.find((p) => p.id === activeProvider);
   return (
-    <div className="provider-switch nodrag nopan" role="group" aria-label="Provider for new turns" onMouseDown={(e) => e.stopPropagation()}>
-      {PROVIDER_CATALOG.map((p) => {
-        const on = activeProvider === p.id;
-        return (
-          <button
-            key={p.id}
-            type="button"
-            className={`provider-switch__btn ${on ? 'on' : ''}`}
-            disabled={!p.implemented}
-            title={p.implemented ? (on ? `${p.name} is active for new turns` : `Use ${p.name} for new turns`) : `${p.name} — coming soon`}
-            onClick={(e) => { e.stopPropagation(); if (p.implemented && !on) onSetActive(p.id); }}
-          >
-            <span className="provider-switch__dot" style={{ background: p.accent }} />
-            <span className="provider-switch__name">{p.name}</span>
-          </button>
-        );
-      })}
+    <div className="provider-dd nodrag nopan" title="Provider for new turns" onMouseDown={(e) => e.stopPropagation()}>
+      <span className="provider-dd__dot" style={{ background: active?.accent ?? 'var(--muted)' }} />
+      <select
+        className="provider-dd__select"
+        aria-label="Provider for new turns"
+        value={activeProvider}
+        onClick={(e) => e.stopPropagation()}
+        onChange={(e) => { const id = e.target.value as EngineId; if (id !== activeProvider) onSetActive(id); }}
+      >
+        {PROVIDER_CATALOG.map((p) => (
+          <option key={p.id} value={p.id} disabled={!p.implemented}>
+            {p.name}{p.implemented ? '' : ' — soon'}
+          </option>
+        ))}
+      </select>
     </div>
   );
 }
@@ -3930,6 +3932,19 @@ function App() {
       setSlashCommands([]);
       setActiveProviderState(id);
       activeProviderRef.current = id;
+      // Re-stamp every FRESH (never-run, idle) board's engine to the new provider. Such a board's `engine` was
+      // only a creation-time default and it owns no session to re-home, so flipping it is safe — and it makes
+      // the per-board engine badge truthful AND routes its first turn to the chosen provider (onSend reads the
+      // board's stamped engine). Already-run boards (a sessionId / prompt / compact) keep their IMMUTABLE engine
+      // — their conversation lives on that engine. This is what makes the switch visibly affect the board you're
+      // composing in, instead of silently doing nothing. (M-MultiEngine AD1)
+      const restamped = nodesRef.current.map((n) => {
+        const d = n.data;
+        const fresh = !d.prompt && d.status === 'idle' && !d.compact && !d.collapsedGraph && !d.sessionId;
+        return fresh && boardEngine(d) !== id ? { ...n, data: { ...d, engine: id } } : n;
+      });
+      setNodes(restamped);
+      nodesRef.current = restamped;
     }
     post({ type: 'setActiveProvider', provider: id });
   }, []);
