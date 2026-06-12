@@ -499,24 +499,32 @@ describe('mergeLeaves', () => {
 });
 
 describe('visual graph collapse', () => {
-  it('collapses a linear selected history into the selected board parent', () => {
+  it('collapses a selected consecutive line into the deepest selected board', () => {
+    const nodes = [node('a', 0), node('b', 1), node('c', 2), node('d', 3)];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd')];
+    expect(planCollapseSelection(nodes, edges, ['b', 'c', 'd'])).toEqual([{ targetId: 'd', hiddenIds: ['b', 'c'] }]);
+
+    const out = collapseSelection(nodes, edges, ['b', 'c', 'd']);
+    expect(out.changed).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'b')!.hidden).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'c')!.hidden).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'd')!.data.collapsedGraph).toEqual({ hiddenIds: ['b', 'c'] });
+  });
+
+  it('requires at least two boards and a direct visible line', () => {
     const nodes = [node('a', 0), node('b', 1), node('c', 2)];
     const edges = [forkEdge('a', 'b'), forkEdge('b', 'c')];
-    expect(planCollapseSelection(nodes, edges, ['c'])).toEqual([{ targetId: 'b', hiddenIds: ['a'] }]);
-
-    const out = collapseSelection(nodes, edges, ['c']);
-    expect(out.changed).toBe(true);
-    expect(out.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
-    expect(out.nodes.find((n) => n.id === 'b')!.data.collapsedGraph).toEqual({ hiddenIds: ['a'] });
+    expect(planCollapseSelection(nodes, edges, ['c'])).toEqual([]);
+    expect(planCollapseSelection(nodes, edges, ['a', 'c'])).toEqual([]);
   });
 
-  it('uses the first shared ancestor for selected sibling leaves', () => {
+  it('rejects selected sibling leaves instead of collapsing their shared ancestor', () => {
     const nodes = [node('root', 0), node('shared', 1), node('left', 2), node('right', 3)];
     const edges = [forkEdge('root', 'shared'), forkEdge('shared', 'left'), forkEdge('shared', 'right')];
-    expect(planCollapseSelection(nodes, edges, ['left', 'right'])).toEqual([{ targetId: 'shared', hiddenIds: ['root'] }]);
+    expect(planCollapseSelection(nodes, edges, ['left', 'right'])).toEqual([]);
   });
 
-  it('moves the collapse target up to keep an unselected sibling branch connected', () => {
+  it('rejects a line that would hide a branch point with a visible unselected child', () => {
     const nodes = [node('root', 0), node('shared', 1), node('spine', 2), node('leaf', 3), node('sibling', 4)];
     const edges = [
       forkEdge('root', 'shared'),
@@ -524,19 +532,40 @@ describe('visual graph collapse', () => {
       forkEdge('spine', 'leaf'),
       forkEdge('shared', 'sibling'),
     ];
-    expect(planCollapseSelection(nodes, edges, ['leaf'])).toEqual([{ targetId: 'shared', hiddenIds: ['root'] }]);
+    expect(planCollapseSelection(nodes, edges, ['shared', 'spine', 'leaf'])).toEqual([]);
   });
 
-  it('expands a collapsed representative and re-shows hidden nodes', () => {
-    const nodes = [
-      { ...node('a', 0), hidden: true },
-      node('b', 1, { collapsedGraph: { hiddenIds: ['a'] } }),
-      node('c', 2),
+  it('allows a line below a branch point and creates a visual proxy edge', () => {
+    const nodes = [node('root', 0), node('shared', 1), node('spine', 2), node('leaf', 3), node('sibling', 4)];
+    const edges = [
+      forkEdge('root', 'shared'),
+      forkEdge('shared', 'spine'),
+      forkEdge('spine', 'leaf'),
+      forkEdge('shared', 'sibling'),
     ];
-    const out = expandCollapsedGraph(nodes, 'b');
+    const out = collapseSelection(nodes, edges, ['spine', 'leaf']);
+    expect(out.plans).toEqual([{ targetId: 'leaf', hiddenIds: ['spine'] }]);
+    const synced = syncHiddenEdges(out.nodes, edges);
+    const proxy = synced.find((e) => e.source === 'shared' && e.target === 'leaf');
+    expect(proxy?.data?.kind).toBe('collapse');
+    expect(proxy?.hidden).toBeUndefined();
+    expect(synced.find((e) => e.source === 'shared' && e.target === 'spine')!.hidden).toBe(true);
+    expect(synced.find((e) => e.source === 'spine' && e.target === 'leaf')!.hidden).toBe(true);
+    expect(synced.find((e) => e.source === 'shared' && e.target === 'sibling')!.hidden).toBeUndefined();
+  });
+
+  it('expands a collapsed representative, re-shows hidden nodes, and removes proxy edges', () => {
+    const nodes = [
+      node('a', 0),
+      { ...node('b', 1), hidden: true },
+      node('c', 2, { collapsedGraph: { hiddenIds: ['b'] } }),
+    ];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), makeEdge('a', 'c', 'collapse')];
+    const out = expandCollapsedGraph(nodes, 'c');
     expect(out.changed).toBe(true);
-    expect(out.nodes.find((n) => n.id === 'a')!.hidden).toBe(false);
-    expect(out.nodes.find((n) => n.id === 'b')!.data.collapsedGraph).toBeUndefined();
+    expect(out.nodes.find((n) => n.id === 'b')!.hidden).toBe(false);
+    expect(out.nodes.find((n) => n.id === 'c')!.data.collapsedGraph).toBeUndefined();
+    expect(syncHiddenEdges(out.nodes, edges).some((e) => e.data?.kind === 'collapse')).toBe(false);
   });
 
   it('syncs edge visibility from hidden node endpoints and persists hidden nodes', () => {
@@ -548,12 +577,10 @@ describe('visual graph collapse', () => {
     expect(g.nodes.find((n) => n.id === 'b')!.hidden).toBeUndefined();
   });
 
-  it('drops a spurious empty-fold plan (a root child whose visible sibling pins the target)', () => {
-    // root has two children; collapsing one would have to hide root to fold anything, but root's other
-    // child keeps root visible → the guard pins the target at root, which has no ancestors → nothing to fold.
-    const nodes = [node('root', 0), node('x', 1), node('y', 2)];
-    const edges = [forkEdge('root', 'x'), forkEdge('root', 'y')];
-    expect(planCollapseSelection(nodes, edges, ['x'])).toEqual([]);
+  it('rejects collapse across a merge edge', () => {
+    const nodes = [node('a', 0), node('b', 1), node('m', 2, { merged: true })];
+    const edges = [mergeEdge('a', 'm'), mergeEdge('b', 'm')];
+    expect(planCollapseSelection(nodes, edges, ['a', 'm'])).toEqual([]);
   });
 });
 
@@ -1636,6 +1663,17 @@ describe('restampActiveProvider — re-stamp + re-home fresh boards on a provide
     expect(out.find((n) => n.id === 'C')).toBe(C); // boardEngine === id → unchanged
   });
 
+  it('heals an already-Codex fresh fork child that still points at a Claude parent session', () => {
+    const P = node('P', 1, { engine: 'claude', sessionId: 'claude-sess-stale', prompt: 'q-P', answer: 'a-P' });
+    const C = node('C', 2, { engine: 'codex', prompt: '', answer: '', status: 'idle', parentSessionId: 'claude-sess-stale' });
+    const edges = [forkEdge('P', 'C')];
+    const out = restampActiveProvider([P, C], edges, 'codex');
+    const c = out.find((n) => n.id === 'C')!.data;
+    expect(c.engine).toBe('codex');
+    expect(c.parentSessionId).toBeUndefined();
+    expect(c.mergeContext).toContain('q-P');
+  });
+
   it('a bare fresh root just flips engine (no base to re-home)', () => {
     const R = node('R', 1, { engine: 'claude', prompt: '', answer: '', status: 'idle' });
     const out = restampActiveProvider([R], [], 'codex');
@@ -1655,6 +1693,20 @@ describe('restampActiveProvider — re-stamp + re-home fresh boards on a provide
     expect(m.engine).toBe('codex');
     expect(m.parentSessionId).toBeUndefined();    // no Codex source → no native base (not 'sa')
     expect(m.mergeContext).not.toBe('stale');      // recomputed for Codex
+    expect(m.mergeContext).toContain('q-A');
+    expect(m.mergeContext).toContain('q-B');
+  });
+
+  it('heals an already-Codex fresh merge board that still carries a Claude native base', () => {
+    const A = node('A', 1, { engine: 'claude', sessionId: 'sa', prompt: 'q-A', answer: 'a-A' });
+    const B = node('B', 2, { engine: 'claude', sessionId: 'sb', prompt: 'q-B', answer: 'a-B' });
+    const M = node('M', 3, { engine: 'codex', merged: true, prompt: '', answer: '', status: 'idle', parentSessionId: 'sa', mergeContext: 'stale' });
+    const edges = [mergeEdge('A', 'M'), mergeEdge('B', 'M')];
+    const out = restampActiveProvider([A, B, M], edges, 'codex');
+    const m = out.find((n) => n.id === 'M')!.data;
+    expect(m.engine).toBe('codex');
+    expect(m.parentSessionId).toBeUndefined();
+    expect(m.mergeContext).not.toBe('stale');
     expect(m.mergeContext).toContain('q-A');
     expect(m.mergeContext).toContain('q-B');
   });

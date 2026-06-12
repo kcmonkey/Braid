@@ -270,7 +270,7 @@ export interface Turn {
 
 export interface CollapsedGraph {
   hiddenIds: string[];
-  // Digest of the FOLDED history (the hidden ancestors + this representative), synthesized by Haiku from
+  // Digest of the FOLDED history (the hidden boards + this representative), synthesized by Haiku from
   // their combined Q/A so the collapsed card shows WHAT it hides — not a bare board count. Mirrors the
   // per-board digest (summary / miniSummary / tags) but describes the whole folded chain. `digestKey` gates
   // staleness: it encodes COLLAPSE_DIGEST_VERSION + the folded boards' ids/answer-lengths; needsCollapseDigest
@@ -350,7 +350,7 @@ export interface BoardData {
   // summary in its place. (knowledge.md "native /compact")
   compact?: boolean;
   compactSummary?: string;
-  // Visual-only graph collapse: this visible board is the representative for a hidden ancestor subgraph.
+  // Visual-only graph collapse: this visible board is the representative for a hidden selected line segment.
   // The hidden boards stay in the React Flow graph (node.hidden=true) so merge/fork/focus ancestry remains
   // exact; expanding this board simply unhides hiddenIds and clears this marker. Not engine compaction.
   collapsedGraph?: CollapsedGraph;
@@ -492,7 +492,7 @@ export function ancestorsOf(
   // already covers everything above it — return no ancestors, else buildPrompt would emit both the
   // pre-compact full Q/A AND the compactSummary that replaces it. (default isBoundary → never true)
   if (isBoundary(nodeId)) return new Set<string>();
-  const parentsOf = (id: string) => edges.filter((e) => e.target === id).map((e) => e.source);
+  const parentsOf = (id: string) => edges.filter((e) => e.target === id && !isCollapseEdge(e)).map((e) => e.source);
   const seen = new Set<string>();
   const stack = [...parentsOf(nodeId)];
   while (stack.length) {
@@ -526,92 +526,95 @@ export interface CollapsePlan {
   hiddenIds: string[];
 }
 
-function visibleAncestorIds(id: string, edges: Edge[], byId: Map<string, BoardNodeT>): string[] {
-  return [...ancestorsOf(id, edges)].filter((a) => {
-    const n = byId.get(a);
+function edgeKind(e: Edge): EdgeKind {
+  return ((e.data?.kind as EdgeKind | undefined) ?? 'fork');
+}
+
+function isLineageEdge(e: Edge): boolean {
+  const k = edgeKind(e);
+  return k === 'fork' || k === 'compact';
+}
+
+function isCollapseEdge(e: Edge): boolean {
+  return edgeKind(e) === 'collapse';
+}
+
+function orderedSelectedLine(
+  edges: Edge[], selectedIds: string[], byId: Map<string, BoardNodeT>,
+): string[] | null {
+  const selected = [...new Set(selectedIds.filter((id) => {
+    const n = byId.get(id);
     return !!n && !n.hidden;
-  });
-}
+  }))];
+  if (selected.length < 2) return null;
 
-function deepest(ids: string[], byId: Map<string, BoardNodeT>): string | null {
-  if (!ids.length) return null;
-  return ids.reduce((best, id) => {
-    const b = byId.get(best)?.data.seq ?? 0;
-    const s = byId.get(id)?.data.seq ?? 0;
-    if (s !== b) return s > b ? id : best;
-    return id < best ? id : best;
-  });
-}
+  const selectedSet = new Set(selected);
+  const parentsInSelection = (id: string) => edges
+    .filter((e) => !e.hidden && isLineageEdge(e) && e.target === id && selectedSet.has(e.source))
+    .map((e) => e.source);
+  const childrenInSelection = (id: string) => edges
+    .filter((e) => !e.hidden && isLineageEdge(e) && e.source === id && selectedSet.has(e.target))
+    .map((e) => e.target);
 
-function deepestCommonAncestor(ids: string[], edges: Edge[], byId: Map<string, BoardNodeT>): string | null {
-  if (ids.length < 2) return null;
-  const sets = ids.map((id) => new Set(visibleAncestorIds(id, edges, byId)));
-  if (!sets.length) return null;
-  const common = [...sets[0]].filter((id) => sets.every((s) => s.has(id)));
-  return deepest(common, byId);
-}
-
-function settledCollapseTarget(targetId: string, edges: Edge[], byId: Map<string, BoardNodeT>): string {
-  let target = targetId;
-  const guard = new Set<string>();
-  while (!guard.has(target)) {
-    guard.add(target);
-    const hidden = new Set(visibleAncestorIds(target, edges, byId));
-    const offenders = edges
-      .filter((e) => {
-        if (!hidden.has(e.source)) return false;
-        if (hidden.has(e.target) || e.target === target) return false;
-        const child = byId.get(e.target);
-        return !!child && !child.hidden;
-      })
-      .map((e) => e.source);
-    const next = deepest([...new Set(offenders)], byId);
-    if (!next) break;
-    target = next;
+  for (const id of selected) {
+    if (parentsInSelection(id).length > 1 || childrenInSelection(id).length > 1) return null;
   }
-  return target;
+  const heads = selected.filter((id) => parentsInSelection(id).length === 0);
+  if (heads.length !== 1) return null;
+
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  let cur = heads[0];
+  while (cur) {
+    if (seen.has(cur)) return null;
+    ordered.push(cur);
+    seen.add(cur);
+    const kids = childrenInSelection(cur);
+    if (!kids.length) break;
+    cur = kids[0];
+  }
+  return ordered.length === selectedSet.size ? ordered : null;
+}
+
+function collapseWouldDetachVisibleBranch(
+  edges: Edge[], byId: Map<string, BoardNodeT>, targetId: string, hiddenIds: string[],
+): boolean {
+  const hidden = new Set(hiddenIds);
+  const folded = new Set([...hiddenIds, targetId]);
+  const externalParents = new Set<string>();
+  for (const e of edges) {
+    if (e.hidden || isCollapseEdge(e)) continue;
+    const sourceHidden = hidden.has(e.source);
+    const targetHidden = hidden.has(e.target);
+    if (sourceHidden) {
+      const child = byId.get(e.target);
+      if (child && !child.hidden && !folded.has(e.target)) return true;
+    }
+    if (targetHidden && !hidden.has(e.source)) {
+      const parent = byId.get(e.source);
+      if (parent && !parent.hidden) externalParents.add(e.source);
+      if (edgeKind(e) === 'merge') return true;
+    }
+  }
+  return externalParents.size > 1;
 }
 
 export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): CollapsePlan[] {
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
-  const selected = selectedIds.filter((id) => {
-    const n = byId.get(id);
-    return !!n && !n.hidden;
-  });
-  const leaves = mergeLeaves(selected, edges);
-  if (!leaves.length) return [];
+  const ordered = orderedSelectedLine(edges, selectedIds, byId);
+  if (!ordered) return [];
 
-  const initialTargets: string[] = [];
-  const common = deepestCommonAncestor(leaves, edges, byId);
-  if (common) {
-    initialTargets.push(common);
-  } else {
-    for (const leaf of leaves) {
-      const parent = deepest(visibleAncestorIds(leaf, edges, byId), byId);
-      if (parent) initialTargets.push(parent);
-    }
-  }
+  const targetId = ordered[ordered.length - 1];
+  const target = byId.get(targetId);
+  if (!target || target.hidden) return [];
+  const hiddenIds = ordered.slice(0, -1);
+  if (!hiddenIds.length) return [];
+  if (collapseWouldDetachVisibleBranch(edges, byId, targetId, hiddenIds)) return [];
 
-  const plans = new Map<string, Set<string>>();
-  for (const initial of initialTargets) {
-    const targetId = settledCollapseTarget(initial, edges, byId);
-    const target = byId.get(targetId);
-    if (!target || target.hidden) continue;
-    const hiddenIds = visibleAncestorIds(targetId, edges, byId);
-    const set = plans.get(targetId) ?? new Set<string>();
-    for (const id of hiddenIds) set.add(id);
-    plans.set(targetId, set);
-  }
-
-  return [...plans.entries()]
-    .map(([targetId, ids]) => ({ targetId, hiddenIds: [...ids].sort((a, b) => (byId.get(a)?.data.seq ?? 0) - (byId.get(b)?.data.seq ?? 0)) }))
-    .filter((p) => {
-      // Nothing to fold (e.g. a root's child whose visible sibling pins the target at the root, which has no
-      // ancestors) → not a real collapse; drop it so callers / the per-board affordance see no plan.
-      if (!p.hiddenIds.length) return false;
-      const existing = byId.get(p.targetId)?.data.collapsedGraph?.hiddenIds ?? [];
-      return p.hiddenIds.some((id) => !existing.includes(id));
-    });
+  const existing = target.data.collapsedGraph?.hiddenIds ?? [];
+  return hiddenIds.some((id) => !existing.includes(id))
+    ? [{ targetId, hiddenIds }]
+    : [];
 }
 
 export function collapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): { nodes: BoardNodeT[]; plans: CollapsePlan[]; changed: boolean } {
@@ -653,19 +656,37 @@ export function expandCollapsedGraph(nodes: BoardNodeT[], targetId: string): { n
 
 export function syncHiddenEdges(nodes: BoardNodeT[], edges: Edge[]): Edge[] {
   const hidden = new Set(nodes.filter((n) => n.hidden).map((n) => n.id));
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const baseEdges = edges.filter((e) => !isCollapseEdge(e));
   let changed = false;
-  const out = edges.map((e) => {
+  if (baseEdges.length !== edges.length) changed = true;
+  const out = baseEdges.map((e) => {
     const shouldHide = hidden.has(e.source) || hidden.has(e.target);
     if (!!e.hidden === shouldHide) return e;
     changed = true;
     return { ...e, hidden: shouldHide };
   });
+  const edgeIds = new Set(out.map((e) => e.id));
+  for (const n of nodes) {
+    if (n.hidden || !n.data.collapsedGraph) continue;
+    const folded = new Set(n.data.collapsedGraph.hiddenIds);
+    for (const e of baseEdges) {
+      if (!folded.has(e.target) || folded.has(e.source)) continue;
+      const parent = byId.get(e.source);
+      if (!parent || parent.hidden || parent.id === n.id) continue;
+      const proxy = makeEdge(parent.id, n.id, 'collapse');
+      if (edgeIds.has(proxy.id)) continue;
+      edgeIds.add(proxy.id);
+      out.push(proxy);
+      changed = true;
+    }
+  }
   return changed ? out : edges;
 }
 
 // ---- Collapse-history digest (folded-history summary on a collapsed representative) ----
 
-/** The boards whose content the collapsed representative's digest summarizes: its hidden ancestors (already
+/** The boards whose content the collapsed representative's digest summarizes: its hidden boards (already
  * seq-ordered) followed by the representative itself (the deepest, still-visible member). [] if not collapsed. */
 export function foldedHistoryIds(repId: string, byId: Record<string, BoardNodeT>): string[] {
   const cg = byId[repId]?.data.collapsedGraph;
@@ -714,7 +735,7 @@ export function needsCollapseDigest(repId: string, byId: Record<string, BoardNod
  */
 export function continuationChildren(id: string, edges: Edge[]): string[] {
   return edges
-    .filter((e) => e.source === id && (e.data?.kind ?? 'fork') !== 'merge')
+    .filter((e) => e.source === id && isLineageEdge(e))
     .map((e) => e.target);
 }
 
@@ -732,7 +753,7 @@ export function continuationMode(
   board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[], midpointFork = true,
 ): { fork: boolean; resumeAt?: string } {
   const parentId = edges.find(
-    (e) => e.target === board.id && ((e.data?.kind as string) ?? 'fork') !== 'merge',
+    (e) => e.target === board.id && isLineageEdge(e),
   )?.source;
   const parent = parentId ? nodes.find((n) => n.id === parentId) : undefined;
   if (!parent?.data.sessionId) return { fork: !!board.data.parentSessionId }; // unresolvable parent → legacy
@@ -783,7 +804,7 @@ export function forkBaseFor(
   }
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
   const forkParentOf = (id: string): string | undefined =>
-    edges.find((e) => e.target === id && ((e.data?.kind as string) ?? 'fork') !== 'merge')?.source;
+    edges.find((e) => e.target === id && isLineageEdge(e))?.source;
   const chain: BoardNodeT[] = [parent];
   let anchor: BoardNodeT | undefined;
   // A COMPACT parent is itself a boundary: don't walk past it (its summary covers everything above) — start
@@ -834,7 +855,7 @@ export function descendToFork(startId: string, edges: Edge[]): string {
 // The continuation parent of a node = the source of its incoming fork/compact edge (NOT a merge edge,
 // which points at a multi-parent product, not a linear continuation). undefined = a root / merge product.
 function continuationParent(id: string, edges: Edge[]): string | undefined {
-  return edges.find((e) => e.target === id && (e.data?.kind ?? 'fork') !== 'merge')?.source;
+  return edges.find((e) => e.target === id && isLineageEdge(e))?.source;
 }
 
 /**
@@ -945,7 +966,7 @@ export function fuseEligibility(
 ): { ancestorId: string; descendantId: string } | null {
   if (aId === bId) return null;
   const edge = edges.find(
-    (e) => (e.data?.kind ?? 'fork') === 'fork' &&
+    (e) => edgeKind(e) === 'fork' &&
       ((e.source === aId && e.target === bId) || (e.source === bId && e.target === aId)),
   );
   if (!edge) return null;
@@ -1150,7 +1171,7 @@ export function fuseAdjacent(
   const newEdges: Edge[] = [];
   for (const e of edges) {
     if (e.target === descendantId) continue; // the contracted fork edge (descendant's only in-edge)
-    if (e.source === descendantId) newEdges.push(makeEdge(ancestorId, e.target, (e.data?.kind as EdgeKind) ?? 'fork'));
+    if (e.source === descendantId && !isCollapseEdge(e)) newEdges.push(makeEdge(ancestorId, e.target, edgeKind(e)));
     else newEdges.push(e);
   }
   return { nodes: newNodes, edges: newEdges };
@@ -1164,8 +1185,8 @@ export function fuseAdjacent(
  */
 export function expandDeletion(nodes: BoardNodeT[], edges: Edge[], selectedIds: Iterable<string>): Set<string> {
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
-  const parentCount = (id: string) => edges.filter((e) => e.target === id).length;
-  const childrenOf = (id: string) => edges.filter((e) => e.source === id).map((e) => e.target);
+  const parentCount = (id: string) => edges.filter((e) => e.target === id && !isCollapseEdge(e)).length;
+  const childrenOf = (id: string) => edges.filter((e) => e.source === id && !isCollapseEdge(e)).map((e) => e.target);
   const isMerge = (id: string) => !!byId.get(id)?.data.merged || parentCount(id) > 1;
   const out = new Set<string>(selectedIds);
   // Seed the cascade from selected MERGE nodes only; from there delete ALL descendants unconditionally.
@@ -1191,7 +1212,7 @@ export function expandDeletion(nodes: BoardNodeT[], edges: Edge[], selectedIds: 
 export function contractDelete(
   nodes: BoardNodeT[], edges: Edge[], deletedIds: Set<string>,
 ): { nodes: BoardNodeT[]; edges: Edge[]; affected: { id: string; prevParentSessionId?: string; prevLineageDirty?: boolean }[] } {
-  const parentEdges = (id: string) => edges.filter((e) => e.target === id);
+  const parentEdges = (id: string) => edges.filter((e) => e.target === id && !isCollapseEdge(e));
   // Nearest surviving ancestors of `id` (walk up through deleted nodes). Each reconnected edge keeps the
   // kind of `id`'s own connection upward (its in-edge), preserving fork/merge/compact styling. We rebase
   // UP only through fork/compact edges: a MERGE edge to a deleted node is a provenance link to a merge
@@ -1203,9 +1224,9 @@ export function contractDelete(
     const walk = (node: string, downKind: EdgeKind) => {
       for (const e of parentEdges(node)) {
         const p = e.source;
-        const k: EdgeKind = node === id ? ((e.data?.kind as EdgeKind) ?? 'fork') : downKind;
+        const k: EdgeKind = node === id ? edgeKind(e) : downKind;
         if (!deletedIds.has(p)) out.push({ parent: p, kind: k });
-        else if ((e.data?.kind as EdgeKind) !== 'merge' && !seen.has(p)) { seen.add(p); walk(p, k); }
+        else if (isLineageEdge(e) && !seen.has(p)) { seen.add(p); walk(p, k); }
       }
     };
     walk(id, 'fork');
@@ -1235,7 +1256,7 @@ export function contractDelete(
     const stack = [...deletedIds];
     while (stack.length) {
       const id = stack.pop()!;
-      for (const e of edges) if (e.source === id && (e.data?.kind as EdgeKind) !== 'merge' && !seen.has(e.target)) {
+      for (const e of edges) if (e.source === id && isLineageEdge(e) && !seen.has(e.target)) {
         seen.add(e.target); stack.push(e.target);
         if (!deletedIds.has(e.target)) descendants.add(e.target);
       }
@@ -1250,13 +1271,13 @@ export function contractDelete(
     const ms = sessionOf(id);
     if (!ms) continue;
     for (const e of parentEdges(id)) {
-      if ((e.data?.kind as EdgeKind) === 'merge') continue;
+      if (!isLineageEdge(e)) continue;
       if (!deletedIds.has(e.source) && sessionOf(e.source) === ms) spineParents.add(e.source);
     }
   }
   const affected: { id: string; prevParentSessionId?: string; prevLineageDirty?: boolean }[] = [];
   const newNodes = surviving.map((n) => {
-    const isDirectChild = parentEdges(n.id).some((e) => deletedIds.has(e.source) && (e.data?.kind as EdgeKind) !== 'merge');
+    const isDirectChild = parentEdges(n.id).some((e) => deletedIds.has(e.source) && isLineageEdge(e));
     const isSpineParent = spineParents.has(n.id);
     if (!isDirectChild && !descendants.has(n.id) && !isSpineParent) return n;
     affected.push({ id: n.id, prevParentSessionId: n.data.parentSessionId, prevLineageDirty: n.data.lineageDirty });
@@ -1467,25 +1488,36 @@ export function mergeBaseFor(
  */
 export function restampActiveProvider(nodes: BoardNodeT[], edges: Edge[], id: EngineId): BoardNodeT[] {
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
-  return nodes.map((n) => {
+  let changed = false;
+  const next = nodes.map((n) => {
     const d = n.data;
     const fresh = !d.prompt && d.status === 'idle' && !d.compact && !d.collapsedGraph && !d.sessionId;
-    if (!fresh || boardEngine(d) === id) return n;
+    if (!fresh) return n;
+    const mergeParents = edges.filter((e) => e.target === n.id && edgeKind(e) === 'merge').map((e) => e.source);
+    const forkParent = edges.find((e) => e.target === n.id && isLineageEdge(e))?.source;
+    const hasGraphBase = (d.merged && mergeParents.length >= 2) || !!forkParent;
+    if (boardEngine(d) === id && !hasGraphBase) return n;
     // Always emit ALL THREE base keys (undefined to CLEAR a now-foreign pointer) so a spread overwrites the
     // board's stale base rather than leaving half of it behind.
     let base: { parentSessionId?: string; resumeAt?: string; mergeContext?: string };
-    const mergeParents = edges.filter((e) => e.target === n.id && (e.data?.kind as string) === 'merge').map((e) => e.source);
     if (d.merged && mergeParents.length >= 2) {
       const m = mergeBaseFor(mergeParents, byId, edges, id);
       base = { parentSessionId: m.parentSessionId, resumeAt: undefined, mergeContext: m.mergeContext };
     } else {
-      const forkParent = edges.find((e) => e.target === n.id && ((e.data?.kind as string) ?? 'fork') !== 'merge')?.source;
       const parent = forkParent ? byId[forkParent] : undefined;
       const r = parent ? forkBaseFor(parent, nodes, edges, id) : {};
       base = { parentSessionId: r.parentSessionId, resumeAt: r.resumeAt, mergeContext: r.mergeContext };
     }
+    const same =
+      boardEngine(d) === id &&
+      d.parentSessionId === base.parentSessionId &&
+      d.resumeAt === base.resumeAt &&
+      d.mergeContext === base.mergeContext;
+    if (same) return n;
+    changed = true;
     return { ...n, data: { ...d, engine: id, ...base } };
   });
+  return changed ? next : nodes;
 }
 
 // rough token estimate for mixed zh/en text — for "how much did dedup save", not billing
@@ -1540,7 +1572,7 @@ export function mergeFit(
 export const GRAPH_VERSION = 1;
 export type SBoardData = Omit<BoardData, 'onSend' | 'onFork' | 'onStop' | 'onCompact'>;
 export interface SNode { id: string; position: { x: number; y: number }; data: SBoardData; hidden?: boolean; }
-export type EdgeKind = 'fork' | 'merge' | 'compact';
+export type EdgeKind = 'fork' | 'merge' | 'compact' | 'collapse';
 export interface SEdge { id: string; source: string; target: string; kind: EdgeKind; }
 export interface SerializedGraph { version: number; nodes: SNode[]; edges: SEdge[]; idCounter: number; seqCounter: number; }
 
@@ -1549,12 +1581,14 @@ export const edgeStyle = (kind: EdgeKind) =>
     ? { stroke: '#6c8cff', strokeWidth: 2, strokeDasharray: '5 4' }
     : kind === 'compact'
       ? { stroke: '#57ab5a', strokeWidth: 2, strokeDasharray: '5 4' }
-      : { stroke: '#d29922', strokeWidth: 2, strokeDasharray: '5 4' };
+      : kind === 'collapse'
+        ? { stroke: '#8a86f5', strokeWidth: 2, strokeDasharray: '3 4' }
+        : { stroke: '#d29922', strokeWidth: 2, strokeDasharray: '5 4' };
 
 /** Single source of truth for an edge's id format, kind tag, and style. No `type` → React Flow draws the
  * default bezier curve (the original design); the handle-centering fix keeps it exiting the board's side. */
 export function makeEdge(source: string, target: string, kind: EdgeKind): Edge {
-  const prefix = kind === 'merge' ? 'm' : kind === 'compact' ? 'c' : 'e';
+  const prefix = kind === 'merge' ? 'm' : kind === 'compact' ? 'c' : kind === 'collapse' ? 'h' : 'e';
   return {
     id: `${prefix}-${source}-${target}`,
     source, target, data: { kind }, style: edgeStyle(kind),

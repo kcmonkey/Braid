@@ -203,25 +203,44 @@ body {
 /* Post-done summary generation hint: pulsing dot + "Summarizing…", sits above the truncated answer
    until the structured summary arrives and replaces the whole body. */
 .board__summarizing { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; color: var(--accent); font-size: 12px; letter-spacing: .02em; }
-.board.collapsed-graph { width: 300px; border-style: dashed; border-color: #8a86f5; }
-.board.collapsed-graph .board__head { background: linear-gradient(180deg,#2c2b3d,var(--panel)); border-bottom: none; }
-.board.collapsed-graph .board__turn { color: #8a86f5; background: #25243a; }
+.board.collapsed-graph { width: 300px; border-style: solid; border-color: #8a86f5; }
+.board.collapsed-graph .board__head { background: linear-gradient(180deg,#34324a,var(--panel)); border-bottom: 1px solid var(--border-sub); }
+.board.collapsed-graph .board__turn { color: #b7b4ff; background: #25243a; border: 1px solid rgba(91,88,166,.55); }
+/* Collapsed-history node = a stack of equal-size board shells BEHIND the front card (mockups/collapse-stack.html).
+   The plates are decorative siblings rendered inside .board-slot BEFORE .board: they resolve against the React Flow
+   node wrapper (the nearest positioned ancestor — .board-slot stays static so the card's Handle geometry / edge
+   routing is untouched), fill the card box via inset:0 (tracking its real height → the equal-size look), and sit
+   BEHIND the opaque card via z-index:-1. pointer-events:none keeps the card the only hit target. */
+.board-stackplate {
+  position: absolute; inset: 0; z-index: -1; pointer-events: none;
+  border-radius: 12px; border: 1px solid rgba(82,78,70,.92);
+  background: linear-gradient(180deg,#34322e 0 34px,var(--panel) 34px);
+  transition: transform .14s cubic-bezier(.4,0,.2,1), opacity .14s ease;
+}
+.board-stackplate--2 {
+  transform: translate(12px,9px); opacity: .9;
+  background: linear-gradient(180deg,#35322f 0 34px,#2a2930 34px);
+  box-shadow: 0 6px 18px rgba(0,0,0,.34);
+}
+.board-stackplate--3 {
+  transform: translate(24px,18px); opacity: .7;
+  background: linear-gradient(180deg,#2f2d2c 0 34px,#242329 34px);
+  box-shadow: 0 5px 16px rgba(0,0,0,.30);
+}
+/* Quiet hover spread so the stack reads as several boards (kept subtle for a developer tool). */
+.board-slot--stacked:hover .board-stackplate--2 { transform: translate(14px,11px); opacity: .96; }
+.board-slot--stacked:hover .board-stackplate--3 { transform: translate(28px,21px); opacity: .76; }
 .board__collapse-expand {
   font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
   color: #b7b4ff; background: #25243a; border: 1px solid #5b58a6; border-radius: 5px; padding: 3px 7px;
 }
 .board__collapse-expand:hover { background: #302f4a; color: var(--text); }
-/* Per-board "collapse history" button — a head-row sibling of the compact 🗜 button, in the collapse purple. */
-.board__collapse {
-  flex: none; font: inherit; font-size: 12px; line-height: 1; cursor: pointer;
-  color: #b7b4ff; background: #25243a; border: 1px solid #5b58a6; border-radius: 5px; padding: 3px 6px;
+/* Collapsed representative's second row: folded-board count + Expand, so the head keeps the digest title clean. */
+.board__foldrow {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 11px 10px; color: var(--muted); font-size: 12px;
 }
-.board__collapse:hover { background: #302f4a; color: var(--text); }
-/* Folded-board count chip on a collapsed representative (the gist carries the meaning; this is just the size). */
-.board__foldcount {
-  flex: none; font-size: 11px; font-weight: 700; color: #b7b4ff; background: #25243a;
-  border: 1px solid #4a4878; border-radius: 6px; padding: 1px 7px; white-space: nowrap;
-}
+.board__foldmeta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 
 .board__head {
   display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; cursor: pointer;
@@ -543,7 +562,8 @@ body {
 
 .mergebar {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); z-index: 10;
-  display: flex; align-items: center; gap: 14px;
+  display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px 14px;
+  max-width: min(calc(100vw - 32px), 980px);
   background: var(--merge-soft); border: 1px solid var(--merge); border-radius: 12px;
   padding: 10px 16px; backdrop-filter: blur(8px); box-shadow: 0 6px 24px rgba(0,0,0,.4);
 }

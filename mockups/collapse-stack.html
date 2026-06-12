@@ -83,62 +83,44 @@
     border-radius:7px; padding:5px 8px;
   }
 
-  /* Proposed collapsed-history node. */
+  /* Proposed collapsed-history node, simplified for a developer-tool surface. */
   .collapsed-stack {
-    position:absolute; width:326px; height:154px; cursor:pointer;
-    filter:drop-shadow(0 14px 22px rgba(0,0,0,.32));
+    position:absolute; width:338px; height:152px; cursor:pointer;
+    filter:drop-shadow(0 10px 18px rgba(0,0,0,.26));
   }
   .stack-card {
-    position:absolute; width:300px; min-height:104px; border-radius:12px;
-    border:1px dashed var(--collapse-border); overflow:hidden;
-    background:linear-gradient(180deg,#2d2b43,var(--panel));
-    transition:transform .16s cubic-bezier(.4,0,.2,1), border-color .16s ease, opacity .16s ease;
-  }
-  .stack-card::after {
-    content:""; position:absolute; inset:0; pointer-events:none;
-    background:linear-gradient(135deg,rgba(255,255,255,.055),transparent 28%,transparent);
+    position:absolute; width:300px; height:126px; border-radius:12px;
+    border:1px solid rgba(82,78,70,.92); overflow:hidden;
+    background:linear-gradient(180deg,#34322e 0 35px,var(--panel) 35px);
+    transition:transform .14s cubic-bezier(.4,0,.2,1), border-color .14s ease, opacity .14s ease;
   }
   .stack-card--3 {
-    left:24px; top:24px; z-index:1; opacity:.45;
-    background:linear-gradient(180deg,#27263a,#28272b);
+    left:28px; top:22px; z-index:1; opacity:.70;
+    background:linear-gradient(180deg,#2f2d2c 0 35px,#242329 35px);
+    box-shadow:0 5px 16px rgba(0,0,0,.30);
   }
   .stack-card--2 {
-    left:15px; top:15px; z-index:2; opacity:.68;
-    background:linear-gradient(180deg,#292841,#2b2a2d);
-  }
-  .stack-card--1 {
-    left:7px; top:7px; z-index:3; opacity:.88;
-    background:linear-gradient(180deg,#2b2a44,#2e2d30);
+    left:14px; top:11px; z-index:2; opacity:.90;
+    background:linear-gradient(180deg,#35322f 0 35px,#2a2930 35px);
+    box-shadow:0 6px 18px rgba(0,0,0,.34);
   }
   .stack-card--front {
-    left:0; top:0; z-index:4; opacity:1;
-    background:linear-gradient(180deg,#2c2b3d,var(--panel));
+    left:0; top:0; z-index:3; opacity:1;
+    background:var(--panel);
     border-style:solid; border-color:var(--collapse);
-    box-shadow:0 0 0 1px rgba(138,134,245,.08), 0 8px 24px rgba(0,0,0,.38);
+    box-shadow:0 0 0 1px rgba(138,134,245,.06), 0 8px 20px rgba(0,0,0,.34);
   }
-  .collapsed-stack:hover .stack-card--3 { transform:translate(7px,7px); opacity:.5; }
-  .collapsed-stack:hover .stack-card--2 { transform:translate(4px,4px); opacity:.74; }
-  .collapsed-stack:hover .stack-card--1 { transform:translate(2px,2px); opacity:.94; }
+  .collapsed-stack:hover .stack-card--3 { transform:translate(3px,3px); opacity:.76; }
+  .collapsed-stack:hover .stack-card--2 { transform:translate(1.5px,1.5px); opacity:.94; }
   .collapsed-stack:hover .stack-card--front {
-    transform:translate(-2px,-2px);
+    transform:translate(-1px,-1px);
     border-color:#b7b4ff;
-    box-shadow:0 0 0 2px rgba(138,134,245,.22), 0 12px 28px rgba(0,0,0,.46);
+    box-shadow:0 0 0 2px rgba(138,134,245,.16), 0 10px 22px rgba(0,0,0,.40);
   }
   .collapsed-stack.selected .stack-card--front {
     border-color:var(--accent);
-    box-shadow:0 0 0 2px var(--accent-soft), 0 12px 30px rgba(0,0,0,.48);
+    box-shadow:0 0 0 2px var(--accent-soft), 0 10px 24px rgba(0,0,0,.42);
   }
-
-  .stack-ghost-head {
-    height:36px; border-bottom:1px solid rgba(91,88,166,.55);
-    background:linear-gradient(180deg,#32304b,#28273a);
-  }
-  .stack-ghost-lines { padding:10px 12px; display:grid; gap:7px; }
-  .ghost-line {
-    height:7px; border-radius:99px; background:rgba(183,180,255,.18);
-  }
-  .ghost-line.short { width:54%; }
-  .ghost-line.med { width:74%; }
 
   .stack-front__tags {
     display:flex; gap:5px; padding:7px 11px 0; min-height:27px;
@@ -148,8 +130,8 @@
   }
   .stack-front__head {
     display:flex; align-items:flex-start; gap:8px; padding:9px 11px;
-    background:linear-gradient(180deg,#34324a,#30302e);
-    border-bottom:1px solid rgba(91,88,166,.38);
+    background:linear-gradient(180deg,#34324a,var(--panel));
+    border-bottom:1px solid var(--border-sub);
   }
   .stack-turn {
     flex:none; margin-top:1px; font-size:11px; font-weight:800; color:var(--collapse);
@@ -161,7 +143,7 @@
     display:-webkit-box; -webkit-box-orient:vertical; -webkit-line-clamp:2; overflow:hidden;
   }
   .fold-count {
-    flex:none; margin-top:1px; font-size:11px; font-weight:800; color:#d7d5ff;
+    flex:none; margin-top:1px; font-size:11px; font-weight:700; color:#d7d5ff;
     background:var(--collapse-bg); border:1px solid #4a4878; border-radius:6px;
     padding:1px 7px; white-space:nowrap;
   }
@@ -171,33 +153,13 @@
     border-radius:5px; padding:4px 8px;
   }
   .stack-front__body {
-    padding:8px 11px 11px; color:var(--muted); font-size:12px; line-height:1.45;
+    padding:8px 11px 10px; display:flex; align-items:center; justify-content:space-between; gap:10px;
+    color:var(--muted); font-size:12px; line-height:1.45;
   }
-  .stack-preview {
-    display:grid; gap:5px; margin-top:6px;
-  }
-  .stack-preview__row {
-    display:flex; align-items:center; gap:7px; min-width:0;
-    color:var(--muted-2); font-size:11px;
-  }
-  .stack-preview__dot {
-    flex:none; width:6px; height:6px; border-radius:50%; background:var(--collapse);
-    box-shadow:0 0 0 3px rgba(138,134,245,.11);
-  }
-  .stack-preview__text {
+  .stack-meta {
     min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+    color:var(--muted); font-size:12px;
   }
-
-  .stack-tabs {
-    position:absolute; z-index:5; right:1px; top:16px; display:grid; gap:5px;
-  }
-  .stack-tab {
-    width:23px; height:18px; display:flex; align-items:center; justify-content:center;
-    font-size:10px; font-weight:800; color:#b7b4ff;
-    background:#292842; border:1px solid #4a4878; border-right:none;
-    border-radius:6px 0 0 6px; box-shadow:-3px 2px 8px rgba(0,0,0,.18);
-  }
-  .stack-tab.more { color:var(--muted); background:#242330; }
 
   .toolbar {
     position:fixed; right:16px; top:16px; z-index:9; display:flex; gap:8px; align-items:center;
@@ -227,6 +189,7 @@
     color:#b7b4ff; background:var(--bg-deep); border:1px solid var(--border-sub);
     border-radius:4px; padding:0 4px;
   }
+  .variant-note { color:var(--muted-2); margin-top:6px; }
 
   @media (max-width:900px) {
     .canvas { transform:scale(.78); transform-origin:top left; width:128vw; height:128vh; }
@@ -271,18 +234,8 @@
     </div>
 
     <div class="collapsed-stack selected" style="left:850px; top:92px;" title="Click Expand to restore the folded boards">
-      <div class="stack-card stack-card--3">
-        <div class="stack-ghost-head"></div>
-        <div class="stack-ghost-lines"><span class="ghost-line med"></span><span class="ghost-line short"></span></div>
-      </div>
-      <div class="stack-card stack-card--2">
-        <div class="stack-ghost-head"></div>
-        <div class="stack-ghost-lines"><span class="ghost-line"></span><span class="ghost-line med"></span></div>
-      </div>
-      <div class="stack-card stack-card--1">
-        <div class="stack-ghost-head"></div>
-        <div class="stack-ghost-lines"><span class="ghost-line med"></span><span class="ghost-line short"></span></div>
-      </div>
+      <div class="stack-card stack-card--3"></div>
+      <div class="stack-card stack-card--2"></div>
       <div class="stack-card stack-card--front">
         <div class="stack-front__tags">
           <span class="tag">auth</span>
@@ -292,21 +245,11 @@
         <div class="stack-front__head">
           <span class="stack-turn">H</span>
           <span class="stack-title">Collapsed history: provider setup, auth checks, and fork semantics</span>
-          <span class="fold-count" title="6 boards folded here">6</span>
-          <button class="stack-expand" title="Expand collapsed history">Expand</button>
         </div>
         <div class="stack-front__body">
-          Folded context is summarized here; the visible stack tells you this is not a single board.
-          <div class="stack-preview">
-            <div class="stack-preview__row"><span class="stack-preview__dot"></span><span class="stack-preview__text">Engine abstraction and account UI decisions</span></div>
-            <div class="stack-preview__row"><span class="stack-preview__dot"></span><span class="stack-preview__text">Subscription auth pitfalls and session fork notes</span></div>
-          </div>
+          <span class="stack-meta">6 boards folded</span>
+          <button class="stack-expand" title="Expand collapsed history">Expand</button>
         </div>
-      </div>
-      <div class="stack-tabs" aria-hidden="true">
-        <span class="stack-tab">1</span>
-        <span class="stack-tab">2</span>
-        <span class="stack-tab more">+4</span>
       </div>
     </div>
 
@@ -335,16 +278,16 @@
     </div>
 
     <div class="callout">
-      <b>Proposed visual rule:</b> collapsed history renders as a small stack of board shells.
-      The front card keeps the current <code>H</code>, digest, count, and <code>Expand</code> affordance;
-      the rear shells are purely visual and spread slightly on hover.
+      <b>Revised visual rule:</b> collapsed history stays a readable summary card.
+      The stack uses equal-size board cards with fixed offsets, so the hidden boards read as real boards behind it.
+      <div class="variant-note">Primary read target: digest + <code>6 boards</code> + <code>Expand</code>.</div>
     </div>
   </div>
 
   <div class="zoom-hint"><kbd>Ctrl</kbd> + scroll to zoom</div>
   <div class="toolbar">
-    <div class="toolbar__pill"><b>Collapsed Stack Node</b> mockup</div>
-    <div class="toolbar__pill">Hover the stack to see the layer spread</div>
+    <div class="toolbar__pill"><b>Collapsed Stack Node</b> simplified mockup</div>
+    <div class="toolbar__pill">Equal-size stack</div>
   </div>
 </body>
 </html>
