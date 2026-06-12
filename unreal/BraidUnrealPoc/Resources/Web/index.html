@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Braid Unreal PoC</title>
+  <link rel="stylesheet" href="./webview.css">
+  <script>
+    (function () {
+      const storagePrefix = 'braid.unreal.poc.';
+      const graphKey = storagePrefix + 'graph';
+      const configKey = storagePrefix + 'config';
+      let state = null;
+      let activeProvider = 'claude';
+      let sessionCounter = 1;
+
+      const defaultConfig = {
+        authMethod: 'subscription',
+        model: '',
+        effort: 'xhigh',
+        thinking: 'adaptive',
+        permissionMode: 'default',
+        maxTurns: 0,
+        appendSystemPrompt: '',
+        allowedTools: [],
+        disallowedTools: [],
+        mcpEnabled: false,
+        env: {},
+        autoCompactEnabled: true,
+        autoCompactThreshold: 95,
+        expandAncestorsOnSelect: false,
+        asyncContinuationEnabled: true,
+        asyncContinuationIdleCapMin: 30,
+        warmSessionEnabled: true,
+        warmSessionIdleCapMin: 10
+      };
+
+      function readJson(key, fallback) {
+        try {
+          const raw = localStorage.getItem(key);
+          return raw ? JSON.parse(raw) : fallback;
+        } catch (error) {
+          console.warn('[Braid Unreal PoC] Failed to read localStorage', key, error);
+          return fallback;
+        }
+      }
+
+      function writeJson(key, value) {
+        try {
+          localStorage.setItem(key, JSON.stringify(value));
+        } catch (error) {
+          console.warn('[Braid Unreal PoC] Failed to write localStorage', key, error);
+        }
+      }
+
+      let config = Object.assign({}, defaultConfig, readJson(configKey, {}));
+
+      const models = {
+        claude: [
+          { value: '', label: 'Default model', contextWindow: 1000000 },
+          { value: 'claude-fable-5', label: 'Fable 5', contextWindow: 1000000 },
+          { value: 'opus', label: 'Opus', contextWindow: 1000000 },
+          { value: 'sonnet', label: 'Sonnet', contextWindow: 1000000 },
+          { value: 'haiku', label: 'Haiku', contextWindow: 200000 }
+        ],
+        codex: [
+          { value: '', label: 'Default model', contextWindow: 258400 },
+          { value: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 258400 },
+          { value: 'gpt-5.4', label: 'GPT-5.4', contextWindow: 258400 }
+        ],
+        deepseek: [
+          { value: '', label: 'Default model', contextWindow: 1000000 },
+          { value: 'deepseek-v4-pro', label: 'V4 Pro', contextWindow: 1000000 },
+          { value: 'deepseek-v4-flash', label: 'V4 Flash', contextWindow: 1000000 }
+        ]
+      };
+
+      const capabilities = {
+        claude: { id: 'claude', reasoning: true, compact: true, steer: true, routedFollowups: true, images: true, models: models.claude },
+        codex: { id: 'codex', reasoning: true, compact: false, steer: true, routedFollowups: true, images: true, models: models.codex },
+        deepseek: { id: 'deepseek', reasoning: true, compact: false, steer: false, routedFollowups: false, images: false, models: models.deepseek }
+      };
+
+      function dispatch(message) {
+        window.dispatchEvent(new MessageEvent('message', { data: message }));
+      }
+
+      function pushConfig() {
+        dispatch({ type: 'config', config: config, activeProvider: activeProvider, capabilities: capabilities });
+      }
+
+      function pushProviderStatus(provider) {
+        dispatch({
+          type: 'account',
+          provider: provider,
+          account: {
+            signedIn: true,
+            email: 'unreal-poc@local',
+            organization: 'Unreal Editor',
+            plan: 'PoC',
+            backend: 'local-shim'
+          },
+          usage: { windows: [], sessionCostUsd: 0 },
+          busy: false
+        });
+        dispatch({ type: 'apiKeyStatus', provider: provider, stored: false, envDetected: false });
+      }
+
+      function demoAnswer(message) {
+        const turnIndex = typeof message.turnIndex === 'number' ? message.turnIndex : 0;
+        const sessionId = message.resume || ('ue-poc-session-' + sessionCounter++);
+        const prompt = message.prompt || message.text || '';
+        const answer = [
+          'UE editor host shim received this prompt:',
+          '',
+          '> ' + (prompt || '(empty prompt)'),
+          '',
+          'This proves the current Braid React/React Flow webview can run inside Unreal Editor. The next porting step is replacing this local shim with a real host service that speaks the same protocol.'
+        ].join('\n');
+
+        dispatch({ type: 'session', boardId: message.boardId, sessionId: sessionId });
+        setTimeout(function () {
+          dispatch({ type: 'update', boardId: message.boardId, turnIndex: turnIndex, text: answer.slice(0, Math.min(140, answer.length)), thinking: '' });
+        }, 80);
+        setTimeout(function () {
+          dispatch({
+            type: 'done',
+            boardId: message.boardId,
+            turnIndex: turnIndex,
+            sessionId: sessionId,
+            messageUuid: 'ue-poc-message-' + Date.now(),
+            isError: false,
+            text: answer,
+            thinking: '',
+            thinks: [],
+            contextTokens: Math.max(1000, prompt.length * 4),
+            contextWindow: capabilities[message.engine || activeProvider].models[0].contextWindow || 1000000
+          });
+        }, 260);
+      }
+
+      function handleWebviewMessage(message) {
+        console.log('[Braid Unreal PoC] webview -> host', message);
+        switch (message.type) {
+          case 'ready':
+            dispatch({ type: 'restored', graph: readJson(graphKey, null) });
+            pushConfig();
+            break;
+          case 'getConfig':
+            pushConfig();
+            break;
+          case 'setConfig':
+            config = Object.assign({}, config, message.patch || {});
+            writeJson(configKey, config);
+            pushConfig();
+            break;
+          case 'setActiveProvider':
+            activeProvider = capabilities[message.provider] ? message.provider : activeProvider;
+            pushConfig();
+            break;
+          case 'persist':
+            writeJson(graphKey, message.graph);
+            break;
+          case 'getSlashCommands':
+            dispatch({ type: 'slashCommands', commands: [] });
+            break;
+          case 'searchFiles':
+            dispatch({ type: 'fileResults', query: message.query || '', files: [] });
+            break;
+          case 'getEditorContext':
+            dispatch({ type: 'editorContext', context: null });
+            break;
+          case 'accountOpen':
+            Object.keys(capabilities).forEach(pushProviderStatus);
+            break;
+          case 'mcpOpen':
+            dispatch({ type: 'mcpServers', servers: [], busy: [] });
+            break;
+          case 'send':
+          case 'followup':
+            demoAnswer(message);
+            break;
+          case 'summarize':
+            dispatch({ type: 'summary', boardId: message.boardId, summary: '', miniSummary: '', tags: [] });
+            break;
+          case 'branchSummarize':
+            dispatch({ type: 'branchSummary', boardId: message.boardId, text: '' });
+            break;
+          case 'collapseDigest':
+            dispatch({ type: 'collapseDigested', boardId: message.boardId, summary: '', miniSummary: '', tags: [] });
+            break;
+          case 'compact':
+            dispatch({ type: 'compacted', boardId: message.boardId, sessionId: message.resume, summary: 'Local Unreal PoC compact placeholder.', digest: 'PoC compact placeholder.' });
+            break;
+          default:
+            break;
+        }
+      }
+
+      window.acquireVsCodeApi = function () {
+        return {
+          postMessage: handleWebviewMessage,
+          getState: function () { return state; },
+          setState: function (nextState) { state = nextState; }
+        };
+      };
+    }());
+  </script>
+</head>
+<body>
+  <div id="root" data-canvas-id="unreal-poc"></div>
+  <script src="./webview.js"></script>
+</body>
+</html>

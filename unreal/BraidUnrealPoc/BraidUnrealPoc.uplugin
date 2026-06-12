@@ -1,0 +1,25 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "Braid Unreal PoC",
+  "Description": "Editor-only proof of concept that hosts the Braid React/React Flow webview inside Unreal Editor.",
+  "Category": "Editor",
+  "CreatedBy": "Braid",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "BraidUnrealPoc",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    {
+      "Name": "WebBrowserWidget",
+      "Enabled": true
+    }
+  ]
+}
