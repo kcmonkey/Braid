@@ -24,7 +24,7 @@ export interface ProviderConfig {
   appendSystemPrompt: string; // '' = omit
   allowedTools: string[];   // [] = omit
   disallowedTools: string[]; // [] = omit
-  mcpEnabled: boolean;      // false = strict empty MCP config for faster normal turns
+  mcpEnabled: boolean;      // true (default) = load .mcp.json / user MCP servers into each turn; false = strict empty MCP config (faster cold turns, no tools)
   env: Record<string, string>; // {} = omit
 }
 
@@ -50,6 +50,11 @@ export interface CanvasConfig {
   // already-open engine process instead of cold-spawning and replaying the session.
   warmSessionEnabled: boolean;
   warmSessionIdleCapMin: number;
+  // Upper bound on how many warm (settled-but-held-open) engine processes are kept alive at once. Each warm
+  // process also holds its MCP servers loaded — so with MCP on, this caps the resource footprint of warmth.
+  // When a new session goes warm-idle past this limit, the longest-idle one is evicted (disposed). Host-side
+  // policy knob (principle 14); the time-based `warmSessionIdleCapMin` and this count cap compose.
+  warmSessionMax: number;
 }
 
 /** Flat webview-facing config view = the active provider's ProviderConfig ∪ the CanvasConfig.
@@ -73,7 +78,10 @@ export const DEFAULT_PROVIDER_CONFIG: ProviderConfig = {
   appendSystemPrompt: '',
   allowedTools: [],
   disallowedTools: [],
-  mcpEnabled: false,
+  // MCP tools ON by default: the agent can call .mcp.json / user-config MCP servers in conversations. Each
+  // fresh-spawned turn reloads them (~2-3s startup), mitigated by warm-session reuse (warmSessionEnabled).
+  // Off = strict-empty MCP for the fastest cold turns at the cost of no MCP tools. (user feedback 2026-06-12)
+  mcpEnabled: true,
   env: {},
 };
 
@@ -86,6 +94,7 @@ export const DEFAULT_CANVAS_CONFIG: CanvasConfig = {
   asyncContinuationIdleCapMin: 30,
   warmSessionEnabled: true,
   warmSessionIdleCapMin: 10,
+  warmSessionMax: 6,
 };
 
 /** The legacy flat provider keys (pre-multi-provider `braid.model`, `braid.effort`, …) as read from config.

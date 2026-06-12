@@ -288,7 +288,7 @@ export class ClaudeAdapter implements Engine {
     try {
       const q = sdk.query({ prompt: input(), options });
       ctl.onLive({
-        push: (text, images, route) => { outstanding++; cancelIdle(); queue.push({ message: userMessage(text, images), route }); wakeUp(); },
+        push: (text, images, route) => { ctl.onWarmIdle?.(false); outstanding++; cancelIdle(); queue.push({ message: userMessage(text, images), route }); wakeUp(); },
         interrupt: async () => { interrupted = true; try { await q.interrupt(); } catch (e: any) { console.error('[Braid] interrupt failed:', e?.message ?? e); } },
         // End a waiting hold (UI Stop-waiting / delete): stop in-flight background tasks, then close the
         // input so the session ends and the board finalizes. Crons are session-scoped → closing drops them.
@@ -347,6 +347,10 @@ export class ClaudeAdapter implements Engine {
                   armIdleCap();
                 } else {
                   waiting = false;
+                  // Warm-idle: settled, no queued/outstanding work, no async pending. The host LRU-caps how
+                  // many such held-open processes stay alive (each keeps its MCP servers loaded). Only signal
+                  // for a genuine warm hold — the 1s FOLLOWUP_GRACE close isn't worth counting/evicting.
+                  if (req.warmSession) ctl.onWarmIdle?.(true);
                   idleTimer = setTimeout(() => { closed = true; wakeUp(); }, req.warmSession ? warmIdleMs : FOLLOWUP_GRACE_MS);
                 }
               }

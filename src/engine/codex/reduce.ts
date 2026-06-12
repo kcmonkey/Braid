@@ -51,6 +51,40 @@ function cap(v: unknown): string {
   return s.length > TOOL_RESULT_CAP ? s.slice(0, TOOL_RESULT_CAP) + '\n…(truncated)' : s;
 }
 
+function webSearchInput(item: any): Record<string, unknown> {
+  const action = item?.action;
+  const type = typeof action?.type === 'string' ? action.type : undefined;
+  const topQuery = typeof item?.query === 'string' && item.query.trim() ? item.query : '';
+  if (type === 'search') {
+    const query = typeof action.query === 'string' && action.query.trim() ? action.query : topQuery;
+    const queries = Array.isArray(action.queries) ? action.queries.filter((q: unknown): q is string => typeof q === 'string' && q.trim().length > 0) : [];
+    if (query) return { query, action: 'search' };
+    if (queries.length) return { query: queries.join(' | '), queries, action: 'search' };
+    return { action: 'search' };
+  }
+  if (type === 'openPage' || type === 'open_page') {
+    const url = typeof action.url === 'string' && action.url.trim() ? action.url : topQuery;
+    return url ? { url, action: 'openPage' } : { action: 'openPage' };
+  }
+  if (type === 'findInPage' || type === 'find_in_page') {
+    const pattern = typeof action.pattern === 'string' && action.pattern.trim() ? action.pattern : '';
+    const url = typeof action.url === 'string' && action.url.trim() ? action.url : topQuery;
+    if (pattern) return { pattern, url, action: 'findInPage' };
+    if (url) return { url, action: 'findInPage' };
+    return { action: 'findInPage' };
+  }
+  if (topQuery) return { query: topQuery };
+  return type ? { action: type } : {};
+}
+
+function webSearchResult(item: any): string {
+  const i = webSearchInput(item);
+  if (typeof i.query === 'string' && i.query) return `Completed search: ${i.query}`;
+  if (typeof i.pattern === 'string' && i.pattern) return `Completed page search: ${i.pattern}${typeof i.url === 'string' && i.url ? ` in ${i.url}` : ''}`;
+  if (typeof i.url === 'string' && i.url) return `Opened page: ${i.url}`;
+  return 'Completed web search.';
+}
+
 /** Map a Codex `ThreadItem` (item/started or item/completed) to a tool name + input for the webview cards. */
 function toolNameInput(item: any): { name: string; input: Record<string, unknown> } | null {
   switch (item?.type) {
@@ -64,7 +98,7 @@ function toolNameInput(item: any): { name: string; input: Record<string, unknown
     case 'mcpToolCall':
       return { name: `mcp__${item.server}__${item.tool}`, input: (item.arguments as Record<string, unknown>) ?? {} };
     case 'webSearch':
-      return { name: 'WebSearch', input: { query: item.query ?? '' } };
+      return { name: 'WebSearch', input: webSearchInput(item) };
     case 'plan':
       return { name: 'Plan', input: { text: item.text ?? '' } };
     default:
@@ -83,6 +117,8 @@ function toolResultOf(item: any): { content: string; isError: boolean } {
     }
     case 'mcpToolCall':
       return { content: cap(item.error ?? item.result ?? ''), isError: !!item.error };
+    case 'webSearch':
+      return { content: cap(webSearchResult(item)), isError: item.status === 'failed' };
     default:
       return { content: '', isError: item?.status === 'failed' };
   }
@@ -140,7 +176,7 @@ export function reduceCodexNotification(s: CodexParseState, method: string, para
           s.thinkOpen = -1; s.thinkStart = undefined;
           out.push({ t: 'thinking', turnIndex: s.turnIndex, thinks: [...s.thinks] });
         }
-      } else if (item?.type === 'commandExecution' || item?.type === 'fileChange' || item?.type === 'mcpToolCall') {
+      } else if (item?.type === 'commandExecution' || item?.type === 'fileChange' || item?.type === 'mcpToolCall' || item?.type === 'webSearch') {
         const r = toolResultOf(item);
         out.push({ t: 'toolResult', turnIndex: s.turnIndex, ev: { toolUseId: item.id, content: r.content, isError: r.isError } });
       }

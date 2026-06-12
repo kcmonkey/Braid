@@ -117,6 +117,10 @@ function toolSummary(step: ToolStep): string {
     case 'Read': case 'Edit': case 'Write': case 'NotebookEdit': return str('file_path');
     case 'Bash': return str('command');
     case 'Grep': case 'Glob': return str('pattern');
+    case 'WebSearch': {
+      const queries = Array.isArray(i.queries) ? i.queries.filter((q): q is string => typeof q === 'string' && q.trim().length > 0) : [];
+      return str('query') || (queries.length ? queries.join(' | ') : '') || str('url') || str('pattern') || str('action');
+    }
     default: {
       const k = Object.keys(i)[0];
       return k ? `${k}: ${String(i[k]).slice(0, 60)}` : '';
@@ -2140,6 +2144,13 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
           <input
             type="number" min={1} max={120} value={config.warmSessionIdleCapMin} disabled={!config.warmSessionEnabled}
             onChange={(e) => onChange({ warmSessionIdleCapMin: Math.max(1, Math.min(120, Math.floor(Number(e.target.value) || 10))) })}
+          />
+        </label>
+        <label className={`settings__row ${config.warmSessionEnabled ? '' : 'settings__gated'}`} title="Cap on how many warm processes stay alive at once. Each also keeps its MCP servers loaded; the longest-idle one is closed past this limit.">
+          <span className="settings__lbl">Max warm sessions</span>
+          <input
+            type="number" min={1} max={64} value={config.warmSessionMax} disabled={!config.warmSessionEnabled}
+            onChange={(e) => onChange({ warmSessionMax: Math.max(1, Math.min(64, Math.floor(Number(e.target.value) || 6))) })}
           />
         </label>
       </div>

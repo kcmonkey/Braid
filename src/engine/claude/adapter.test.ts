@@ -357,6 +357,56 @@ describe('ClaudeAdapter.runTurn — streaming + settle', () => {
     expect(childErr).toBeTruthy();
     expect(childErr.ti).toBe(0);
   });
+
+  it('signals onWarmIdle(true) when a warm turn settles and onWarmIdle(false) when reused (warm-session cap)', async () => {
+    const out: any[] = [];
+    let outWake: (() => void) | null = null;
+    let outDone = false;
+    let promptIterable: AsyncIterable<any> | null = null;
+    const emit = (m: any) => { out.push(m); if (outWake) { const w = outWake; outWake = null; w(); } };
+    const finish = () => { outDone = true; if (outWake) { const w = outWake; outWake = null; w(); } };
+    const q: any = {
+      async *[Symbol.asyncIterator]() {
+        (async () => { try { for await (const _ of promptIterable as AsyncIterable<any>) { /* drain */ } } catch { /* closed */ } })();
+        while (true) {
+          while (out.length) yield out.shift();
+          if (outDone) return;
+          await new Promise<void>((r) => { outWake = r; });
+        }
+      },
+      interrupt: async () => {},
+    };
+    const sdk = { query: (args: any) => { promptIterable = args.prompt; return q; } };
+    const adapter = new ClaudeAdapter({ loadSdk: async () => sdk, readProviderConfig: () => cfg });
+    const { sink } = recordingSink();
+    const idleSignals: boolean[] = [];
+    let handle: TurnHandle | undefined;
+    const p = adapter.runTurn(req({ kind: 'fresh' }, { warmSession: true, warmIdleMs: 5000 }), sink, noopPre, {
+      abort: new AbortController(), onLive: (h) => { handle = h; }, onWarmIdle: (idle) => idleSignals.push(idle),
+    });
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+
+    await tick();
+    emit(init);
+    emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'parent' }] } });
+    emit({ type: 'result', is_error: false, session_id: 's1' });
+    await tick();
+    expect(idleSignals).toEqual([true]); // settled with no queued work → entered warm-idle
+
+    handle!.push('child', undefined, { boardId: 'b2', turnIndex: 0 });
+    await tick();
+    expect(idleSignals).toEqual([true, false]); // reuse → left warm-idle
+
+    emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'child' }] } });
+    emit({ type: 'result', is_error: false, session_id: 's1' });
+    await tick();
+    expect(idleSignals).toEqual([true, false, true]); // child settled → warm-idle again
+
+    await handle!.dispose();
+    finish();
+    await p;
+  });
 });
 
 describe('ClaudeAdapter.runTurn — loadSdk failure', () => {

@@ -71,6 +71,30 @@ describe('reduceCodexNotification — tools', () => {
     const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
     expect(tr.ev.isError).toBe(false);
   });
+
+  it('webSearch search action uses action query and emits a completion result', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'webSearch', id: 'ws1', query: '', action: { type: 'search', query: 'codex sandbox docs', queries: null } } }],
+      ['item/completed', { item: { type: 'webSearch', id: 'ws1', query: '', action: { type: 'search', query: 'codex sandbox docs', queries: null } } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev).toMatchObject({ id: 'ws1', name: 'WebSearch', input: { query: 'codex sandbox docs', action: 'search' } });
+    const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
+    expect(tr.ev).toEqual({ toolUseId: 'ws1', content: 'Completed search: codex sandbox docs', isError: false });
+  });
+
+  it('webSearch open-page action does not render as an empty query and settles the card', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'webSearch', id: 'ws2', query: '', action: { type: 'openPage', url: 'https://developers.openai.com/codex/concepts/sandboxing' } } }],
+      ['item/completed', { item: { type: 'webSearch', id: 'ws2', query: '', action: { type: 'openPage', url: 'https://developers.openai.com/codex/concepts/sandboxing' } } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev.input).toEqual({ url: 'https://developers.openai.com/codex/concepts/sandboxing', action: 'openPage' });
+    const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
+    expect(tr.ev).toEqual({ toolUseId: 'ws2', content: 'Opened page: https://developers.openai.com/codex/concepts/sandboxing', isError: false });
+  });
 });
 
 describe('reduceCodexNotification — reasoning marks', () => {

@@ -154,6 +154,11 @@ export interface TurnHandle {
 export interface TurnControl {
   abort: AbortController;
   onLive(handle: TurnHandle): void;
+  // Warm-session lifecycle: the engine calls this when its held-open session ENTERS (idle=true) or LEAVES
+  // (idle=false) the warm-idle state — settled, no in-flight turn, no pending async work, reusable for a
+  // linear continuation. The host uses it to LRU-cap how many warm processes stay alive (each also holds its
+  // MCP servers loaded). Optional: engines without warm reuse never call it. (warm-session cap)
+  onWarmIdle?(idle: boolean): void;
 }
 
 /** MCP control surface (M8). The host owns lifecycle (lazy create / dispose / poll); the engine just

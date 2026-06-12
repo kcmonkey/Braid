@@ -37,6 +37,26 @@ export function approvalAndSandbox(permissionMode: string): { approvalPolicy: st
   return { approvalPolicy: 'on-request', sandbox: 'workspace-write' };
 }
 
+function sandboxPolicy(sandbox: string, cwd: string): Record<string, unknown> {
+  if (sandbox === 'danger-full-access') return { type: 'dangerFullAccess' };
+  if (sandbox === 'read-only') return { type: 'readOnly', networkAccess: false };
+  return {
+    type: 'workspaceWrite',
+    writableRoots: [cwd],
+    networkAccess: false,
+    excludeTmpdirEnvVar: false,
+    excludeSlashTmp: false,
+  };
+}
+
+/** Codex turn/start takes a concrete SandboxPolicy object instead of the thread-level SandboxMode enum.
+ * Re-read provider config before each turn so permission changes made during a running burst apply to the
+ * next queued turn, matching Codex's "this turn and subsequent turns" semantics. */
+export function turnPermissionOverrides(permissionMode: string, cwd: string): { approvalPolicy: string; sandboxPolicy: Record<string, unknown> } {
+  const { approvalPolicy, sandbox } = approvalAndSandbox(permissionMode);
+  return { approvalPolicy, sandboxPolicy: sandboxPolicy(sandbox, cwd) };
+}
+
 /** Codex ReasoningEffort set — map our effort, dropping 'max' (Codex tops out at xhigh) and unknowns. */
 function codexEffort(effort: string): string | undefined {
   const set = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
@@ -135,7 +155,7 @@ export class CodexAdapter implements Engine {
 
   // ---- main turn ----
   async runTurn(req: TurnRequest, sink: EventSink, pre: PreToolInterceptor, ctl: TurnControl): Promise<void> {
-    const cfg = this.deps.readProviderConfig();
+    const initialCfg = this.deps.readProviderConfig();
     const state: CodexParseState = initCodexParseState(req.turnIndex ?? 0);
     let settled = false;
     let interrupted = false;
@@ -197,9 +217,9 @@ export class CodexAdapter implements Engine {
 
       // Attach → thread. Cross-engine guard: a non-codex SessionRef is meaningless here → start fresh.
       const attach: Attach = req.attach.kind !== 'fresh' && req.attach.session.engine !== this.id ? { kind: 'fresh' } : req.attach;
-      const { approvalPolicy, sandbox } = approvalAndSandbox(cfg.permissionMode);
+      const { approvalPolicy, sandbox } = approvalAndSandbox(initialCfg.permissionMode);
       const startOpts: Record<string, unknown> = { cwd: req.cwd, approvalPolicy, sandbox };
-      if (cfg.model) startOpts.model = cfg.model;
+      if (initialCfg.model) startOpts.model = initialCfg.model;
       let thread: any;
       if (attach.kind === 'resume') {
         thread = (await rpc.request('thread/resume', { threadId: attach.session.raw, ...startOpts }))?.thread;
@@ -212,7 +232,7 @@ export class CodexAdapter implements Engine {
       if (!threadId) { sink.error(req.boardId, req.turnIndex, 'Codex: thread/start returned no thread id'); return; }
       state.threadId = threadId;
       sink.session(req.boardId, threadId);
-      if (cfg.model) sink.model(cfg.model);
+      if (initialCfg.model) sink.model(initialCfg.model);
 
       // Register the live handle (push/interrupt/stopWaiting) the instant the thread is ready.
       ctl.onLive({
@@ -224,13 +244,15 @@ export class CodexAdapter implements Engine {
 
       // Turn loop: run the first turn, then drain any queued follow-ups as their own rounds. Each turn's
       // input carries the prompt + any pasted/dropped images (written to temp files as Codex localImages).
-      const effort = codexEffort(cfg.effort);
       let built = buildUserInput(req.prompt, req.images);
       allTemps.push(...built.temps);
       for (;;) {
         settled = false;
-        const turnParams: Record<string, unknown> = { threadId, input: built.input };
+        const turnCfg = this.deps.readProviderConfig();
+        const turnParams: Record<string, unknown> = { threadId, input: built.input, ...turnPermissionOverrides(turnCfg.permissionMode, req.cwd) };
+        const effort = codexEffort(turnCfg.effort);
         if (effort) turnParams.effort = effort;
+        if (turnCfg.model) turnParams.model = turnCfg.model;
         const turnEnd = new Promise<void>((res) => { resolveTurnEnd = res; });
         const started = await rpc.request('turn/start', turnParams).catch((e: any) => { sink.error(req.boardId, state.turnIndex, `Codex turn failed: ${e?.message ?? e}`); settle(true); return null; });
         if (!started) break;

@@ -102,6 +102,35 @@ const liveRunsByHandle = new Map<TurnHandle, LiveRun>();
 const liveRunsBySession = new Map<string, LiveRun>();
 const liveSessionKey = (provider: EngineId, sessionId: string) => `${provider}::${sessionId}`;
 
+// Warm-session cap: the set of runs currently held open in the warm-IDLE state (settled, reusable for a
+// linear continuation — NOT actively streaming, NOT async-waiting). Insertion order = the order they went
+// idle, so the FIRST entry is the longest-idle = the LRU eviction target. Bounded by `warmSessionMax` so a
+// burst of boards (each keeping its MCP servers loaded while warm) can't pile up unbounded processes. The
+// adapter's per-session `warmSessionIdleCapMin` timer still closes idle sessions independently; this is the
+// count cap that composes with it. (user feedback 2026-06-12)
+const warmIdleRuns = new Set<LiveRun>();
+function warmSessionMax(): number {
+  return Math.max(1, readSettings().canvas.warmSessionMax || DEFAULT_CANVAS_CONFIG.warmSessionMax);
+}
+function enforceWarmCap() {
+  const max = warmSessionMax();
+  while (warmIdleRuns.size > max) {
+    const oldest = warmIdleRuns.values().next().value as LiveRun | undefined; // longest-idle (insertion order)
+    if (!oldest) break;
+    warmIdleRuns.delete(oldest);
+    retireLiveRun(oldest); // dispose the held process; its board already settled to `done`, so nothing truncates
+  }
+}
+// The adapter reports a held-open session entering (idle=true) / leaving (idle=false) warm-idle. Track it for
+// the LRU cap; re-add on idle moves the run to the most-recent end so eviction always takes the longest-idle.
+function setRunWarmIdle(run: LiveRun, idle: boolean) {
+  warmIdleRuns.delete(run);
+  if (idle && !run.retired && !run.abort.signal.aborted) {
+    warmIdleRuns.add(run);
+    enforceWarmCap();
+  }
+}
+
 function registerLiveKey(run: LiveRun, key: string) {
   run.keys.add(key);
   aborters.set(key, run.abort);
@@ -121,6 +150,7 @@ function bindLiveSession(run: LiveRun, sessionId: string) {
 }
 
 function cleanupLiveRun(run: LiveRun) {
+  warmIdleRuns.delete(run);
   for (const key of run.keys) {
     if (!run.handle || liveQueries.get(key) === run.handle) liveQueries.delete(key);
     if (aborters.get(key) === run.abort) aborters.delete(key);
@@ -135,6 +165,7 @@ function cleanupLiveRun(run: LiveRun) {
 
 function retireLiveRun(run: LiveRun) {
   run.retired = true;
+  warmIdleRuns.delete(run);
   for (const key of run.sessions) {
     if (liveRunsBySession.get(key) === run) liveRunsBySession.delete(key);
   }
@@ -1034,7 +1065,7 @@ function restoreRolledBackFiles(canvasId: string, boardIds: string[]) {
 }
 
 // The provider-NEUTRAL canvas keys (kept as flat `braid.*` settings, outside the provider hierarchy).
-const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin', 'warmSessionEnabled', 'warmSessionIdleCapMin'];
+const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin', 'warmSessionEnabled', 'warmSessionIdleCapMin', 'warmSessionMax'];
 
 /** Read the legacy flat `braid.*` provider keys (pre-multi-provider). Fallbacks reproduce the OLD package.json
  * per-key defaults (effort 'xhigh', thinking 'adaptive', …) so an unconfigured install migrates to identical
@@ -1079,6 +1110,7 @@ function readSettings(canvasId?: string): BraidSettings {
     asyncContinuationIdleCapMin: c.get<number>('asyncContinuationIdleCapMin', DEFAULT_CANVAS_CONFIG.asyncContinuationIdleCapMin),
     warmSessionEnabled: c.get<boolean>('warmSessionEnabled', DEFAULT_CANVAS_CONFIG.warmSessionEnabled),
     warmSessionIdleCapMin: c.get<number>('warmSessionIdleCapMin', DEFAULT_CANVAS_CONFIG.warmSessionIdleCapMin),
+    warmSessionMax: c.get<number>('warmSessionMax', DEFAULT_CANVAS_CONFIG.warmSessionMax),
   };
   return {
     activeProvider,
@@ -1613,7 +1645,13 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
     warmIdleMs: Math.max(1, canvas.warmSessionIdleCapMin) * 60_000,
   };
   try {
-    await engineHost.get(runProvider).runTurn(req, sink, pre, { abort, onLive: (h: TurnHandle) => bindLiveHandle(run, h) });
+    await engineHost.get(runProvider).runTurn(req, sink, pre, {
+      abort,
+      onLive: (h: TurnHandle) => bindLiveHandle(run, h),
+      // Warm-session count cap: the adapter reports this run entering/leaving warm-idle; the host LRU-evicts
+      // the longest-idle held process once the live count exceeds warmSessionMax. (warm-session cap)
+      onWarmIdle: (idle: boolean) => setRunWarmIdle(run, idle),
+    });
   } finally {
     clearWaitingForRun(run);
     cleanupLiveRun(run);

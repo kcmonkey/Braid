@@ -100,6 +100,13 @@
           "minimum": 1,
           "maximum": 120,
           "markdownDescription": "Warm session idle window in minutes. While enabled, a settled session can be reused by a continuation before this timeout closes it. Default `10`."
+        },
+        "braid.warmSessionMax": {
+          "type": "number",
+          "default": 6,
+          "minimum": 1,
+          "maximum": 64,
+          "markdownDescription": "Maximum number of warm (settled-but-held-open) engine processes kept alive at once. Each warm process also keeps its MCP servers loaded, so this caps the resource footprint of warmth. When a new session goes idle past this limit, the longest-idle one is closed. Default `6`."
         }
       }
     },
