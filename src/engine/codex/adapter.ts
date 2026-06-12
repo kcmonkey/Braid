@@ -28,10 +28,11 @@ export interface CodexAdapterDeps {
 
 const CLIENT_INFO = { name: 'braid', title: 'Braid', version: '0.1' };
 
-/** Map our (Claude-flavored) permissionMode → Codex {approvalPolicy, sandbox}. bypass = no prompts; anything
- * else routes risky ops through the native approval UI (on-request) while letting workspace writes through. */
-function approvalAndSandbox(permissionMode: string): { approvalPolicy: string; sandbox: string } {
-  if (permissionMode === 'bypassPermissions') return { approvalPolicy: 'never', sandbox: 'workspace-write' };
+/** Map our (Claude-flavored) permissionMode → Codex {approvalPolicy, sandbox}. Codex app-server exposes the
+ * same effect as `--dangerously-bypass-approvals-and-sandbox` per thread via approvalPolicy=never +
+ * sandbox=danger-full-access; keep that Codex-specific detail confined to the adapter. */
+export function approvalAndSandbox(permissionMode: string): { approvalPolicy: string; sandbox: string } {
+  if (permissionMode === 'bypassPermissions') return { approvalPolicy: 'never', sandbox: 'danger-full-access' };
   if (permissionMode === 'plan') return { approvalPolicy: 'on-request', sandbox: 'read-only' };
   return { approvalPolicy: 'on-request', sandbox: 'workspace-write' };
 }

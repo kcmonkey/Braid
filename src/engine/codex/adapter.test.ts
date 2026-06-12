@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CodexAdapter } from './adapter';
+import { CodexAdapter, approvalAndSandbox } from './adapter';
 import { DEFAULT_PROVIDER_CONFIG } from '../../sdkOptions';
 
 // Fake transport: records requests; thread/fork returns the given turns, thread/rollback drops `numTurns`
@@ -19,6 +19,29 @@ function fakeRpc(forkTurns: Array<{ id: string }>) {
 
 const adapter = () => new CodexAdapter({ resolveBinary: () => undefined, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
 const forkAt = (a: CodexAdapter, ...args: any[]) => (a as any).forkAt(...args);
+
+describe('approvalAndSandbox', () => {
+  it('maps bypassPermissions to Codex full access, matching the dangerous bypass CLI mode', () => {
+    expect(approvalAndSandbox('bypassPermissions')).toEqual({
+      approvalPolicy: 'never',
+      sandbox: 'danger-full-access',
+    });
+  });
+
+  it('keeps normal turns in workspace-write with approval prompts', () => {
+    expect(approvalAndSandbox('default')).toEqual({
+      approvalPolicy: 'on-request',
+      sandbox: 'workspace-write',
+    });
+  });
+
+  it('maps plan mode to read-only with approval prompts', () => {
+    expect(approvalAndSandbox('plan')).toEqual({
+      approvalPolicy: 'on-request',
+      sandbox: 'read-only',
+    });
+  });
+});
 
 describe('CodexAdapter.forkAt — mid-point fork (fork + rollback)', () => {
   it('rolls back trailing turns so a branch keeps only history up to the marker (no sibling bleed)', async () => {

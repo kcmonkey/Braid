@@ -863,24 +863,56 @@ function readEditorContext(): EditorContext | null {
 }
 
 /**
- * Open a file referenced by a tool card (Read/Edit/Write/NotebookEdit) in a VS Code editor.
- * Relative file_path values resolve against the workspace root (the cwd used to spawn queries);
+ * Open a local path referenced by a tool card or rendered Markdown link.
+ * Relative values resolve against the workspace root (the cwd used to spawn queries);
  * absolute paths open directly. Failure (e.g. the file no longer exists) → a non-blocking warning.
  */
-async function openFile(filePath: string, line?: number) {
-  if (!filePath) return;
+function splitOpenPathLine(rawPath: string, explicitLine?: number): { filePath: string; line?: number } {
+  if (/^file:/i.test(rawPath)) {
+    try {
+      const uri = vscode.Uri.parse(rawPath);
+      const fragmentLine = uri.fragment.match(/^(?:L|line-)?(\d+)$/i)?.[1];
+      return { filePath: uri.fsPath, line: explicitLine ?? (fragmentLine ? Number(fragmentLine) : undefined) };
+    } catch {
+      // Fall through to plain path parsing below.
+    }
+  }
+
+  const hash = rawPath.match(/^(.*)#(?:L|line-)?(\d+)$/i);
+  if (hash) return { filePath: hash[1], line: explicitLine ?? Number(hash[2]) };
+
+  const suffix = rawPath.match(/^(.*):(\d+)(?::\d+)?$/);
+  if (suffix && suffix[1] && !/^[a-zA-Z]$/.test(suffix[1])) {
+    return { filePath: suffix[1], line: explicitLine ?? Number(suffix[2]) };
+  }
+
+  return { filePath: rawPath, line: explicitLine };
+}
+
+async function openFile(rawPath: string, explicitLine?: number) {
+  if (!rawPath) return;
+  const parsed = splitOpenPathLine(rawPath.trim(), explicitLine);
+  if (!parsed.filePath) return;
   const root = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  const abs = path.isAbsolute(filePath) ? filePath : root ? path.join(root, filePath) : filePath;
+  const abs = path.isAbsolute(parsed.filePath) ? parsed.filePath : root ? path.join(root, parsed.filePath) : parsed.filePath;
   try {
-    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(abs));
+    const uri = vscode.Uri.file(abs);
+    const stat = fs.statSync(abs);
+    if (stat.isDirectory()) {
+      try { await vscode.commands.executeCommand('revealFileInOS', uri); }
+      catch { await vscode.env.openExternal(uri); }
+      return;
+    }
+
+    const doc = await vscode.workspace.openTextDocument(uri);
     const opts: vscode.TextDocumentShowOptions = { preview: true };
-    if (line && line > 0) {
-      const pos = new vscode.Position(line - 1, 0);
+    if (parsed.line && parsed.line > 0) {
+      const pos = new vscode.Position(parsed.line - 1, 0);
       opts.selection = new vscode.Range(pos, pos);
     }
     await vscode.window.showTextDocument(doc, opts);
   } catch {
-    vscode.window.showWarningMessage(`Braid: could not open file ${filePath}`);
+    vscode.window.showWarningMessage(`Braid: could not open path ${rawPath}`);
   }
 }
 
