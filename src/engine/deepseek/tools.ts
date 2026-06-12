@@ -123,6 +123,34 @@ const BASE_TOOLS: DeepSeekToolDef[] = [
   {
     type: 'function',
     function: {
+      name: 'WebSearch',
+      description: 'Search the public web and return the top results (title, URL, snippet). Use this for current events, library versions, documentation, or anything beyond your training cutoff. Follow up with WebFetch to read a result in full.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'The search query.' },
+        },
+        required: ['query'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'WebFetch',
+      description: 'Fetch a web page (or raw text resource) by its http(s) URL and return its readable text content. Use after WebSearch to read a specific result, or to read a known documentation URL.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'Absolute http(s) URL to fetch.' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'AskUserQuestion',
       description: 'Ask the user one or more short questions when blocked. The host renders this interactively.',
       parameters: {
@@ -207,7 +235,12 @@ export function shouldAskBeforeDeepSeekTool(cfg: ProviderConfig, name: string): 
   return true;
 }
 
-export async function executeDeepSeekTool(name: string, input: Record<string, unknown>, cwd: string, signal: AbortSignal): Promise<ToolRunResult> {
+export async function executeDeepSeekTool(
+  name: string, input: Record<string, unknown>, cwd: string, signal: AbortSignal,
+  // Injectable for tests; production uses the global fetch (Node 18+ extension host). The web tools hit
+  // arbitrary URLs / the search backend, NOT the DeepSeek API, so they don't go through the adapter's fetch.
+  fetchImpl: typeof fetch = fetch,
+): Promise<ToolRunResult> {
   try {
     switch (name) {
       case 'Read': return readTool(input, cwd);
@@ -216,6 +249,8 @@ export async function executeDeepSeekTool(name: string, input: Record<string, un
       case 'Bash': return bashTool(input, cwd, signal);
       case 'Glob': return globTool(input, cwd);
       case 'Grep': return grepTool(input, cwd);
+      case 'WebSearch': return await webSearchTool(input, signal, fetchImpl);
+      case 'WebFetch': return await webFetchTool(input, signal, fetchImpl);
       case 'TodoWrite': return { content: 'Todo list recorded.', isError: false };
       case 'AskUserQuestion': return { content: 'No answer was provided.', isError: true };
       default: return { content: `Unknown tool: ${name}`, isError: true };
@@ -385,4 +420,153 @@ function globRe(pattern: string): RegExp {
     else out += ch.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
   }
   return new RegExp(out + '$');
+}
+
+// ---- Web tools (WebSearch / WebFetch) ----
+// DeepSeek's chat API has no built-in web search (it only does tool calls), so Braid provides the search +
+// fetch as LOCAL function tools it executes itself — the same way Read/Bash are local. No API key is needed:
+// search goes through DuckDuckGo's keyless HTML endpoint, fetch is a plain HTTP GET. Network egress is read-
+// only-ish (like Read/Grep), so these are NOT in the dangerous set and never prompt. (DeepSeek web-access gap)
+const WEB_TIMEOUT_MS = 20_000;
+const WEB_FETCH_BYTE_CAP = 512 * 1024; // raw body guard before text extraction
+const WEB_SEARCH_RESULTS = 8;
+const DDG_HTML_URL = 'https://html.duckduckgo.com/html/';
+// A desktop UA so the search/fetch endpoints return full HTML instead of a minimal/blocked page.
+const WEB_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+/** Fetch with a hard timeout, also canceled if the turn's `signal` aborts. Rejects (AbortError) on either. */
+async function fetchWithTimeout(fetchImpl: typeof fetch, url: string, init: RequestInit, signal: AbortSignal): Promise<Response> {
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort();
+  if (signal.aborted) ctrl.abort();
+  else signal.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => ctrl.abort(), WEB_TIMEOUT_MS);
+  try {
+    return await fetchImpl(url, { ...init, signal: ctrl.signal });
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener('abort', onAbort);
+  }
+}
+
+function webErr(e: any, signal: AbortSignal): string {
+  if (signal.aborted) return 'Request canceled.';
+  if (e?.name === 'AbortError') return `Request timed out after ${WEB_TIMEOUT_MS / 1000}s.`;
+  return `Request failed: ${String(e?.message ?? e)}`;
+}
+
+async function webSearchTool(input: Record<string, unknown>, signal: AbortSignal, fetchImpl: typeof fetch): Promise<ToolRunResult> {
+  const query = stringArg(input, 'query').trim();
+  if (!query) return { content: 'query is required', isError: true };
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(fetchImpl, DDG_HTML_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'User-Agent': WEB_UA,
+        'Accept': 'text/html',
+      },
+      body: `q=${encodeURIComponent(query)}`,
+    }, signal);
+  } catch (e: any) {
+    return { content: webErr(e, signal), isError: true };
+  }
+  if (!res.ok) return { content: `Web search failed: HTTP ${res.status}`, isError: true };
+  const html = await res.text();
+  const results = parseSearchResults(html).slice(0, WEB_SEARCH_RESULTS);
+  if (!results.length) return { content: `No web results found for "${query}".`, isError: false };
+  const body = results
+    .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ''}`)
+    .join('\n\n');
+  return { content: cap(`Web results for "${query}":\n\n${body}`), isError: false };
+}
+
+async function webFetchTool(input: Record<string, unknown>, signal: AbortSignal, fetchImpl: typeof fetch): Promise<ToolRunResult> {
+  const url = stringArg(input, 'url').trim();
+  if (!/^https?:\/\//i.test(url)) return { content: 'A http(s) url is required (got: ' + (url || '(empty)') + ')', isError: true };
+  let res: Response;
+  try {
+    res = await fetchWithTimeout(fetchImpl, url, {
+      headers: { 'User-Agent': WEB_UA, 'Accept': 'text/html,application/xhtml+xml,text/plain,*/*' },
+      redirect: 'follow',
+    }, signal);
+  } catch (e: any) {
+    return { content: webErr(e, signal), isError: true };
+  }
+  if (!res.ok) return { content: `Fetch failed: HTTP ${res.status} for ${url}`, isError: true };
+  let raw = await res.text();
+  if (raw.length > WEB_FETCH_BYTE_CAP) raw = raw.slice(0, WEB_FETCH_BYTE_CAP);
+  const ctype = (res.headers.get('content-type') || '').toLowerCase();
+  const looksHtml = ctype.includes('html') || /^\s*<(?:!doctype|html|head|body)/i.test(raw);
+  const text = looksHtml ? htmlToText(raw) : raw.trim();
+  return { content: cap(`URL: ${url}\n\n${text || '(no readable text)'}`), isError: false };
+}
+
+interface SearchHit { title: string; url: string; snippet: string }
+
+/** Parse DuckDuckGo's keyless HTML results page into title/url/snippet hits. Best-effort regex (no DOM in
+ * node); a layout change degrades to "no results" rather than throwing. */
+function parseSearchResults(html: string): SearchHit[] {
+  const hits: SearchHit[] = [];
+  // Match each result anchor (class result__a), tolerant of attribute order; capture its attrs + inner text.
+  const anchorRe = /<a\b([^>]*\bclass="[^"]*result__a[^"]*"[^>]*)>([\s\S]*?)<\/a>/gi;
+  const snippetRe = /<a\b[^>]*\bclass="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = anchorRe.exec(html))) {
+    const hrefM = /href="([^"]+)"/i.exec(m[1]);
+    const url = hrefM ? decodeSearchHref(hrefM[1]) : '';
+    const title = stripTags(m[2]);
+    if (!url || !title) continue;
+    snippetRe.lastIndex = anchorRe.lastIndex; // the snippet for this result follows its title anchor
+    const sm = snippetRe.exec(html);
+    hits.push({ title, url, snippet: sm ? stripTags(sm[1]) : '' });
+  }
+  return hits;
+}
+
+/** DuckDuckGo wraps result links in a redirector: `//duckduckgo.com/l/?uddg=<encoded>&rut=...`. Unwrap to
+ * the real target; pass through links that are already absolute. */
+function decodeSearchHref(href: string): string {
+  let h = href.trim();
+  if (h.startsWith('//')) h = 'https:' + h;
+  const m = /[?&]uddg=([^&]+)/.exec(h);
+  if (m) { try { return decodeURIComponent(m[1]); } catch { return ''; } }
+  return /^https?:\/\//i.test(h) ? h : '';
+}
+
+function decodeEntities(s: string): string {
+  return s
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#0*39;/g, "'").replace(/&#x0*27;/gi, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, d) => safeCodePoint(parseInt(d, 10)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => safeCodePoint(parseInt(h, 16)));
+}
+
+function safeCodePoint(code: number): string {
+  try { return Number.isFinite(code) ? String.fromCodePoint(code) : ''; } catch { return ''; }
+}
+
+function stripTags(s: string): string {
+  return decodeEntities(s.replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim();
+}
+
+/** Reduce an HTML document to readable plain text: drop scripts/styles/comments, turn block-closing tags
+ * into newlines, strip remaining tags, decode entities, collapse whitespace, drop blank lines. */
+function htmlToText(html: string): string {
+  const withBreaks = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ')
+    .replace(/<!--[\s\S]*?-->/g, ' ')
+    .replace(/<(?:br|\/p|\/div|\/li|\/h[1-6]|\/tr|\/section|\/article)\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ');
+  return decodeEntities(withBreaks)
+    .replace(/[ \t\f\v]+/g, ' ')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n')
+    .trim();
 }

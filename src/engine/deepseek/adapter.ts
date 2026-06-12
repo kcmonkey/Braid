@@ -435,7 +435,7 @@ export class DeepSeekAdapter implements Engine {
   private systemMessages(cwd: string, cfg: ProviderConfig): DeepSeekMessage[] {
     const toolNote = cfg.permissionMode === 'plan'
       ? 'Plan mode is active. Do not call tools; propose the plan in prose.'
-      : 'You may call tools to inspect or change files. Prefer Read/Grep/Glob before Edit/Write. Paths are resolved under the workspace.';
+      : 'You may call tools to inspect or change files. Prefer Read/Grep/Glob before Edit/Write. Paths are resolved under the workspace. Use WebSearch then WebFetch to look up anything beyond your training data (current events, library versions, documentation) instead of guessing.';
     const base = `You are Braid's DeepSeek coding agent. Workspace: ${cwd}\n${toolNote}`;
     const extra = cfg.appendSystemPrompt?.trim();
     return [{ role: 'system', content: extra ? `${base}\n\n${extra}` : base }];
