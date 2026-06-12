@@ -754,6 +754,57 @@ export function continuationMode(
 }
 
 /**
+ * Where a continuation child forking off `parent` should attach when it runs on `turnEngine` — the engine-aware
+ * fork base (M-MultiEngine AD4 / Node-Delete Phase 1). Pure (was a component callback; extracted so the
+ * cross-engine re-home in restampActiveProvider can reuse it and so it's unit-testable).
+ *
+ * - Clean, SAME-ENGINE parent → native-fork it directly (the common case; no replay). A compacted boundary's
+ *   session is its parentSessionId (forking it resumes the compacted context losslessly).
+ * - Otherwise (lineage-dirty parent OR a foreign-engine parent — a cross-engine continuation) walk up the fork
+ *   chain to the nearest CLEAN, SAME-ENGINE ancestor with a session = the native anchor, replaying the skipped
+ *   (dirty / foreign) nodes as a text seed (`mergeContext`). No anchor → fresh session + full-text seed. A
+ *   cross-engine seed carries tool steps (AD5); a same-engine Node-Delete rebuild stays Q/A-only (the no-op).
+ *   A compact node STOPS the walk (its summary stands in for everything above; buildRebuildSeed emits the digest).
+ */
+export function forkBaseFor(
+  parent: BoardNodeT, nodes: BoardNodeT[], edges: Edge[], turnEngine: EngineId = 'claude',
+): { parentSessionId?: string; resumeAt?: string; mergeContext?: string } {
+  const sameEngine = (d: BoardData) => boardEngine(d) === turnEngine;
+  if (sameEngine(parent.data)) {
+    if (parent.data.compact) return { parentSessionId: parent.data.parentSessionId };
+    if (!parent.data.lineageDirty) return { parentSessionId: parent.data.sessionId };
+  }
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const forkParentOf = (id: string): string | undefined =>
+    edges.find((e) => e.target === id && ((e.data?.kind as string) ?? 'fork') !== 'merge')?.source;
+  const chain: BoardNodeT[] = [parent];
+  let anchor: BoardNodeT | undefined;
+  // A COMPACT parent is itself a boundary: don't walk past it (its summary covers everything above) — start
+  // the walk above only for a non-compact parent. (engine-independent; same-engine compact already returned.)
+  let cur: string | undefined = parent.data.compact ? undefined : parent.id;
+  const guard = new Set<string>([parent.id]);
+  while (cur) {
+    const p = forkParentOf(cur);
+    if (!p || guard.has(p)) break;
+    guard.add(p);
+    const pn = byId.get(p);
+    if (!pn) break;
+    // Nearest CLEAN, SAME-ENGINE ancestor with a session = the native anchor. Foreign / dirty ancestors are
+    // "transparent" (skipped + replayed as text), exactly like deleted nodes. (M-MultiEngine AD4)
+    if (!pn.data.lineageDirty && pn.data.sessionId && sameEngine(pn.data)) { anchor = pn; break; }
+    chain.unshift(pn);
+    if (pn.data.compact) break; // compact boundary reached → its summary covers everything above; stop walking
+    cur = p;
+  }
+  const crossEngine = chain.some((n) => !sameEngine(n.data));
+  return {
+    parentSessionId: anchor?.data.sessionId,
+    resumeAt: anchor?.data.messageUuid,
+    mergeContext: buildRebuildSeed(chain.map((n) => n.data), { withSteps: crossEngine }),
+  };
+}
+
+/**
  * Walk DOWN from `startId` following the unique continuation child at each step, stopping at the first
  * node that is a leaf (0 continuation children) or a branch (≥2). Returns that endpoint (= `startId`
  * itself when it is already a leaf/branch). Cycle-guarded. Lets entering a mid-chain node in the
@@ -1367,6 +1418,67 @@ export function buildPrompt(
     br.nodes.forEach((id) => { p += block(id); });
   });
   return p;
+}
+
+/**
+ * The merge product's fork base + injected text seed for `turnEngine`. SSOT for the base computation used both
+ * by doMerge at creation AND by restampActiveProvider's re-home of a never-sent merge board onto a new engine.
+ * Picks the heaviest same-engine native base (pickForkBase → cache-warm shared history) and builds the
+ * mergeContext that injects ONLY the nodes that base's session does NOT already cover (lighter branches +
+ * uncovered shared). No compatible sessioned node → base null → all-text fresh-session seed. Pure, unit-tested.
+ */
+export function mergeBaseFor(
+  leaves: string[], byId: Record<string, BoardNodeT>, edges: Edge[], turnEngine: EngineId = 'claude',
+): { merge: MergeResult; base: { baseId: string; covered: Set<string> } | null; parentSessionId?: string; mergeContext: string } {
+  const merge = computeMerge(leaves, edges, byId);
+  const base = pickForkBase(merge, byId, edges, turnEngine);
+  const injected = base
+    ? {
+        shared: merge.shared.filter((id) => !base.covered.has(id)),
+        branches: merge.branches
+          .map((br) => ({ leaf: br.leaf, nodes: br.nodes.filter((id) => !base.covered.has(id)) }))
+          .filter((br) => br.nodes.length),
+      }
+    : merge;
+  const mergeContext = buildPrompt(injected, byId, { withSteps: true });
+  return { merge, base, parentSessionId: base ? forkableSession(byId[base.baseId]!.data) : undefined, mergeContext };
+}
+
+/**
+ * Re-stamp every FRESH (never-run, idle) board's engine to the newly-active provider `id`, AND re-home its
+ * continuation base for that engine. A fresh board's `engine` is only a creation-time default and it owns no
+ * session of its own, so flipping it is safe — it makes the per-board engine badge truthful and routes its
+ * first turn to `id` (onSend reads the board's stamped engine). Already-run boards (own sessionId / prompt /
+ * compact / collapsed) keep their IMMUTABLE engine — their conversation lives on it. (M-MultiEngine AD1)
+ *
+ * CRITICAL — re-home the base: a fork/merge child carries `parentSessionId`/`resumeAt`, NATIVE session pointers
+ * owned by the OLD engine. Flipping `engine` WITHOUT re-homing makes the new engine try to resume/fork a session
+ * it has no rollout for → "no rollout found for thread id …" (the cross-engine switch bug). So each re-stamped
+ * board's base is recomputed for `id`: a merge child via mergeBaseFor over its merge parents; a fork child via
+ * forkBaseFor (→ a same-engine native anchor, or `parentSessionId` cleared + a text-replay `mergeContext` seed so
+ * the new engine continues from the prior conversation as text); a bare root → base cleared. Pure → unit-tested.
+ */
+export function restampActiveProvider(nodes: BoardNodeT[], edges: Edge[], id: EngineId): BoardNodeT[] {
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
+  return nodes.map((n) => {
+    const d = n.data;
+    const fresh = !d.prompt && d.status === 'idle' && !d.compact && !d.collapsedGraph && !d.sessionId;
+    if (!fresh || boardEngine(d) === id) return n;
+    // Always emit ALL THREE base keys (undefined to CLEAR a now-foreign pointer) so a spread overwrites the
+    // board's stale base rather than leaving half of it behind.
+    let base: { parentSessionId?: string; resumeAt?: string; mergeContext?: string };
+    const mergeParents = edges.filter((e) => e.target === n.id && (e.data?.kind as string) === 'merge').map((e) => e.source);
+    if (d.merged && mergeParents.length >= 2) {
+      const m = mergeBaseFor(mergeParents, byId, edges, id);
+      base = { parentSessionId: m.parentSessionId, resumeAt: undefined, mergeContext: m.mergeContext };
+    } else {
+      const forkParent = edges.find((e) => e.target === n.id && ((e.data?.kind as string) ?? 'fork') !== 'merge')?.source;
+      const parent = forkParent ? byId[forkParent] : undefined;
+      const r = parent ? forkBaseFor(parent, nodes, edges, id) : {};
+      base = { parentSessionId: r.parentSessionId, resumeAt: r.resumeAt, mergeContext: r.mergeContext };
+    }
+    return { ...n, data: { ...d, engine: id, ...base } };
+  });
 }
 
 // rough token estimate for mixed zh/en text — for "how much did dedup save", not billing

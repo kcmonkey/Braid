@@ -15,9 +15,9 @@ import './styles.css';
 import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
-  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, mergeUnion, modelWindowFor, forkableSession,
+  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, forkBaseFor, mergeBaseFor, restampActiveProvider, mergeFit, mergeUnion, modelWindowFor,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
-  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode,
+  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   needsCollapseDigest, collapseDigestKey, collapseDigestText,
@@ -3341,58 +3341,6 @@ function App() {
     if (attached) clearAttach(leafId);
   }, [clearImages, clearAttach]);
 
-  // Node-Delete Phase 1: where a fork child should resume from. Normally the parent's own session; but if
-  // the parent is lineage-dirty (an ancestor was deleted → its session still contains that node), walk up
-  // the fork chain to the nearest CLEAN ancestor that has a session and replay the dirty chain's turns
-  // (via mergeContext) instead, so the deleted node is excluded from the child's context. (plans/Node-Delete)
-  const forkBaseFor = useCallback((parent: BoardNodeT, turnEngine: EngineId = 'claude'): { parentSessionId?: string; mergeContext?: string; resumeAt?: string } => {
-    const sameEngine = (d: BoardData) => boardEngine(d) === turnEngine;
-    // Clean, SAME-ENGINE parent → fork it directly (the common case; no replay). A compacted boundary's
-    // session is its parentSessionId (forking it resumes the compacted context losslessly). The engine check
-    // generalizes the lineage-dirty walk below: a foreign-engine parent (cross-engine continuation) is NOT a
-    // valid native base, so it falls through to the walk like a dirty ancestor. (M-MultiEngine AD4; M9)
-    if (sameEngine(parent.data)) {
-      if (parent.data.compact) return { parentSessionId: parent.data.parentSessionId };
-      if (!parent.data.lineageDirty) return { parentSessionId: parent.data.sessionId };
-    }
-    const ns = nodesRef.current, es = edgesRef.current;
-    const byId = new Map(ns.map((n) => [n.id, n] as const));
-    const forkParentOf = (id: string): string | undefined =>
-      es.find((e) => e.target === id && ((e.data?.kind as string) ?? 'fork') !== 'merge')?.source;
-    const chain: BoardNodeT[] = [parent];
-    let anchor: BoardNodeT | undefined;
-    // A COMPACT node is a context boundary in BOTH layers: its compactSummary stands in for everything above
-    // it, so the walk must STOP there and the seed replays the digest (not the pre-compact transcript). This is
-    // engine-independent — a same-engine compact PARENT already early-returned above (native fork of the
-    // compacted session); reaching here with a compact parent means cross-engine, where there's no native
-    // anchor to stop the walk otherwise. Without it a cross-engine continuation strolls past the compact node
-    // to the root and overflows the new provider's window (the "switch provider → empty answer + 100%" bug).
-    let cur: string | undefined = parent.data.compact ? undefined : parent.id;
-    const guard = new Set<string>([parent.id]);
-    while (cur) {
-      const p = forkParentOf(cur);
-      if (!p || guard.has(p)) break;
-      guard.add(p);
-      const pn = byId.get(p);
-      if (!pn) break;
-      // Nearest CLEAN, SAME-ENGINE ancestor with a session = the native anchor. Foreign-engine ancestors are
-      // "transparent" (skipped + replayed as text), exactly like deleted/dirty nodes. (M-MultiEngine AD4)
-      if (!pn.data.lineageDirty && pn.data.sessionId && sameEngine(pn.data)) { anchor = pn; break; }
-      chain.unshift(pn); // dirty / foreign ancestor → replay its turns too
-      if (pn.data.compact) break; // compact boundary reached → its summary covers everything above; stop walking
-      cur = p;
-    }
-    // Cross-engine seed (any skipped node is a different engine) carries tool steps (AD5); a pure same-engine
-    // Node-Delete rebuild stays Q/A-only (byte-identical to before, the no-op). No anchor → fresh + full text.
-    // Pass the chain as BOARDS (not flattened turns) so a compact node's summary survives — buildRebuildSeed
-    // substitutes its digest for the raw history the walk stopped collecting above it. (compact boundary)
-    const crossEngine = chain.some((n) => !sameEngine(n.data));
-    // Lazy Fork: truncate the anchor's session to the anchor's own point (resumeSessionAt). Under lazy
-    // fork the anchor's session is the SHARED spine — its end may contain the deleted node(s); truncating
-    // to the anchor's messageUuid excludes them, then the replayed chain turns re-add only the kept turns.
-    return { parentSessionId: anchor?.data.sessionId, resumeAt: anchor?.data.messageUuid, mergeContext: buildRebuildSeed(chain.map((n) => n.data), { withSteps: crossEngine }) };
-  }, []);
-
   // NOTE on deps: the node-data callbacks (onSend/onFork/onStop/onCompact) reference each other —
   // onFork seeds children with onCompact (declared below) and vice versa, a real cycle. They're all
   // stable singletons (deps are empty/[patch]), so identity never changes and stale capture can't
@@ -3426,14 +3374,14 @@ function App() {
       data: {
         prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
         engine: activeProviderRef.current, // a NEW board runs on the active provider (AD1); cross-engine continuation replays (Phase 1)
-        ...forkBaseFor(parent, activeProviderRef.current), // parent's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
+        ...forkBaseFor(parent, nodesRef.current, edgesRef.current, activeProviderRef.current), // parent's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
         onSend, onFork, onStop, onCompact,
       },
     };
     const newEdges = edgesRef.current.concat(makeEdge(parentId, childId, 'fork'));
     setEdges(newEdges);
     setNodes(autoLayout(nodesRef.current.map((n): BoardNodeT => ({ ...n, selected: false })).concat(child), newEdges));
-  }, [onSend, onStop, forkBaseFor]);
+  }, [onSend, onStop]);
 
   // M9: compact a done board's session. Appends a compact child node (compacting → idle-awaiting),
   // connected by a green `compact` edge, then asks the host to run native /compact (resume + fork, so
@@ -3601,23 +3549,11 @@ function App() {
     // chain, so emitting it as its own branch would be redundant. <2 leaves → nothing to merge.
     const leaves = mergeLeaves(selectedIds, curEdges);
     if (leaves.length < 2) return;
-    const merge = computeMerge(leaves, curEdges, byId);
-    // Merge-LCA-Fork: native-fork the merged board from the LCA's real session (lossless, cache-warm
-    // shared history) and inject only the divergent branches (+ any shared the fork can't cover) as text
-    // WITH tool steps. No fork base (no common ancestor / no sessioned shared node) → fall back to a fresh
-    // session with everything as text (still WITH steps) — pre-LCA behavior, no regression.
-    const base = pickForkBase(merge, byId, curEdges, activeProviderRef.current);
-    // Inject only nodes the fork base's session does NOT already cover (AD8): with a heaviest-node base, that's
-    // the lighter branches (+ any shared not in the base's lineage); fully-covered branches drop out entirely.
-    const injected = base
-      ? {
-          shared: merge.shared.filter((id) => !base.covered.has(id)),
-          branches: merge.branches
-            .map((br) => ({ leaf: br.leaf, nodes: br.nodes.filter((id) => !base.covered.has(id)) }))
-            .filter((br) => br.nodes.length),
-        }
-      : merge;
-    const mergeContext = buildPrompt(injected, byId, { withSteps: true });
+    // Merge-LCA-Fork: native-fork the merged board from the heaviest engine-compatible node's real session
+    // (lossless, cache-warm shared history) and inject only the divergent branches (+ any shared the fork can't
+    // cover) as text WITH tool steps; no compatible base → fresh session, everything as text. mergeBaseFor is
+    // the SSOT for this base computation — restampActiveProvider re-homes a never-sent merge board through it too.
+    const { merge, base, parentSessionId: mergeParentSession, mergeContext } = mergeBaseFor(leaves, byId, curEdges, activeProviderRef.current);
     // Context-budget guard: the merged board's first send seeds a session with the LCA fork base's carried
     // context PLUS this excerpt text. If that would overflow the model window the query errors before it can
     // even auto-compact — and /compact can't shrink a single oversized first message. So block here and ask
@@ -3650,10 +3586,10 @@ function App() {
       id: mid, type: 'board', position: { x: 0, y: 0 }, selected: true,
       data: {
         prompt: '', answer: '', status: 'idle', merged: true,
-        engine: activeProviderRef.current, // the merge runs on the active provider (AD1) — pickForkBase chose a base of THIS engine
+        engine: activeProviderRef.current, // the merge runs on the active provider (AD1) — mergeBaseFor chose a base of THIS engine
         // base set → onSend does resume+fork from the heaviest compatible node's session AND prepends
-        // mergeContext (zero onSend change). pickForkBase only returns forkable nodes, so this is defined.
-        parentSessionId: base ? forkableSession(byId[base.baseId]!.data) : undefined,
+        // mergeContext (zero onSend change). mergeBaseFor only returns a forkable node's session, else undefined.
+        parentSessionId: mergeParentSession,
         mergeContext, seq: seqRef.current++, onSend, onFork, onStop, onCompact,
       },
     };
@@ -3782,7 +3718,7 @@ function App() {
       data: {
         prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
         engine: activeProviderRef.current, // a NEW board runs on the active provider (AD1); cross-engine continuation replays (Phase 1)
-        ...forkBaseFor(leaf, activeProviderRef.current), // leaf's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
+        ...forkBaseFor(leaf, nodesRef.current, edgesRef.current, activeProviderRef.current), // leaf's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
         onSend, onFork, onStop, onCompact,
       },
     };
@@ -3799,7 +3735,7 @@ function App() {
     // fromId=leafId: the composer that sent this lives on the (done) leaf, so its pending images/attachment
     // travel with the forked child's first turn (and clear from the leaf), not get looked up under childId.
     onSend(childId, prompt, leafId);
-  }, [onSend, sendFollowup, autoLayout, forkBaseFor]);
+  }, [onSend, sendFollowup, autoLayout]);
 
   // Enter focus on a board, anchoring the zoom-in animation at that board's current screen position
   // (transform-origin) so the chat overlay appears to grow out of the very card you zoomed/clicked.
@@ -4293,17 +4229,14 @@ function App() {
       setSlashCommands([]);
       setActiveProviderState(id);
       activeProviderRef.current = id;
-      // Re-stamp every FRESH (never-run, idle) board's engine to the new provider. Such a board's `engine` was
-      // only a creation-time default and it owns no session to re-home, so flipping it is safe — and it makes
-      // the per-board engine badge truthful AND routes its first turn to the chosen provider (onSend reads the
-      // board's stamped engine). Already-run boards (a sessionId / prompt / compact) keep their IMMUTABLE engine
-      // — their conversation lives on that engine. This is what makes the switch visibly affect the board you're
-      // composing in, instead of silently doing nothing. (M-MultiEngine AD1)
-      const restamped = nodesRef.current.map((n) => {
-        const d = n.data;
-        const fresh = !d.prompt && d.status === 'idle' && !d.compact && !d.collapsedGraph && !d.sessionId;
-        return fresh && boardEngine(d) !== id ? { ...n, data: { ...d, engine: id } } : n;
-      });
+      // Re-stamp every FRESH (never-run, idle) board's engine to the new provider AND re-home its continuation
+      // base for that engine. A fresh board's `engine` is only a creation-time default and it owns no session, so
+      // flipping it is safe — it makes the badge truthful AND routes its first turn to the chosen provider. The
+      // re-home is critical: a fork/merge child's parentSessionId is a NATIVE pointer owned by the OLD engine —
+      // keeping it would make the new engine try to resume a session it has no rollout for ("no rollout found for
+      // thread id …"). restampActiveProvider recomputes the base (same-engine anchor, or a text-replay seed).
+      // Already-run boards (sessionId / prompt / compact) keep their IMMUTABLE engine. (M-MultiEngine AD1)
+      const restamped = restampActiveProvider(nodesRef.current, edgesRef.current, id);
       setNodes(restamped);
       nodesRef.current = restamped;
     }

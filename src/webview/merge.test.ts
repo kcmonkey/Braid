@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
-  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
+  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   needsCollapseDigest, collapseDigestKey, collapseDigestText, COLLAPSE_DIGEST_VERSION,
@@ -1551,5 +1551,117 @@ describe('unifiedDiffRows / codexFileChanges (Codex fileChange diff rendering)',
     expect(codexFileChanges(undefined)).toEqual([]);
     expect(codexFileChanges('nope' as unknown)).toEqual([]);
     expect(codexFileChanges([null, 42])).toEqual([]);
+  });
+});
+
+describe('forkBaseFor — engine-aware fork base', () => {
+  const claudeNode = (id: string, seq: number, extra: Partial<BoardData> = {}) =>
+    node(id, seq, { engine: 'claude', ...extra });
+
+  it('same-engine clean parent → native-forks the parent session (no text seed)', () => {
+    const P = claudeNode('P', 1, { sessionId: 'sp' });
+    const r = forkBaseFor(P, [P], [], 'claude');
+    expect(r.parentSessionId).toBe('sp');
+    expect(r.mergeContext).toBeUndefined();
+    expect(r.resumeAt).toBeUndefined();
+  });
+
+  it('same-engine compact parent → forks the compacted parentSessionId', () => {
+    const P = claudeNode('P', 1, { compact: true, parentSessionId: 'compacted-sess', sessionId: 'sp' });
+    const r = forkBaseFor(P, [P], [], 'claude');
+    expect(r.parentSessionId).toBe('compacted-sess');
+    expect(r.mergeContext).toBeUndefined();
+  });
+
+  it('cross-engine parent, no same-engine ancestor → NO native session + a text-replay seed', () => {
+    const P = claudeNode('P', 1, { sessionId: 'sp', prompt: 'q-P', answer: 'a-P' });
+    const r = forkBaseFor(P, [P], [], 'codex'); // continue a Claude board on Codex
+    expect(r.parentSessionId).toBeUndefined();   // must NOT hand Codex a Claude session id
+    expect(r.mergeContext).toBeDefined();
+    expect(r.mergeContext).toContain('q-P');     // the prior conversation replayed as text
+  });
+
+  it('cross-engine parent WITH a same-engine ancestor → anchors that ancestor, replays the foreign limb', () => {
+    const G = node('G', 1, { engine: 'codex', sessionId: 'sg' });        // codex ancestor
+    const P = claudeNode('P', 2, { sessionId: 'sp', prompt: 'q-P', answer: 'a-P' }); // claude middle
+    const nodes = [G, P];
+    const edges = [forkEdge('G', 'P')];
+    const r = forkBaseFor(P, nodes, edges, 'codex');
+    expect(r.parentSessionId).toBe('sg');        // native-fork the codex ancestor
+    expect(r.mergeContext).toContain('q-P');     // the claude limb replayed as text
+  });
+});
+
+describe('restampActiveProvider — re-stamp + re-home fresh boards on a provider switch', () => {
+  it('cross-engine switch bug: a fresh Claude fork child re-homed to Codex drops the Claude session', () => {
+    // Repro of "no rollout found for thread id …": fork a Claude board → fresh child carries the parent's
+    // Claude session; switch active provider to Codex → the child must NOT keep that foreign session id.
+    const P = node('P', 1, { engine: 'claude', sessionId: 'claude-sess-7c53', prompt: 'q-P', answer: 'a-P' });
+    const C = node('C', 2, { engine: 'claude', prompt: '', answer: '', status: 'idle', parentSessionId: 'claude-sess-7c53' });
+    const edges = [forkEdge('P', 'C')];
+    const out = restampActiveProvider([P, C], edges, 'codex');
+    const c = out.find((n) => n.id === 'C')!.data;
+    expect(c.engine).toBe('codex');
+    expect(c.parentSessionId).toBeUndefined();   // the Claude session is NOT passed to Codex (the fix)
+    expect(c.mergeContext).toBeDefined();         // Codex instead continues from the replayed transcript
+    expect(c.mergeContext).toContain('q-P');
+  });
+
+  it('leaves already-run boards (own session / prompt) untouched — immutable engine', () => {
+    const P = node('P', 1, { engine: 'claude', sessionId: 'sp' }); // default prompt q-P, status done
+    const out = restampActiveProvider([P], [], 'codex');
+    expect(out.find((n) => n.id === 'P')).toBe(P); // same reference: not re-stamped
+  });
+
+  it('no-op for a board already on the target engine', () => {
+    const C = node('C', 1, { engine: 'codex', prompt: '', answer: '', status: 'idle', parentSessionId: 'sx' });
+    const out = restampActiveProvider([C], [], 'codex');
+    expect(out.find((n) => n.id === 'C')).toBe(C); // boardEngine === id → unchanged
+  });
+
+  it('a bare fresh root just flips engine (no base to re-home)', () => {
+    const R = node('R', 1, { engine: 'claude', prompt: '', answer: '', status: 'idle' });
+    const out = restampActiveProvider([R], [], 'codex');
+    const r = out.find((n) => n.id === 'R')!.data;
+    expect(r.engine).toBe('codex');
+    expect(r.parentSessionId).toBeUndefined();
+    expect(r.mergeContext).toBeUndefined();
+  });
+
+  it('re-homes a fresh merge board: cross-engine switch clears the foreign base, keeps a full text seed', () => {
+    const A = node('A', 1, { engine: 'claude', sessionId: 'sa', prompt: 'q-A', answer: 'a-A' });
+    const B = node('B', 2, { engine: 'claude', sessionId: 'sb', prompt: 'q-B', answer: 'a-B' });
+    const M = node('M', 3, { engine: 'claude', merged: true, prompt: '', answer: '', status: 'idle', parentSessionId: 'sa', mergeContext: 'stale' });
+    const edges = [mergeEdge('A', 'M'), mergeEdge('B', 'M')];
+    const out = restampActiveProvider([A, B, M], edges, 'codex');
+    const m = out.find((n) => n.id === 'M')!.data;
+    expect(m.engine).toBe('codex');
+    expect(m.parentSessionId).toBeUndefined();    // no Codex source → no native base (not 'sa')
+    expect(m.mergeContext).not.toBe('stale');      // recomputed for Codex
+    expect(m.mergeContext).toContain('q-A');
+    expect(m.mergeContext).toContain('q-B');
+  });
+});
+
+describe('mergeBaseFor — SSOT for the merge fork base', () => {
+  it('picks the heaviest same-engine forkable node as the native base', () => {
+    const A = node('A', 1, { engine: 'claude', sessionId: 'sa', contextTokens: 100 });
+    const B = node('B', 2, { engine: 'claude', sessionId: 'sb', contextTokens: 50 });
+    const byId = byIdOf([A, B]);
+    const r = mergeBaseFor(['A', 'B'], byId, [], 'claude');
+    expect(r.base?.baseId).toBe('A');
+    expect(r.parentSessionId).toBe('sa');
+    expect(r.mergeContext).toContain('q-B'); // lighter branch injected as text; A is native-covered
+  });
+
+  it('no same-engine forkable node → null base + all-text seed', () => {
+    const A = node('A', 1, { engine: 'claude', sessionId: 'sa' });
+    const B = node('B', 2, { engine: 'claude', sessionId: 'sb' });
+    const byId = byIdOf([A, B]);
+    const r = mergeBaseFor(['A', 'B'], byId, [], 'codex'); // target engine has no source
+    expect(r.base).toBeNull();
+    expect(r.parentSessionId).toBeUndefined();
+    expect(r.mergeContext).toContain('q-A');
+    expect(r.mergeContext).toContain('q-B');
   });
 });
