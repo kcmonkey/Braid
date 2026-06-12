@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Board Canvas — Canvas Search mockup</title>
+<style>
+  /* Palette lifted verbatim from src/webview/styles.css :root so this reads like the real canvas. */
+  :root {
+    --bg:#1c1b1a; --bg-deep:#1f1e1d; --bg-code:#1a1917;
+    --panel:#30302e; --panel-2:#2b2a27;
+    --border:#423f3a; --border-sub:#383631;
+    --text:#f5f4ee; --text-2:#e3e1d8; --muted:#a8a199; --muted-2:#8c857b;
+    --accent:#d97757; --accent-2:#c2613f; --accent-soft:rgba(217,119,87,.16);
+    --fork:#d29922; --merge:#6c8cff; --compact:#57ab5a;
+    --green:#7cb573; --red:#e5645d; --red-bg:#3a201c;
+    --codex:#10a37f;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--text); font-size:14px; line-height:1.5; }
+
+  /* ---- Faux canvas backdrop (dot grid like React Flow's <Background/>) ---- */
+  .canvas { position:fixed; inset:0; overflow:hidden; background:radial-gradient(circle,#2a2825 1px,transparent 1px) 0 0 / 22px 22px, var(--bg); }
+  .edges { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; }
+  .edges path { fill:none; stroke-width:1.5; }
+
+  /* ---- Board card (mirrors .board / .board__head / .board__title / .board__tags) ---- */
+  .board { position:absolute; width:230px; border:1px solid var(--border); border-radius:12px; background:var(--panel);
+    box-shadow:0 6px 24px rgba(0,0,0,.35); transition:opacity .22s ease, filter .22s ease, transform .15s ease; }
+  .board__head { padding:8px 11px; border-bottom:1px solid var(--border-sub);
+    background:linear-gradient(180deg,#37352f,var(--panel)); display:flex; gap:8px; align-items:center; }
+  .dot { width:8px;height:8px;border-radius:50%;background:var(--accent); flex:none; }
+  .dot.idle { background:var(--muted-2); }
+  .seq { font-size:10.5px;font-weight:700;color:var(--muted-2);background:var(--bg-deep);border-radius:6px;padding:2px 7px; letter-spacing:.03em; }
+  .type { margin-left:auto; font-size:12px; opacity:.85; }
+  .board__title { padding:9px 11px 4px; font-size:12.5px; font-weight:600; color:var(--text-2); line-height:1.35;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .board__tags { display:flex; flex-wrap:wrap; gap:5px; padding:4px 11px 10px; }
+  .tag { font-size:10px; font-weight:700; letter-spacing:.02em; padding:2px 7px; border-radius:6px; text-transform:lowercase; }
+  .tag.merge   { color:#a9c0ff; background:rgba(108,140,255,.16); }
+  .tag.algo    { color:#d9b3ff; background:rgba(170,120,255,.16); }
+  .tag.fork    { color:#e9c46a; background:rgba(210,153,34,.18); }
+  .tag.sdk     { color:#a8a199; background:#2a2825; }
+  .tag.bug     { color:#f0928c; background:var(--red-bg); }
+  .tag.perf    { color:#7cd3b0; background:rgba(16,163,127,.16); }
+  .tag.ui      { color:#9fd0ff; background:rgba(120,170,255,.14); }
+  .tag.feature { color:#9bdc92; background:#1f2a1c; }
+  .tag.design  { color:#d9b3ff; background:rgba(170,120,255,.16); }
+
+  /* search states */
+  .board.dimmed { opacity:.22; filter:grayscale(.7); }                 /* dim non-matches while searching */
+  .board.match  { border-color:#5b574f; }
+  .board.active { border-color:var(--accent); box-shadow:0 0 0 2px var(--accent), 0 0 0 7px var(--accent-soft), 0 6px 24px rgba(0,0,0,.45); }
+  .board.active::after {                                               /* pulsing locate ring (revealedId) */
+    content:""; position:absolute; inset:-7px; border-radius:16px; border:2px solid var(--accent);
+    animation:pulse 1.4s ease-out infinite; pointer-events:none; }
+  @keyframes pulse { 0%{ opacity:.7; transform:scale(1); } 70%{ opacity:0; transform:scale(1.06); } 100%{ opacity:0; } }
+  mark { background:var(--accent-soft); color:#ffd9c9; border-radius:3px; padding:0 1px; }
+
+  /* ---- Search bar (top-center fixed chip — Ctrl+F overlay) ---- */
+  .search { position:fixed; top:18px; left:50%; transform:translateX(-50%); z-index:20; width:560px; max-width:94vw; }
+  .search__bar { display:flex; align-items:center; gap:9px; background:var(--panel); border:1px solid var(--accent);
+    border-radius:11px; padding:9px 12px; box-shadow:0 10px 34px rgba(0,0,0,.5); }
+  .search__mag { color:var(--accent); font-size:15px; }
+  .search__input { flex:1; background:transparent; border:none; outline:none; color:var(--text); font:inherit; font-size:14px; }
+  .search__input::placeholder { color:var(--muted-2); }
+  .search__count { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .search__nav { display:flex; gap:2px; }
+  .navbtn { width:24px;height:24px; border-radius:6px; border:1px solid var(--border-sub); background:var(--bg-deep);
+    color:var(--muted); cursor:pointer; font-size:12px; display:flex; align-items:center; justify-content:center; }
+  .navbtn:hover { color:var(--text); border-color:var(--border); }
+  .search__div { width:1px; height:18px; background:var(--border-sub); }
+  .search__kbd { font-size:10px; color:var(--muted-2); border:1px solid var(--border-sub); border-radius:4px; padding:1px 5px; background:var(--bg-deep); }
+
+  /* ---- Results dropdown (mirrors panel list rows) ---- */
+  .results { margin-top:8px; background:var(--panel); border:1px solid var(--border); border-radius:11px;
+    box-shadow:0 14px 40px rgba(0,0,0,.5); overflow:hidden; max-height:320px; overflow-y:auto; }
+  .results__hint { padding:7px 13px; font-size:11px; color:var(--muted-2); border-bottom:1px solid var(--border-sub);
+    display:flex; align-items:center; gap:8px; }
+  .res { display:flex; gap:10px; padding:10px 13px; cursor:pointer; border-bottom:1px solid var(--border-sub); }
+  .res:last-child { border-bottom:none; }
+  .res:hover { background:var(--panel-2); }
+  .res.active { background:var(--accent-soft); box-shadow:inset 2px 0 0 var(--accent); }
+  .res__ico { font-size:14px; width:18px; text-align:center; flex:none; margin-top:1px; }
+  .res__main { flex:1; min-width:0; }
+  .res__q { font-size:12.5px; color:var(--text); font-weight:600; margin-bottom:2px;
+    white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .res__snip { font-size:11.5px; color:var(--muted); line-height:1.45;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .res__where { font-size:10.5px; color:var(--muted-2); }
+  .res__meta { display:flex; flex-direction:column; align-items:flex-end; gap:5px; flex:none; }
+  .res__seq { font-size:10px; font-weight:700; color:var(--muted-2); background:var(--bg-deep); border-radius:5px; padding:1px 6px; }
+  .res__eng { font-size:9.5px; font-weight:700; letter-spacing:.04em; padding:1px 6px; border-radius:5px; text-transform:uppercase; }
+  .res__eng.claude { color:#f0b49a; background:rgba(217,119,87,.14); }
+  .res__eng.codex  { color:#7cd3b0; background:rgba(16,163,127,.16); }
+  .results__empty { padding:18px 13px; text-align:center; color:var(--muted-2); font-size:12px; }
+
+  /* ---- MiniMap (bottom-left, hits tinted) ---- */
+  .minimap { position:fixed; left:16px; bottom:16px; width:172px; height:118px; background:var(--bg-deep);
+    border:1px solid var(--border); border-radius:8px; box-shadow:0 4px 16px rgba(0,0,0,.4); overflow:hidden; z-index:6; }
+  .mm-node { position:absolute; border-radius:2px; background:#4a4842; }
+  .mm-node.hit { background:var(--accent); box-shadow:0 0 6px var(--accent); }
+  .mm-mask { position:absolute; border:1px solid rgba(217,119,87,.5); border-radius:3px; background:rgba(217,119,87,.06); }
+
+  /* ---- Persistent canvas chips (zoom hint / perm mode) — context, like the real canvas ---- */
+  .chip-fixed { position:fixed; z-index:5; font-size:11px; color:var(--muted-2); user-select:none; }
+  .zoom-hint { left:16px; top:14px; }
+  .zoom-hint kbd { font-size:10px; border:1px solid var(--border-sub); border-radius:4px; padding:1px 5px; background:var(--bg-deep); color:var(--muted); }
+  .perm-hint { right:18px; bottom:16px; font-weight:600; opacity:.5; }
+
+  /* caption */
+  .note { position:fixed; right:16px; top:14px; max-width:300px; font-size:11px; color:var(--muted-2);
+    background:rgba(28,27,26,.7); border:1px solid var(--border-sub); border-radius:8px; padding:9px 11px; z-index:5; line-height:1.5; }
+  .note b { color:var(--muted); font-weight:700; }
+  .note code { color:#f0b49a; background:var(--bg-deep); border-radius:4px; padding:0 4px; }
+</style>
+</head>
+<body>
+  <div class="canvas">
+    <!-- edges drawn behind the boards -->
+    <svg class="edges">
+      <path d="M 245 168 C 360 168, 360 132, 470 132" stroke="var(--fork)" />          <!-- 1 -> 2 -->
+      <path d="M 245 168 C 360 168, 360 300, 470 300" stroke="var(--fork)" />          <!-- 1 -> 3 -->
+      <path d="M 585 176 C 700 176, 700 250, 815 250" stroke="var(--fork)" />          <!-- 2 -> 6 -->
+      <path d="M 585 344 C 700 344, 700 250, 815 250" stroke="var(--merge)" />         <!-- 3 -> 4(merge) via 6 area -->
+      <path d="M 585 132 C 700 132, 700 64,  815 64"  stroke="var(--fork)" />          <!-- 2 -> 5 -->
+      <path d="M 930 294 C 1010 294, 1010 430, 1090 430" stroke="var(--merge)" />      <!-- 6 -> 4 -->
+      <path d="M 585 344 C 850 470, 980 470, 1090 462" stroke="var(--merge)" />        <!-- 3 -> 4 -->
+    </svg>
+
+    <!-- boards (positions are absolute; data-text feeds the faux search) -->
+    <div class="board" id="b1" style="left:25px;  top:104px;"></div>
+    <div class="board" id="b2" style="left:470px; top:96px;"></div>
+    <div class="board" id="b3" style="left:470px; top:264px;"></div>
+    <div class="board" id="b5" style="left:815px; top:24px;"></div>
+    <div class="board" id="b6" style="left:815px; top:214px;"></div>
+    <div class="board" id="b4" style="left:1090px;top:392px;"></div>
+  </div>
+
+  <!-- Persistent canvas affordances (for realism / context) -->
+  <div class="chip-fixed zoom-hint"><kbd>Ctrl</kbd> + scroll to zoom</div>
+  <div class="chip-fixed perm-hint">default</div>
+
+  <div class="note">
+    <b>Canvas Search</b> — open with <code>Ctrl</code>+<code>F</code>.<br>
+    Type to filter: matches stay lit + ring-pulse, non-matches dim. <code>↑</code>/<code>↓</code> cycle hits,
+    <code>Enter</code> locates, second <code>Enter</code> opens the conversation. <code>Esc</code> closes.
+    <br><span style="color:var(--muted-2)">Try: <code>merge dedup</code>, <code>tag:bug</code>, <code>engine:codex</code></span>
+  </div>
+
+  <!-- MiniMap with tinted hits -->
+  <div class="minimap" id="minimap">
+    <div class="mm-mask" style="left:6px; top:30px; width:120px; height:70px;"></div>
+  </div>
+
+  <!-- Search overlay -->
+  <div class="search">
+    <div class="search__bar">
+      <span class="search__mag">🔍</span>
+      <input class="search__input" id="q" placeholder="Search this canvas…" value="merge dedup" autocomplete="off" />
+      <span class="search__count" id="count">3 / 6</span>
+      <div class="search__nav">
+        <button class="navbtn" id="prev" title="Previous match (↑)">▲</button>
+        <button class="navbtn" id="next" title="Next match (↓)">▼</button>
+      </div>
+      <span class="search__div"></span>
+      <span class="search__kbd">Esc</span>
+    </div>
+    <div class="results" id="results"></div>
+  </div>
+
+<script>
+  // ---- Faux corpus: each board's searchable text (prompt + answer + tags), mirroring boardSearchText() ----
+  const BOARDS = [
+    { id:'b1', seq:1, type:'root',    ico:'🌱', eng:'claude',
+      prompt:'How does the merge dedup algorithm work?',
+      answer:'computeMerge takes the intersection of the selected boards’ ancestor sets so shared background is sent once; each branch is (ancestors ∪ self) − shared, ordered by seq.',
+      tags:['merge','algo'] },
+    { id:'b2', seq:2, type:'fork',    ico:'⎂', eng:'claude',
+      prompt:'Explain forkSession semantics',
+      answer:'resume + forkSession spins a NEW session id off the end of the source session; the original session is untouched, which is what makes the DAG possible.',
+      tags:['fork','sdk'] },
+    { id:'b3', seq:3, type:'fork',    ico:'⎂', eng:'codex',
+      prompt:'Why does context% climb so fast on Codex boards?',
+      answer:'use last.totalTokens, not total — total is the cumulative throughput across every internal model round-trip and overflows the window.',
+      tags:['bug','perf'] },
+    { id:'b6', seq:6, type:'fork',    ico:'⎂', eng:'claude',
+      prompt:'Dedup the merge ancestor intersection before sending',
+      answer:'ancestorsOf walks edges in reverse; the shared intersection is emitted once at the top, divergent branches carry their own steps.',
+      tags:['merge','algo'] },
+    { id:'b5', seq:5, type:'root',    ico:'🌱', eng:'claude',
+      prompt:'Add Markdown rendering to assistant answers',
+      answer:'assistant output flows through react-markdown + remark-gfm; rehype-highlight adds class-based syntax highlighting, CSP-safe.',
+      tags:['ui','feature'] },
+    { id:'b4', seq:7, type:'merge',   ico:'✧', eng:'claude',
+      prompt:'Combine the dedup + fork branches into one merge',
+      answer:'structured excerpt seeds a brand-new session: shared ancestors deduped once, each branch full Q/A; the merge node has multiple parents.',
+      tags:['merge','design'] },
+  ];
+  const TYPE_LABEL = { root:'root', fork:'fork', merge:'merge', compact:'compact' };
+
+  const esc = (s) => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  const text = (b) => (b.prompt + ' ' + b.answer + ' ' + b.tags.join(' ')).toLowerCase();
+
+  // parseQuery — split field filters (tag:/engine:/is:) from free terms (mirrors search.ts parseQuery)
+  function parseQuery(raw) {
+    const terms = [], filters = {};
+    for (const tok of raw.trim().toLowerCase().split(/\s+/).filter(Boolean)) {
+      const m = tok.match(/^(tag|engine|is|status):(.+)$/);
+      if (m) (filters[m[1]] ||= []).push(m[2]); else terms.push(tok);
+    }
+    return { terms, filters };
+  }
+  function matchBoard(q, b) {
+    if (q.filters.tag   && !q.filters.tag.every(t => b.tags.includes(t))) return false;
+    if (q.filters.engine&& !q.filters.engine.includes(b.eng)) return false;
+    if (q.filters.is    && !q.filters.is.includes(b.type)) return false;
+    return q.terms.every(t => text(b).includes(t));  // token-AND substring
+  }
+  // snippet around the first matched term, with <mark> on every term
+  function snippet(b, terms) {
+    const src = b.answer; const low = src.toLowerCase();
+    let at = -1; for (const t of terms) { const i = low.indexOf(t); if (i >= 0 && (at < 0 || i < at)) at = i; }
+    let s = at < 0 ? src.slice(0, 120) : src.slice(Math.max(0, at - 36), at + 90);
+    if (at > 36) s = '…' + s;
+    return highlight(s, terms);
+  }
+  function highlight(s, terms) {
+    let out = esc(s);
+    for (const t of terms.filter(Boolean)) {
+      const re = new RegExp('(' + t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ')', 'gi');
+      out = out.replace(re, '<mark>$1</mark>');
+    }
+    return out;
+  }
+
+  // ---- Render boards ----
+  const byId = Object.fromEntries(BOARDS.map(b => [b.id, b]));
+  function paintBoards() {
+    for (const b of BOARDS) {
+      const el = document.getElementById(b.id);
+      const cls = b.type === 'merge' ? 'merge' : b.type === 'root' ? '' : 'fork';
+      el.innerHTML =
+        '<div class="board__head"><span class="dot"></span>' +
+        '<span class="seq">#' + b.seq + '</span>' +
+        '<span class="type" title="' + TYPE_LABEL[b.type] + '">' + b.ico + '</span></div>' +
+        '<div class="board__title">' + esc(b.prompt) + '</div>' +
+        '<div class="board__tags">' + b.tags.map(t => '<span class="tag ' + t + '">' + t + '</span>').join('') + '</div>';
+      el.onclick = () => { const i = hits.findIndex(h => h.id === b.id); if (i >= 0) setActive(i); };
+    }
+  }
+
+  // ---- MiniMap ----
+  const MM = { x0: -10, y0: 0, sx: 0.135, sy: 0.108 };
+  function paintMinimap(hitIds) {
+    const mm = document.getElementById('minimap');
+    mm.querySelectorAll('.mm-node').forEach(n => n.remove());
+    for (const b of BOARDS) {
+      const el = document.getElementById(b.id);
+      const left = parseFloat(el.style.left), top = parseFloat(el.style.top);
+      const n = document.createElement('div');
+      n.className = 'mm-node' + (hitIds.has(b.id) ? ' hit' : '');
+      n.style.left = (8 + left * MM.sx) + 'px';
+      n.style.top  = (8 + top  * MM.sy) + 'px';
+      n.style.width = '22px'; n.style.height = '13px';
+      mm.appendChild(n);
+    }
+  }
+
+  // ---- Search state ----
+  let hits = [];      // ordered matched boards
+  let active = 0;     // index into hits
+
+  function run() {
+    const raw = document.getElementById('q').value;
+    const q = parseQuery(raw);
+    const hasQuery = q.terms.length || Object.keys(q.filters).length;
+    hits = hasQuery ? BOARDS.filter(b => matchBoard(q, b))
+                          .sort((a, b) => b.seq - a.seq) : [];   // recency rank (stand-in)
+    if (active >= hits.length) active = 0;
+    const hitIds = new Set(hits.map(h => h.id));
+
+    // dim non-matches + pulse the active hit
+    for (const b of BOARDS) {
+      const el = document.getElementById(b.id);
+      el.classList.toggle('dimmed', hasQuery && !hitIds.has(b.id));
+      el.classList.toggle('match', hasQuery && hitIds.has(b.id));
+      el.classList.toggle('active', hasQuery && hits[active] && hits[active].id === b.id);
+    }
+    document.getElementById('count').textContent =
+      hasQuery ? (hits.length ? (active + 1) + ' / ' + hits.length : '0 results') : BOARDS.length + ' boards';
+
+    // results list
+    const box = document.getElementById('results');
+    if (!hasQuery) { box.style.display = 'none'; paintMinimap(new Set()); return; }
+    box.style.display = 'block';
+    if (!hits.length) { box.innerHTML = '<div class="results__empty">No boards match “' + esc(raw) + '”</div>'; paintMinimap(hitIds); return; }
+    box.innerHTML =
+      '<div class="results__hint">↑↓ to cycle · Enter locates · Enter again opens the conversation</div>' +
+      hits.map((b, i) =>
+        '<div class="res ' + (i === active ? 'active' : '') + '" data-i="' + i + '">' +
+          '<div class="res__ico">' + b.ico + '</div>' +
+          '<div class="res__main">' +
+            '<div class="res__q">' + highlight(b.prompt, q.terms) + '</div>' +
+            '<div class="res__snip">' + snippet(b, q.terms) + '</div>' +
+            '<div class="res__where">' + TYPE_LABEL[b.type] + ' · ' + b.tags.map(t => '#' + t).join(' ') + '</div>' +
+          '</div>' +
+          '<div class="res__meta"><span class="res__seq">#' + b.seq + '</span>' +
+            '<span class="res__eng ' + b.eng + '">' + b.eng + '</span></div>' +
+        '</div>').join('');
+    box.querySelectorAll('.res').forEach(r => r.onclick = () => setActive(+r.dataset.i));
+    paintMinimap(hitIds);
+  }
+  function setActive(i) { if (!hits.length) return; active = (i + hits.length) % hits.length; run(); scrollActiveIntoView(); }
+  function scrollActiveIntoView() {
+    const el = document.querySelector('.res.active'); if (el) el.scrollIntoView({ block:'nearest' });
+  }
+
+  // ---- Wire up ----
+  document.getElementById('q').addEventListener('input', () => { active = 0; run(); });
+  document.getElementById('next').onclick = () => setActive(active + 1);
+  document.getElementById('prev').onclick = () => setActive(active - 1);
+  document.getElementById('q').addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(active + 1); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(active - 1); }
+    else if (e.key === 'Enter') { e.preventDefault(); setActive(active + (e.shiftKey ? -1 : 1) - (e.shiftKey ? -1 : 1)); /* locate stays */ }
+    else if (e.key === 'Escape') { document.getElementById('q').blur(); }
+  });
+
+  paintBoards();
+  run();
+  document.getElementById('q').focus();
+</script>
+</body>
+</html>
