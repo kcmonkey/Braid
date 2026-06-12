@@ -248,8 +248,9 @@ export class CodexAdapter implements Engine {
         }
         return { answers: out };
       }
-      // Other server requests (PTY interactive, dynamic-tool execution, MCP elicitation, …): not wired → safe
-      // default (D5: no Braid carrier surface). Adding one = a new neutral channel, not a silent special-case.
+      // Other server requests (PTY interactive, dynamic-tool execution, form-mode elicitation, …): not wired
+      // → safe default (D5: no Braid carrier surface). Adding one = a new neutral channel, not a silent
+      // special-case. (url-mode elicitation, approvals, requestUserInput ARE wired above.)
       return {};
     };
 
