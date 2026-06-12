@@ -199,6 +199,27 @@ export interface TaskEvent {
   toolUseId?: string;
 }
 
+// Neutral "ask the user a structured question" shapes (provider-capability layer P1). Both Claude's
+// AskUserQuestion and Codex's `item/tool/requestUserInput` map onto these — no provider specifics leak
+// past the adapter. `id` is the provider's stable per-question id when it has one (Codex); absent for
+// Claude (then the answer is keyed by question text). `isSecret` → masked input; `isOther` → a freeform
+// "other" entry is offered. The host renders the existing AskUserCard from a synthesized/real
+// `toolUse(name:'AskUserQuestion')` and blocks on `PreToolInterceptor.onUserInput`. (D6①)
+export interface UserInputOption { label: string; description: string; preview?: string }
+export interface UserInputQuestion {
+  id?: string;
+  header: string;
+  question: string;
+  multiSelect: boolean;
+  options: UserInputOption[];
+  isSecret?: boolean;
+  isOther?: boolean;
+}
+export interface UserInputAsk { toolUseId: string; questions: UserInputQuestion[] }
+// `answers` is keyed by question id (when present) else question text; each value is the chosen labels
+// (+ any freeform "other" text) as a string[]. `canceled` is an EXPLICIT state (not an empty map).
+export interface UserInputAnswer { answers: Record<string, string[]>; canceled: boolean }
+
 /** webview → extension host */
 export type WebviewMessage =
   | { type: 'ready' }
@@ -273,12 +294,12 @@ export type WebviewMessage =
   | { type: 'setApiKey'; provider: EngineId; key: string }
   | { type: 'clearApiKey'; provider: EngineId }
   | { type: 'adoptEnvKey'; provider: EngineId }
-  // M10 AskUserQuestion: the user answered (or canceled) an interactive question card. The webview
-  // pre-formats the choice into `reason` (via merge.ts/formatAskUserAnswer) so the extension bundle
-  // never pulls in merge.ts. The host resolves the blocked PreToolUse hook by `toolUseId` (= the
-  // tool_use id, canvas comes from panel routing) → `reason` becomes the model's same-turn
-  // tool_result. `canceled` → the host injects a "user canceled" reason instead.
-  | { type: 'askUserAnswer'; toolUseId: string; reason: string; canceled?: boolean }
+  // AskUserQuestion (M10 / capability-layer P1): the user answered (or canceled) an interactive question
+  // card. Carries the STRUCTURED selections (`answers` keyed by question id-or-text → chosen labels), not a
+  // pre-formatted string — each provider's adapter turns it into its own reply (Claude → deny-reason via
+  // merge.ts/userInputReason; Codex → `{answers:{[id]:{answers}}}`). The host resolves the blocked
+  // `onUserInput` by `toolUseId`. `canceled` = explicit (the user dismissed without choosing). (D6①)
+  | { type: 'askUserAnswer'; toolUseId: string; answers: Record<string, string[]>; canceled?: boolean }
   // Permission approval: the user answered a native permission prompt (canUseTool). The host resolves the
   // blocked canUseTool callback by `toolUseId`. `decision`: 'allow' (once) / 'always' (allow + persist a
   // rule to .claude/settings.local.json) / 'deny'. `mode` = for ExitPlanMode approval, which permission

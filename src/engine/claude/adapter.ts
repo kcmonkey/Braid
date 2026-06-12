@@ -13,6 +13,7 @@ import type {
   AsyncPending, BranchSummarizeRequest, CollapseDigestRequest,
 } from '../types';
 import { ClaudeAccountControl, claudeAccountIdentity } from './account';
+import { parseAskUserQuestions, userInputReason } from '../../webview/merge';
 import { pathToFileURL } from 'url';
 import {
   reduceClaudeMessage, buildTurnDone, initParseState, turnView, extractText, toSlashCommandSpec,
@@ -209,6 +210,17 @@ export class ClaudeAdapter implements Engine {
           {
             hooks: [
               async (input: any, toolUseID: string, ctx: { signal: AbortSignal }) => {
+                // AskUserQuestion routes through the neutral onUserInput channel: the card renders from this
+                // tool_use; we block on the user's STRUCTURED answer and format the same-turn deny-reason HERE
+                // in the adapter (the old host-side deny-reason hack is retired). (capability-layer P1 / D6①)
+                if (input?.tool_name === 'AskUserQuestion') {
+                  const questions = parseAskUserQuestions(input?.tool_input ?? {});
+                  const answer = await pre.onUserInput(activeRoute.boardId, activeRoute.turnIndex, { toolUseId: toolUseID, questions }, ctx.signal);
+                  return {
+                    decision: 'block',
+                    hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: userInputReason(questions, answer) },
+                  };
+                }
                 const d = await pre.onPreToolUse(activeRoute.boardId, toolUseID, input?.tool_name, input?.tool_input, ctx.signal);
                 if ('deny' in d) {
                   return {

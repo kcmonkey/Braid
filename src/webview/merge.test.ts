@@ -2,12 +2,12 @@ import { describe, it, expect } from 'vitest';
 import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
-  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
+  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, forkableSession, isFreshBoard, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   planAutoCollapseAfterDone, applyCollapsePlans,
   needsCollapseDigest, collapseDigestKey, collapseDigestText, COLLAPSE_DIGEST_VERSION,
-  listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
+  listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer, userInputReason,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
   parseTodos, todoSummary, thinkMarks, normalizeTags, MAX_TAGS, needsDigest, DIGEST_VERSION,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, BRANCH_SUMMARY_VERSION,
@@ -244,10 +244,10 @@ describe('continuationMode (Lazy Fork)', () => {
     const C = node('C', 1, { parentSessionId: 'sM' });
     expect(continuationMode(C, [M, C], [forkEdge('M', 'C')])).toEqual({ fork: false });
   });
-  it('a node whose resume target differs from its graph parent (compact node) → legacy fork', () => {
+  it('a node whose resume target differs from its graph parent → legacy fork', () => {
     const P = node('P', 0, { sessionId: 'S', messageUuid: 'uP' });
-    const K = node('K', 1, { compact: true, parentSessionId: 'Scompacted' }); // resumes a forked compacted session
-    expect(continuationMode(K, [P, K], [compactEdge('P', 'K')])).toEqual({ fork: true });
+    const K = node('K', 1, { parentSessionId: 'Sother' }); // resume target ≠ graph parent's session → independent fork
+    expect(continuationMode(K, [P, K], [forkEdge('P', 'K')])).toEqual({ fork: true });
   });
   // midpointFork=false (Codex): an engine that can't isolate a mid-point fork must NEVER share a session
   // across boards — every continuation forks its own thread, so a branch can't inherit sibling turns. The
@@ -1319,6 +1319,30 @@ describe('formatAskUserAnswer (M10)', () => {
   });
 });
 
+describe('userInputReason (capability-layer P1 / D6①)', () => {
+  const q = (over: Partial<{ id: string; question: string }> = {}) => ({
+    header: 'H', question: 'Pick one', multiSelect: false, options: [], ...over,
+  });
+  it('formats structured selections to the byte-identical deny-reason (Claude path, keyed by text)', () => {
+    const out = userInputReason([q({ question: 'Weekend?' })], { answers: { 'Weekend?': ['Hiking'] }, canceled: false });
+    expect(out).toBe('[The user answered via the UI]\nQ: Weekend? → Hiking');
+  });
+  it('comma-joins multi-select labels (matching the pre-P1 webview join)', () => {
+    const out = userInputReason([q({ question: 'Q1' })], { answers: { Q1: ['A', 'B', 'custom'] }, canceled: false });
+    expect(out).toBe('[The user answered via the UI]\nQ: Q1 → A, B, custom');
+  });
+  it('looks selections up by id when present (Codex path)', () => {
+    const out = userInputReason([q({ id: 'q1', question: 'Which?' })], { answers: { q1: ['A'] }, canceled: false });
+    expect(out).toBe('[The user answered via the UI]\nQ: Which? → A');
+  });
+  it('canceled → the cancel sentinel', () => {
+    expect(userInputReason([q()], { answers: {}, canceled: true })).toBe('[The user canceled the question without making a selection]');
+  });
+  it('no selections → made-no-selection fallback', () => {
+    expect(userInputReason([q()], { answers: {}, canceled: false })).toBe('[The user made no selection]');
+  });
+});
+
 describe('contextPct / contextBucket (M11)', () => {
   it('computes a percentage from tokens / window', () => {
     expect(contextPct(83121, 1000000)).toBeCloseTo(8.31, 1);
@@ -1455,11 +1479,11 @@ describe('pickForkBase (heaviest engine-compatible fork base — M-MultiEngine A
     expect(pickForkBase(computeMerge(['A', 'B'], edges, byId), byId, edges)?.baseId).toBe('B');
   });
 
-  it('a compact node is forkable via its parentSessionId (the compacted session)', () => {
-    // root → K(compact) → A, K → B. K is heaviest and forkable through its parentSessionId.
+  it('a compact node is forkable via its compactSession (the compacted session)', () => {
+    // root → K(compact) → A, K → B. K is heaviest and forkable through its compactSession.
     const nodes = [
       node('root', 0, { sessionId: 'sr', contextTokens: 100 }),
-      node('K', 1, { compact: true, parentSessionId: 'compacted', contextTokens: 800 }),
+      node('K', 1, { compact: true, compactSession: 'compacted', contextTokens: 800 }),
       node('A', 2, { sessionId: 'sa', contextTokens: 200 }),
       node('B', 3, { sessionId: 'sb', contextTokens: 300 }),
     ];
@@ -1686,6 +1710,26 @@ describe('unifiedDiffRows / codexFileChanges (Codex fileChange diff rendering)',
   });
 });
 
+describe('isFreshBoard / forkableSession (STM clean model)', () => {
+  it('isFreshBoard: true for a never-run idle placeholder', () => {
+    expect(isFreshBoard(node('F', 1, { prompt: '', answer: '', status: 'idle' }).data)).toBe(true);
+  });
+  it('isFreshBoard: false for a ran board (own prompt/session)', () => {
+    expect(isFreshBoard(node('P', 1, { prompt: 'q', status: 'done', sessionId: 'sp' }).data)).toBe(false);
+  });
+  it('isFreshBoard: false for a compact checkpoint', () => {
+    expect(isFreshBoard(node('K', 1, { prompt: '', compact: true, status: 'idle', compactSession: 'cs' }).data)).toBe(false);
+  });
+  it('isFreshBoard: false for a collapsed representative', () => {
+    expect(isFreshBoard(node('G', 1, { prompt: '', status: 'idle', collapsedGraph: { hiddenIds: [] } }).data)).toBe(false);
+  });
+  it('forkableSession: own sessionId normally, compactSession for a compact checkpoint, undefined when absent', () => {
+    expect(forkableSession(node('P', 1, { sessionId: 'sp' }).data)).toBe('sp');
+    expect(forkableSession(node('K', 1, { compact: true, compactSession: 'cs' }).data)).toBe('cs');
+    expect(forkableSession(node('K2', 1, { compact: true }).data)).toBeUndefined();
+  });
+});
+
 describe('forkBaseFor — engine-aware fork base', () => {
   const claudeNode = (id: string, seq: number, extra: Partial<BoardData> = {}) =>
     node(id, seq, { engine: 'claude', ...extra });
@@ -1698,8 +1742,8 @@ describe('forkBaseFor — engine-aware fork base', () => {
     expect(r.resumeAt).toBeUndefined();
   });
 
-  it('same-engine compact parent → forks the compacted parentSessionId', () => {
-    const P = claudeNode('P', 1, { compact: true, parentSessionId: 'compacted-sess', sessionId: 'sp' });
+  it('same-engine compact parent → forks the compacted session (compactSession)', () => {
+    const P = claudeNode('P', 1, { compact: true, compactSession: 'compacted-sess', sessionId: 'sp' });
     const r = forkBaseFor(P, [P], [], 'claude');
     expect(r.parentSessionId).toBe('compacted-sess');
     expect(r.mergeContext).toBeUndefined();

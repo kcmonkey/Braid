@@ -60,6 +60,17 @@ describe('FileGraphStore', () => {
     expect(() => s.deleteGraph('c1')).not.toThrow();
   });
 
+  it('backupGraph copies the current file aside (.bak) before a destructive overwrite; no-op when absent', () => {
+    const s = store();
+    expect(() => s.backupGraph('c1')).not.toThrow(); // nothing to back up = fine
+    const graph = g(7);
+    s.writeGraph('c1', graph);
+    s.backupGraph('c1');
+    const bak = path.join(s.directory, 'c1.json.bak');
+    expect(fs.existsSync(bak)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(bak, 'utf8'))).toEqual(graph);
+  });
+
   it('preserves a corrupt graph file as .corrupt and returns null (no silent loss)', () => {
     const s = store();
     s.writeGraph('c1', g());

@@ -54,6 +54,13 @@ export class FileGraphStore {
 
   readGraph(id: string): SerializedGraph | null { return readJson<SerializedGraph>(this.graphFile(id)); }
   writeGraph(id: string, graph: SerializedGraph): void { writeJsonAtomic(this.graphFile(id), graph, false); }
+  /** Copy the current graph file aside (`<id>.json.bak`, one rolling backup) before a destructive migration
+   *  write-back. No-op when there is nothing to back up. (STM D0: backup before overwrite) */
+  backupGraph(id: string): void {
+    const src = this.graphFile(id);
+    try { fs.copyFileSync(src, `${src}.bak`); }
+    catch (e: any) { if (e?.code !== 'ENOENT') throw e; } // nothing to back up = fine
+  }
   deleteGraph(id: string): void {
     try { fs.unlinkSync(this.graphFile(id)); }
     catch (e: any) { if (e?.code !== 'ENOENT') throw e; } // already gone = fine

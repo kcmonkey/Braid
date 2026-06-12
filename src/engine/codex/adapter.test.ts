@@ -162,3 +162,70 @@ describe('CodexAdapter.forkThread (whole-thread fork, no mid-point)', () => {
     expect(fork?.params).toMatchObject({ threadId: 'TH', cwd: 'D:\\work', approvalPolicy: 'never' });
   });
 });
+
+// Native AskUserQuestion (capability-layer P1 / D6①): a server→client `item/tool/requestUserInput` renders
+// the existing AskUserCard via a SYNTHESIZED toolUse, blocks on onUserInput, then replies in Codex's
+// `{answers:{[id]:{answers}}}` shape. Drives onServerRequest from inside a fake turn/start.
+describe('CodexAdapter requestUserInput (native AskUserQuestion)', () => {
+  function harness(onUserInput: (ask: any) => Promise<any>) {
+    const toolUses: any[] = [];
+    const toolResults: any[] = [];
+    let rpcResponse: any;
+    const a = new CodexAdapter({ resolveBinary: () => undefined, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {},
+      dispose: () => {},
+      request: async (method: string, _params: any) => {
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') return { thread: { id: 'T' } };
+        if (method === 'turn/start') {
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          rpcResponse = await handlers.onServerRequest('item/tool/requestUserInput', 7, {
+            itemId: 'item-1',
+            questions: [{ id: 'q1', header: 'Pick', question: 'Which?', isSecret: false, isOther: false, options: [{ label: 'A', description: 'aa' }, { label: 'B', description: 'bb' }] }],
+          });
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+    const sink: any = {
+      session: () => {}, model: () => {}, update: () => {}, thinking: () => {},
+      toolUse: (_b: string, _ti: number, ev: any) => toolUses.push(ev),
+      toolResult: (_b: string, _ti: number, ev: any) => toolResults.push(ev),
+      rateLimit: () => {}, commands: () => {}, waiting: () => {}, task: () => {},
+      error: (_b: string, _ti: number | undefined, m: string) => { throw new Error(m); },
+      done: () => {},
+    };
+    const pre: any = {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async () => ({ allow: true }),
+      onUserInput: (_b: string, _ti: number, ask: any) => onUserInput(ask),
+    };
+    const ctl: any = { abort: new AbortController(), onLive: () => {} };
+    return { run: () => a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'hi', cwd: 'D:\\work' }, sink, pre, ctl), toolUses, toolResults, getResponse: () => rpcResponse };
+  }
+
+  it('synthesizes the card, maps the neutral ask, and replies in Codex {answers} shape', async () => {
+    let seenAsk: any;
+    const h = harness(async (ask) => { seenAsk = ask; return { answers: { q1: ['A'] }, canceled: false }; });
+    await h.run();
+    // the neutral ask carried the codex itemId + mapped questions
+    expect(seenAsk.toolUseId).toBe('item-1');
+    expect(seenAsk.questions[0]).toMatchObject({ id: 'q1', question: 'Which?', multiSelect: false });
+    // a synthesized AskUserQuestion toolUse rendered the card; a toolResult flipped it to answered
+    const ask = h.toolUses.find((e) => e.name === 'AskUserQuestion');
+    expect(ask?.id).toBe('item-1');
+    expect(ask.input.questions[0]).toMatchObject({ id: 'q1', question: 'Which?' });
+    expect(h.toolResults.find((r) => r.toolUseId === 'item-1')).toBeTruthy();
+    // replied to the app-server in Codex's response shape
+    expect(h.getResponse()).toEqual({ answers: { q1: { answers: ['A'] } } });
+  });
+
+  it('canceled → empty Codex answers', async () => {
+    const h = harness(async () => ({ answers: {}, canceled: true }));
+    await h.run();
+    expect(h.getResponse()).toEqual({ answers: {} });
+  });
+});

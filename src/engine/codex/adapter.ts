@@ -8,13 +8,14 @@ import type {
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
   BranchSummarizeRequest, CollapseDigestRequest, PermissionVerdict,
 } from '../types';
-import type { ProviderAccount, SlashCommandSpec, EngineId, ImageInput } from '../../protocol';
+import type { ProviderAccount, SlashCommandSpec, EngineId, ImageInput, UserInputQuestion } from '../../protocol';
 import { PROVIDER_CATALOG, TAG_VOCAB } from '../../protocol';
 import { CodexRpc } from './transport';
 import {
   reduceCodexNotification, buildCodexTurnDone, initCodexParseState, codexView, type CodexParseState,
 } from './reduce';
 import { CodexMcpControl, CodexAccountControl, codexSkillsToSlashCommands } from './control';
+import { userInputReason } from '../../webview/merge';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -184,8 +185,37 @@ export class CodexAdapter implements Engine {
         if ('deny' in verdict) return { decision: 'decline' };
         return { decision: verdict.always ? 'acceptForSession' : 'accept' };
       }
-      // item/tool/requestUserInput (native AskUserQuestion) + others: not wired in v1 → safe default.
-      // TODO(M-Codex F5): render the AskUserQuestion card + return the user's answer. (knowledge.md)
+      if (method === 'item/tool/requestUserInput') {
+        // Native AskUserQuestion. Map Codex's questions onto the neutral UserInputQuestion shape, render the
+        // existing AskUserCard via a synthesized toolUse, block on the user's STRUCTURED answer, then reply in
+        // Codex's `{answers:{[id]:{answers:[]}}}` shape. (capability-layer P1 / D6①)
+        const itemId: string = params?.itemId ?? '';
+        const questions: UserInputQuestion[] = (Array.isArray(params?.questions) ? params.questions : [])
+          .map((q: any): UserInputQuestion => ({
+            id: typeof q?.id === 'string' ? q.id : undefined,
+            header: typeof q?.header === 'string' ? q.header : '',
+            question: typeof q?.question === 'string' ? q.question : '',
+            multiSelect: false, // Codex requestUserInput is single-select per question (schema has no multiSelect)
+            options: (Array.isArray(q?.options) ? q.options : [])
+              .map((o: any) => ({ label: typeof o?.label === 'string' ? o.label : '', description: typeof o?.description === 'string' ? o.description : '' }))
+              .filter((o: { label: string }) => o.label),
+            isSecret: !!q?.isSecret,
+            isOther: !!q?.isOther,
+          }))
+          .filter((q: UserInputQuestion) => q.question);
+        // Render the card in the turn flow (same model the webview already renders for Claude AskUserQuestion).
+        sink.toolUse(req.boardId, state.turnIndex, { id: itemId, name: 'AskUserQuestion', input: { questions }, textOffset: state.answer.length, seq: state.evSeq++ });
+        const answer = await pre.onUserInput(req.boardId, state.turnIndex, { toolUseId: itemId, questions }, ctl.abort.signal);
+        // Flip the card to its answered (read-only) view + reply to the app-server in Codex's response shape.
+        sink.toolResult(req.boardId, state.turnIndex, { toolUseId: itemId, content: userInputReason(questions, answer), isError: false });
+        const out: Record<string, { answers: string[] }> = {};
+        if (!answer.canceled) {
+          for (const q of questions) if (q.id) out[q.id] = { answers: answer.answers[q.id] ?? [] };
+        }
+        return { answers: out };
+      }
+      // Other server requests (PTY interactive, dynamic-tool execution, MCP elicitation, …): not wired → safe
+      // default (D5: no Braid carrier surface). Adding one = a new neutral channel, not a silent special-case.
       return {};
     };
 

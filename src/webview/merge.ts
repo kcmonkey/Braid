@@ -1,7 +1,7 @@
 // Pure graph/merge/serialization logic — no React/DOM deps so it's unit-testable in plain node.
 // Types from @xyflow/react are imported type-only (erased at compile time; xyflow is never loaded at runtime).
 import type { Node, Edge } from '@xyflow/react';
-import { TAG_VOCAB, PROVIDER_CATALOG, type BoardTag, type AsyncPending, type EngineId } from '../protocol';
+import { TAG_VOCAB, PROVIDER_CATALOG, type BoardTag, type AsyncPending, type EngineId, type UserInputOption, type UserInputQuestion, type UserInputAnswer } from '../protocol';
 
 // 'waiting' (异步续接) = the last round settled but the board's session is HELD OPEN for in-flight background
 // tasks / scheduled wakeups; the SDK re-drives → a new round may still arrive. Non-terminal (like 'streaming')
@@ -96,13 +96,10 @@ export const TOOL_RESULT_CAP = 4000;
 // can't succeed (auto-deny), so a PreToolUse hook injects the user's choice as the same-turn
 // tool_result. These are the per-question shapes (subset of the SDK's AskUserQuestionInput) — the
 // data arrives in the AskUserQuestion tool_use.input.questions, rendered by AskUserCard.
-export interface AskUserOption { label: string; description: string; preview?: string }
-export interface AskUserQuestion {
-  question: string;
-  header: string;
-  multiSelect?: boolean;
-  options: AskUserOption[];
-}
+// Neutral shapes live in protocol.ts (shared with the engine adapters via onUserInput). These aliases keep
+// the long-standing webview names working. (capability-layer P1 / D6①)
+export type AskUserOption = UserInputOption;
+export type AskUserQuestion = UserInputQuestion;
 
 // Defensively parse an AskUserQuestion tool_use.input into validated questions. The data comes from
 // the model and (almost) always matches AskUserQuestionInput, but a malformed/partial input must NOT
@@ -131,7 +128,17 @@ export function parseAskUserQuestions(input: Record<string, unknown>): AskUserQu
         preview: typeof oo.preview === 'string' ? oo.preview : undefined,
       });
     }
-    out.push({ question, header: typeof o.header === 'string' ? o.header : '', multiSelect: !!o.multiSelect, options });
+    out.push({
+      question,
+      header: typeof o.header === 'string' ? o.header : '',
+      multiSelect: !!o.multiSelect,
+      options,
+      // id (Codex's stable per-question id; absent for Claude → answer keyed by text), and the secret/other
+      // hints. id is only attached when non-empty so Claude questions stay text-keyed. (capability-layer P1)
+      ...(typeof o.id === 'string' && o.id ? { id: o.id } : {}),
+      isSecret: !!o.isSecret,
+      isOther: !!o.isOther,
+    });
   }
   return out;
 }
@@ -145,6 +152,24 @@ export function formatAskUserAnswer(answers: Record<string, string>): string {
     if (a && a.trim()) lines.push(`Q: ${q} → ${a.trim()}`);
   }
   return lines.length > 1 ? lines.join('\n') : '[The user made no selection]';
+}
+
+// The text injected as the same-turn tool_result when a question card is canceled (= the model is told the
+// user dismissed it). SSOT here so both the Claude adapter (deny-reason path) and any future consumer agree.
+export const ASK_CANCEL_REASON = '[The user canceled the question without making a selection]';
+
+// Turn a STRUCTURED UserInputAnswer back into the Claude-path deny-reason string (the same-turn tool_result).
+// Looks each question's selection up by id (when present) else by question text, comma-joins the chosen
+// labels, and reuses formatAskUserAnswer so the output is byte-identical to the pre-P1 webview formatting.
+// Pure → unit-tested. (capability-layer P1 / D6①: deny-reason formatting moved off the wire into the adapter)
+export function userInputReason(questions: UserInputQuestion[], answer: UserInputAnswer): string {
+  if (answer.canceled) return ASK_CANCEL_REASON;
+  const joined: Record<string, string> = {};
+  for (const q of questions) {
+    const sel = answer.answers[q.id ?? q.question] ?? [];
+    if (sel.length) joined[q.question] = sel.join(', ');
+  }
+  return formatAskUserAnswer(joined);
 }
 
 // MCP tool_use names arrive as `mcp__<server>__<tool>` (the CLI namespaces every MCP server's tools).
@@ -282,6 +307,12 @@ export interface CollapsedGraph {
   digestKey?: string;
 }
 
+// Send-Time Materialization (D1): a fresh/queued board's provider is an INTENT, not yet a fact. It either
+// follows the active provider at send time, or is pinned to a specific engine (e.g. after a per-board switch).
+// A ran board's engine is the `engine` fact; a fresh board's is `providerIntent`, resolved at send. NON-
+// authoritative in P0 (introduced + migrated from the old stamped `engine`; send still reads the legacy base).
+export type ProviderIntent = { kind: 'activeAtSend' } | { kind: 'pinned'; engine: EngineId };
+
 export interface BoardData {
   prompt: string;
   answer: string;
@@ -345,11 +376,12 @@ export interface BoardData {
   // reminder survives reopening the canvas (decisions.md 2026-06-09 board completion notification / unread). Display-only.
   unread?: boolean;
   // M9 compact: this board is a /compact boundary. compactSummary holds the native /compact summary of
-  // everything above it; parentSessionId points at the compacted (forked) session. Fork resumes that
-  // session (compressed context, automatic boundary); merge's ancestor walk stops here and uses the
-  // summary in its place. (knowledge.md "native /compact")
+  // everything above it; compactSession points at the compacted (forked) session (STM D5: a dedicated field,
+  // no longer overloaded onto parentSessionId). Fork resumes that session (compressed context, automatic
+  // boundary); merge's ancestor walk stops here and uses the summary in its place. (knowledge.md "native /compact")
   compact?: boolean;
   compactSummary?: string;
+  compactSession?: string;
   // Visual-only graph collapse: this visible board is the representative for a hidden selected line segment.
   // The hidden boards stay in the React Flow graph (node.hidden=true) so merge/fork/focus ancestry remains
   // exact; expanding this board simply unhides hiddenIds and clears this marker. Not engine compaction.
@@ -359,6 +391,9 @@ export interface BoardData {
   // turn router (host) and the engine-aware fork base read it via boardEngine(). Absent ⇒ 'claude' (legacy /
   // no-op while one engine is registered). Persisted via ...data. A board never mixes engines across its rounds.
   engine?: EngineId;
+  // Send-Time Materialization (D1): a FRESH board's provider intent (the ran-board fact is `engine`). NON-
+  // authoritative in P0 — migrated from an old fresh board's stamped `engine` → { kind:'pinned', engine }.
+  providerIntent?: ProviderIntent;
   sessionId?: string;        // this board's own session (after done) — under Lazy Fork, the SPINE session shared along a linear resume path
   parentSessionId?: string;  // session to resume+fork from (set when forked)
   // Lazy Fork: terminal assistant uuid of this board's last turn (the resumeSessionAt marker). Lets a
@@ -951,7 +986,7 @@ export function forkBaseFor(
 ): { parentSessionId?: string; resumeAt?: string; mergeContext?: string } {
   const sameEngine = (d: BoardData) => boardEngine(d) === turnEngine;
   if (sameEngine(parent.data)) {
-    if (parent.data.compact) return { parentSessionId: parent.data.parentSessionId };
+    if (parent.data.compact) return { parentSessionId: parent.data.compactSession };
     if (!parent.data.lineageDirty) return { parentSessionId: parent.data.sessionId };
   }
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
@@ -1467,9 +1502,16 @@ export function computeMerge(ids: string[], edges: Edge[], byId: Record<string, 
 }
 
 /** A node's forkable session id for its engine: its own sessionId, or (for a compact boundary) the compacted
- * `parentSessionId`. undefined ⇒ not natively forkable. (M-MultiEngine) */
+ * session in `compactSession`. undefined ⇒ not natively forkable. (M-MultiEngine; STM D5) */
 export function forkableSession(d: BoardData): string | undefined {
-  return d.compact ? d.parentSessionId : d.sessionId;
+  return d.compact ? d.compactSession : d.sessionId;
+}
+
+/** Send-Time Materialization: a board that has never run and owns no native session of its own — a pure
+ * execution intent (root / fork / merge placeholder awaiting its first send). False for ran boards (own
+ * prompt/session), compact checkpoints, and collapsed representatives. (decisions.md D1) */
+export function isFreshBoard(d: SBoardData): boolean {
+  return !d.prompt && d.status === 'idle' && !d.compact && !d.collapsedGraph && !d.sessionId;
 }
 
 /**
@@ -1721,7 +1763,11 @@ export function mergeFit(
 }
 
 // ---- Persistence (M3) ----
-export const GRAPH_VERSION = 1;
+// STM D0: bumped 1→2 for the clean board model (compact pointer moved to `compactSession`, `providerIntent`
+// added). migrateGraph (src/persistence/migrateGraph.ts) brings a v1 graph forward; the restore gate migrates
+// a non-null older graph rather than seed-wiping it. NEVER bump this while the restore gate still discards a
+// version mismatch. (decisions.md D0)
+export const GRAPH_VERSION = 2;
 export type SBoardData = Omit<BoardData, 'onSend' | 'onFork' | 'onStop' | 'onCompact'>;
 export interface SNode { id: string; position: { x: number; y: number }; data: SBoardData; hidden?: boolean; }
 export type EdgeKind = 'fork' | 'merge' | 'compact' | 'collapse';

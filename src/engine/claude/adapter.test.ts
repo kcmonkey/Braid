@@ -55,7 +55,7 @@ function harness(opts: { loadSdk?: () => Promise<any>; config?: ProviderConfig; 
   return { adapter, fake, captured };
 }
 
-const noopPre: PreToolInterceptor = { onPreToolUse: async () => ({ proceed: true }), onPermissionRequest: async () => ({ allow: true }) };
+const noopPre: PreToolInterceptor = { onPreToolUse: async () => ({ proceed: true }), onPermissionRequest: async () => ({ allow: true }), onUserInput: async () => ({ answers: {}, canceled: true }) };
 const req = (attach: Attach, extra: Partial<TurnRequest> = {}): TurnRequest => ({ boardId: 'b1', attach, prompt: 'hi', cwd: '/w', ...extra });
 const init = { type: 'system', subtype: 'init', session_id: 's1', model: 'claude-opus-4-8' };
 
@@ -446,27 +446,58 @@ describe('ClaudeAdapter — PreToolUse hook wiring', () => {
     return captured.options.hooks.PreToolUse[0].hooks[0] as (input: any, id: string, ctx: { signal: AbortSignal }) => Promise<any>;
   }
   let lastPreArgs: any;
+  let lastUserInputAsk: any;
+  let userInputAnswer: { answers: Record<string, string[]>; canceled: boolean } = { answers: {}, canceled: false };
   function captureRefPre(): PreToolInterceptor {
-    return { onPreToolUse: async (...args): Promise<PreToolDecision> => { lastPreArgs = args; return preReply; }, onPermissionRequest: async () => ({ allow: true }) };
+    return {
+      onPreToolUse: async (...args): Promise<PreToolDecision> => { lastPreArgs = args; return preReply; },
+      onPermissionRequest: async () => ({ allow: true }),
+      onUserInput: async (_b, _ti, ask) => { lastUserInputAsk = ask; return userInputAnswer; },
+    };
   }
   let preReply: PreToolDecision = { proceed: true };
 
-  it('deny from interceptor → SDK block shape with the reason as the tool_result', async () => {
-    preReply = { deny: true, reason: 'You chose: Hiking' };
+  it('AskUserQuestion → routed to onUserInput → SDK block with the adapter-formatted deny-reason (D6①)', async () => {
+    userInputAnswer = { answers: { 'Pick one': ['Hiking'] }, canceled: false };
     const hook = await getHook();
-    const out = await hook({ tool_name: 'AskUserQuestion', tool_input: { questions: [] } }, 'tu1', { signal: new AbortController().signal });
+    const out = await hook(
+      { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Pick one', header: 'H', options: [{ label: 'Hiking', description: '' }] }] } },
+      'tu1', { signal: new AbortController().signal },
+    );
     expect(out).toEqual({
       decision: 'block',
-      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'You chose: Hiking' },
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: '[The user answered via the UI]\nQ: Pick one → Hiking' },
     });
-    // the adapter forwarded toolName + tool_input to the interceptor
-    expect(lastPreArgs[2]).toBe('AskUserQuestion');
+    // routed through onUserInput (NOT onPreToolUse), carrying the tool_use id + parsed questions
+    expect(lastUserInputAsk.toolUseId).toBe('tu1');
+    expect(lastUserInputAsk.questions[0].question).toBe('Pick one');
+  });
+
+  it('AskUserQuestion canceled → deny-reason is the cancel sentinel', async () => {
+    userInputAnswer = { answers: {}, canceled: true };
+    const hook = await getHook();
+    const out = await hook(
+      { tool_name: 'AskUserQuestion', tool_input: { questions: [{ question: 'Pick one', header: 'H', options: [{ label: 'Hiking', description: '' }] }] } },
+      'tu1', { signal: new AbortController().signal },
+    );
+    expect(out.hookSpecificOutput.permissionDecisionReason).toBe('[The user canceled the question without making a selection]');
+  });
+
+  it('non-AskUserQuestion deny from onPreToolUse → SDK block shape with the reason', async () => {
+    preReply = { deny: true, reason: 'nope' };
+    const hook = await getHook();
+    const out = await hook({ tool_name: 'Bash', tool_input: { command: 'rm -rf /' } }, 'tu2', { signal: new AbortController().signal });
+    expect(out).toEqual({
+      decision: 'block',
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'nope' },
+    });
+    expect(lastPreArgs[2]).toBe('Bash');
   });
 
   it('proceed from interceptor → empty hook output (tool runs)', async () => {
     preReply = { proceed: true };
     const hook = await getHook();
-    const out = await hook({ tool_name: 'Read', tool_input: { file_path: 'a.ts' } }, 'tu2', { signal: new AbortController().signal });
+    const out = await hook({ tool_name: 'Read', tool_input: { file_path: 'a.ts' } }, 'tu3', { signal: new AbortController().signal });
     expect(out).toEqual({});
   });
 });
@@ -478,6 +509,7 @@ describe('ClaudeAdapter — canUseTool (permission) wiring', () => {
     return {
       onPreToolUse: async () => ({ proceed: true }),
       onPermissionRequest: async (_b, _ti, ask): Promise<PermissionVerdict> => { lastAsk = ask; return verdict; },
+      onUserInput: async () => ({ answers: {}, canceled: true }),
     };
   }
   async function getCanUse() {

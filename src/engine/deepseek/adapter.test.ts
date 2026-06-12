@@ -33,6 +33,7 @@ function recordingSink() {
 const noopPre: PreToolInterceptor = {
   onPreToolUse: async () => ({ proceed: true }),
   onPermissionRequest: async () => ({ allow: true }),
+  onUserInput: async () => ({ answers: {}, canceled: true }),
 };
 
 const req = (attach: Attach, extra: Partial<TurnRequest> = {}): TurnRequest => ({

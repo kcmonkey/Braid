@@ -3,7 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import type { WebviewMessage, HostMessage, McpServerInfo, SlashCommandSpec } from './protocol';
 import type { SerializedGraph, EditorContext } from './webview/merge';
-import { EDITOR_CONTEXT_CAP } from './webview/merge';
+import { EDITOR_CONTEXT_CAP, GRAPH_VERSION } from './webview/merge';
+import { migrateGraph, isValidGraph } from './persistence/migrateGraph';
 import type { BraidConfig, ProviderConfig, CanvasConfig, LegacyFlatProviderConfig } from './sdkOptions';
 import { DEFAULT_PROVIDER_CONFIG, DEFAULT_CANVAS_CONFIG, migrateLegacyConfig } from './sdkOptions';
 import type { BraidSettings } from './engine/host';
@@ -12,7 +13,7 @@ import { FileGraphStore, resolveGraphFallback } from './persistence/graphStore';
 import type { Canvas } from './persistence/graphStore';
 import { toCapabilitiesView } from './engine/capabilities';
 import { PROVIDER_CATALOG } from './protocol';
-import type { EngineId, ProviderCapabilitiesView, ProviderAccount } from './protocol';
+import type { EngineId, ProviderCapabilitiesView, ProviderAccount, UserInputAsk, UserInputAnswer } from './protocol';
 import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry, resolveClaudeBinaryFromEntry } from './runtime/sdk-provision';
 import { resolveCodexBinary } from './runtime/codex-bin';
 import { ensureSdkInstalled } from './runtime/sdk-download';
@@ -40,14 +41,28 @@ function graphStore(): FileGraphStore {
 
 /** Read a canvas's graph from the file store, falling back to the legacy VS Code workspaceState copy when
  *  the file store has none — and writing it through to the file store (self-heal) so the dependency on the
- *  old storage clears as canvases are opened. Compatibility net for a partially-completed bulk migration. */
+ *  old storage clears as canvases are opened. Compatibility net for a partially-completed bulk migration.
+ *  STM D0: this is the authoritative migration point — an older graph is brought to GRAPH_VERSION (backing up
+ *  the old file, validating before overwrite), so the webview always receives a current-version graph. The
+ *  webview keeps a defensive migrate-not-seed guard for any older graph that still reaches it. */
 function readGraphFor(ctx: vscode.ExtensionContext, canvasId: string): SerializedGraph | null {
   const store = graphStore();
   const { graph, healFromLegacy } = resolveGraphFallback(
     store.readGraph(canvasId),
     ctx.workspaceState.get<SerializedGraph>(graphKey(canvasId)),
   );
-  if (healFromLegacy && graph) store.writeGraph(canvasId, graph); // copy old → new
+  if (!graph) return null;
+  if (graph.version < GRAPH_VERSION) {
+    const migrated = migrateGraph(graph);
+    if (isValidGraph(migrated) && migrated.version === GRAPH_VERSION) {
+      store.backupGraph(canvasId);        // one rolling backup before the destructive overwrite
+      store.writeGraph(canvasId, migrated);
+    } else {
+      console.error(`[Braid] graph migration produced an invalid result for ${canvasId}; not overwriting the stored file`);
+    }
+    return migrated; // hand the migrated graph to the webview even if we declined to persist (never seed-wipe)
+  }
+  if (healFromLegacy) store.writeGraph(canvasId, graph); // current-version legacy copy → self-heal into the file store
   return graph;
 }
 
@@ -195,12 +210,11 @@ function clearWaitingForRun(run: LiveRun) {
   }
 }
 
-// M10 AskUserQuestion: a PreToolUse hook intercepts the model's AskUserQuestion call and blocks on a
-// promise here until the webview replies with the user's choice. Keyed canvasId::toolUseId (same
-// compound-key discipline as aborters) so concurrent canvases never cross-resolve. Value = the
-// resolver, called with the deny-reason text that becomes the same-turn tool_result.
-const pendingAsks = new Map<string, (reason: string) => void>();
-const ASK_CANCEL_REASON = '[The user canceled the question without making a selection]';
+// AskUserQuestion (capability-layer P1 / D6①): onUserInput blocks here until the webview replies with the
+// user's STRUCTURED selections. Keyed canvasId::toolUseId (same compound-key discipline as aborters) so
+// concurrent canvases never cross-resolve. Both Claude (PreToolUse hook) and Codex (server request) route
+// here; each adapter maps the answer to its own reply, so the host no longer formats any deny-reason here.
+const pendingUserInputs = new Map<string, (a: UserInputAnswer) => void>();
 
 // Permission approval (canUseTool): one pending resolver per in-flight permission prompt, keyed
 // `${canvasId}::${toolUseId}` (same compound-key discipline as pendingAsks/aborters). The webview's
@@ -820,10 +834,10 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       await adoptEnvKey(context, msg.provider);
       break;
     case 'askUserAnswer': {
-      // M10: user answered an AskUserQuestion card → unblock the waiting PreToolUse hook with the
-      // pre-formatted reason (or a cancel reason), which becomes the model's same-turn tool_result.
-      const resolve = pendingAsks.get(`${canvasId}::${msg.toolUseId}`);
-      resolve?.(msg.canceled ? ASK_CANCEL_REASON : msg.reason);
+      // The user answered (or canceled) a question card → unblock onUserInput with the STRUCTURED selections.
+      // Whichever adapter is waiting maps them to its own reply (Claude deny-reason / Codex {answers}). (P1/D6①)
+      const resolve = pendingUserInputs.get(`${canvasId}::${msg.toolUseId}`);
+      resolve?.({ answers: msg.answers ?? {}, canceled: !!msg.canceled });
       break;
     }
     case 'permissionResponse': {
@@ -1458,28 +1472,35 @@ function makeSink(canvasId: string, provider?: EngineId): EventSink {
  * same-turn tool_result). `boardSignal` = the board's abort signal (stop/delete). (plans/Engine-Abstraction) */
 function makePreToolInterceptor(canvasId: string, boardId: string, boardSignal: AbortSignal): PreToolInterceptor {
   return {
-    onPreToolUse: async (bId, toolUseId, toolName, input, ctxSignal): Promise<PreToolDecision> => {
+    onPreToolUse: async (bId, toolUseId, toolName, input): Promise<PreToolDecision> => {
       const routeBoardId = bId || boardId;
       // Node-Delete Phase 2: snapshot a mutating tool's target file (once per file per board) before it runs.
       if (toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') {
         const fp = input?.file_path;
         if (typeof fp === 'string' && fp) captureFileSnapshot(canvasId, routeBoardId, fp);
       }
-      if (toolName !== 'AskUserQuestion') return { proceed: true };
-      // The webview already learned of this AskUserQuestion via the `toolUse` message and renders the card
-      // from step.input.questions; it replies with askUserAnswer keyed by the same tool_use id — so just block.
-      const pk = `${canvasId}::${toolUseId}`;
-      const reason = await new Promise<string>((resolve) => {
-        pendingAsks.set(pk, resolve);
-        const onAbort = () => resolve(ASK_CANCEL_REASON);
+      // AskUserQuestion no longer routes through here — the Claude adapter sends it to onUserInput, which
+      // blocks on the user's structured answer and formats the deny-reason adapter-side. (capability-layer P1)
+      return { proceed: true };
+    },
+    // Structured ask-user round-trip (capability-layer P1 / D6①): the card is already rendered (Claude's real
+    // AskUserQuestion tool_use, or a synthesized one from the Codex adapter); we just block on the webview's
+    // askUserAnswer and hand the STRUCTURED selections back to the adapter, which maps them to its own reply
+    // (Claude → deny-reason / Codex → {answers}). A board stop/delete (boardSignal) or the engine's own abort
+    // (ctxSignal) resolves to canceled so the turn never hangs.
+    onUserInput: async (_bId, _turnIndex, ask, ctxSignal): Promise<UserInputAnswer> => {
+      const pk = `${canvasId}::${ask.toolUseId}`;
+      const answer = await new Promise<UserInputAnswer>((resolve) => {
+        pendingUserInputs.set(pk, resolve);
+        const onAbort = () => resolve({ answers: {}, canceled: true });
         if (boardSignal.aborted || ctxSignal?.aborted) onAbort();
         else {
           boardSignal.addEventListener('abort', onAbort, { once: true });
           ctxSignal?.addEventListener('abort', onAbort, { once: true });
         }
       });
-      pendingAsks.delete(pk);
-      return { deny: true, reason };
+      pendingUserInputs.delete(pk);
+      return answer;
     },
     // Native permission ask (canUseTool): forward the prompt to the webview (it renders the approve/deny
     // UI on the board card + ChatView and joins the attention/notification SSOT), then block until the

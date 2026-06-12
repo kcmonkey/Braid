@@ -21,9 +21,10 @@ import {
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
   planCollapseSelection, collapseSelection, planAutoCollapseAfterDone, applyCollapsePlans, expandCollapsedGraph, syncHiddenEdges,
   needsCollapseDigest, collapseDigestKey, collapseDigestText,
-  listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
+  listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
+import { migrateGraph } from '../persistence/migrateGraph';
 import { rankResults, parseQuery, type SearchHit } from './search';
 import { relayoutAnchored, type LayoutDir } from './layout';
 import { markdownUrlTransform, parseLocalPathLink } from './localLinks';
@@ -386,23 +387,26 @@ function AskUserCard({ step }: { step: ToolStep }) {
       return { ...s, [qi]: [oi] };
     });
 
-  // One question's answer = selected option labels (multi → comma-joined) + any freeform "other" text.
-  const answerFor = (qi: number, q: AskUserQuestion): string => {
+  // One question's chosen option labels (+ any freeform "other" text) as a list — the structured answer.
+  const labelsFor = (qi: number, q: AskUserQuestion): string[] => {
     const labels = (sel[qi] ?? []).map((oi) => q.options[oi]?.label).filter(Boolean) as string[];
     const ot = (other[qi] ?? '').trim();
     if (ot) labels.push(ot);
-    return labels.join(', ');
+    return labels;
   };
+  const answerFor = (qi: number, q: AskUserQuestion): string => labelsFor(qi, q).join(', ');
 
   const canSubmit = !submitted && questions.length > 0 && questions.every((q, qi) => answerFor(qi, q).length > 0);
 
   const submit = () => {
-    const answers: Record<string, string> = {};
-    questions.forEach((q, qi) => { answers[q.question] = answerFor(qi, q); });
+    // Structured selections keyed by question id (Codex) or text (Claude) → string[]; the waiting adapter
+    // maps these to its own reply (Claude deny-reason / Codex {answers}). (capability-layer P1 / D6①)
+    const answers: Record<string, string[]> = {};
+    questions.forEach((q, qi) => { answers[q.id ?? q.question] = labelsFor(qi, q); });
     setSubmitted(true);
-    post({ type: 'askUserAnswer', toolUseId: step.id, reason: formatAskUserAnswer(answers) });
+    post({ type: 'askUserAnswer', toolUseId: step.id, answers });
   };
-  const cancel = () => { setSubmitted(true); post({ type: 'askUserAnswer', toolUseId: step.id, reason: '', canceled: true }); };
+  const cancel = () => { setSubmitted(true); post({ type: 'askUserAnswer', toolUseId: step.id, answers: {}, canceled: true }); };
 
   return (
     <div className="askuser nodrag" onMouseDown={(e) => e.stopPropagation()}>
@@ -1294,7 +1298,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
     && providerCaps[boardEngine(data)]?.routedFollowups === true;
   const canFork = (data.status === 'done' && !!data.sessionId)
     || canQueueChild
-    || (!!data.compact && data.status === 'idle' && !!data.parentSessionId);
+    || (!!data.compact && data.status === 'idle' && !!data.compactSession);
   const forkBtn = canFork ? (
     <button
       className={`board__add nodrag nopan ${dir === 'LR' ? 'board__add--r' : 'board__add--b'}`}
@@ -3447,7 +3451,7 @@ function App() {
         prompt: '', answer: '', status: 'streaming', seq: seqRef.current++,
         compact: true,
         engine: boardEngine(board.data), // compact forks the SOURCE board's session → same engine (AD1)
-        parentSessionId: board.data.sessionId, // placeholder; replaced with the compacted session on `compacted`
+        compactSession: board.data.sessionId, // placeholder; replaced with the compacted session on `compacted`
         onSend, onFork, onStop, onCompact,
       },
     };
@@ -4366,8 +4370,11 @@ function App() {
       switch (m.type) {
         case 'restored': {
           const g = m.graph as SerializedGraph | null;
-          if (g && g.version === GRAPH_VERSION) restoreGraph(g);
-          else seedRoot(); // no/incompatible store → fresh canvas
+          // STM D0: migrate a non-null older graph rather than seed-wiping it (idempotent — the host already
+          // migrated at the persistence boundary; this is the defensive guard). Only a missing/corrupt store
+          // seeds a fresh canvas. NEVER seed-wipe a non-null graph. (decisions.md D0)
+          if (g) restoreGraph(migrateGraph(g));
+          else seedRoot();
           hydratedRef.current = true; // auto-save may run now
           break;
         }
@@ -4578,7 +4585,7 @@ function App() {
           // condensed digest shown on the card through the standard card-gist machinery (far gist + detail
           // body) at every zoom. Left unset if the digest came back empty → the card falls back to a
           // truncated slice of the raw summary (never the full ~5K dump in the always-rendered slot).
-          patch(m.boardId, () => ({ status: 'idle', parentSessionId: m.sessionId, compactSummary: m.summary, summary: m.digest || undefined }));
+          patch(m.boardId, () => ({ status: 'idle', compactSession: m.sessionId, compactSummary: m.summary, summary: m.digest || undefined }));
           break;
         case 'toolUse':
           patchTurn(m.boardId, m.turnIndex, (t) => ({ steps: [...(t.steps ?? []), { id: m.id, name: m.name, input: m.input, parentId: m.parentId, textOffset: m.textOffset, seq: m.seq }] }), queueStartFields(m.boardId));

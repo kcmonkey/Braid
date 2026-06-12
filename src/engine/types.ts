@@ -4,7 +4,7 @@
 import type { ThinkMark } from '../webview/merge';
 import type {
   ImageInput, McpServerInfo, EngineId, ModelOption, ProviderAccount, ProviderUsage, RateLimitSnapshot,
-  SlashCommandSpec, BackgroundTaskInfo, CronInfo, AsyncPending, TaskEvent,
+  SlashCommandSpec, BackgroundTaskInfo, CronInfo, AsyncPending, TaskEvent, UserInputAsk, UserInputAnswer,
 } from '../protocol';
 
 // EngineId SSOT moved to protocol.ts (shared by both bundles + the catalog). Re-exported here so existing
@@ -134,6 +134,13 @@ export interface PreToolInterceptor {
   onPermissionRequest(
     boardId: string, turnIndex: number, ask: PermissionAsk, signal: AbortSignal,
   ): Promise<PermissionVerdict>;
+  /** Structured "ask the user a question" round-trip (neutral; both Claude's AskUserQuestion and Codex's
+   * `item/tool/requestUserInput` route here). The card is rendered from a synthesized/real
+   * `toolUse(name:'AskUserQuestion')`; this blocks until the user answers (or the turn aborts → canceled).
+   * Each adapter maps the returned UserInputAnswer to its own reply. (capability-layer P1 / D6①) */
+  onUserInput(
+    boardId: string, turnIndex: number, ask: UserInputAsk, signal: AbortSignal,
+  ): Promise<UserInputAnswer>;
 }
 
 export interface TurnRoute {
