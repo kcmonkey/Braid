@@ -2282,34 +2282,99 @@ function formatReset(iso?: string | null): string {
   return 'resets ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-// Direct provider selector for the composers + the canvas top bar. Rendered as a COMPACT DROPDOWN (native
-// <select> — its OS-drawn option menu escapes a board card's overflow:hidden, which a CSS popover would not).
-// Switching sets the canvas-local active provider for NEW turns: an already-run board keeps its immutable
-// stamped `BoardData.engine` (its session lives on that engine), while every FRESH (never-run) board is
-// re-stamped to the new engine so the switch visibly takes effect on it (see onSetActiveProvider).
+// The popover list for ProviderQuickSwitch. Portal-rendered (mirrors AutofillMenu) so its themed panel escapes
+// a board card's overflow:hidden — a native <select>'s OS-drawn menu can't be themed, which is why this is a
+// custom menu. Anchored to the trigger's screen rect; flips above when there's little room below.
+function ProviderMenu({ anchorRef, activeProvider, onPick, onClose }: {
+  anchorRef: React.RefObject<HTMLButtonElement>;
+  activeProvider: EngineId;
+  onPick: (id: EngineId) => void;
+  onClose: () => void;
+}) {
+  const menuRef = useRef<HTMLDivElement>(null);
+  // Dismiss on outside click / Escape (bubble phase; clicks inside the trigger or menu are ignored so an item
+  // pick isn't pre-empted). The trigger's own onClick toggles closed, so anchor clicks are left to it.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      const t = e.target as globalThis.Node | null; // DOM Node — `Node` is shadowed by the @xyflow/react import
+      if (anchorRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      onClose();
+    };
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('mousedown', onDown);
+    window.addEventListener('keydown', onKey);
+    return () => { window.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
+  }, [anchorRef, onClose]);
+  const btn = anchorRef.current;
+  if (!btn) return null;
+  const rect = btn.getBoundingClientRect();
+  const width = Math.max(rect.width, 150);
+  let left = Math.max(8, rect.left);
+  if (left + width > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - width);
+  const below = rect.bottom < window.innerHeight - 220; // little room below → flip above
+  const style: React.CSSProperties = below
+    ? { position: 'fixed', left, top: rect.bottom + 6, minWidth: width, zIndex: 80 }
+    : { position: 'fixed', left, bottom: window.innerHeight - rect.top + 6, minWidth: width, zIndex: 80 };
+  return createPortal(
+    <div ref={menuRef} className="provider-menu nodrag nopan" style={style} onMouseDown={(e) => e.stopPropagation()}>
+      {PROVIDER_CATALOG.map((p) => (
+        <button
+          key={p.id}
+          type="button"
+          className={`provider-menu__item ${p.id === activeProvider ? 'is-active' : ''}`}
+          disabled={!p.implemented}
+          title={p.implemented ? `Use ${p.name} for new turns` : `${p.name} — coming soon`}
+          onClick={(e) => { e.stopPropagation(); if (p.implemented) onPick(p.id); }}
+        >
+          <span className="provider-menu__dot" style={{ background: p.accent }} />
+          <span className="provider-menu__name">{p.name}</span>
+          {!p.implemented && <span className="provider-menu__soon">soon</span>}
+          {p.id === activeProvider && <span className="provider-menu__check" aria-hidden="true">✓</span>}
+        </button>
+      ))}
+    </div>,
+    document.body,
+  );
+}
+
+// Direct provider selector for the composers + the canvas top bar. A COMPACT custom dropdown (trigger: dot +
+// name + chevron; menu: ProviderMenu) — themed to match the rest of the UI (a native <select>'s option list is
+// OS-drawn and can't be styled to the dark theme). Switching sets the canvas-local active provider for NEW
+// turns: an already-run board keeps its immutable stamped `BoardData.engine` (its session lives on that
+// engine), while every FRESH (never-run) board is re-stamped to the new engine (see onSetActiveProvider).
 function ProviderQuickSwitch({ activeProvider, onSetActive }: {
   activeProvider: EngineId;
   onSetActive: (id: EngineId) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
   if (PROVIDER_CATALOG.filter((p) => p.implemented).length < 2) return null;
   const active = PROVIDER_CATALOG.find((p) => p.id === activeProvider);
   return (
-    <div className="provider-dd nodrag nopan" title="Provider for new turns" onMouseDown={(e) => e.stopPropagation()}>
-      <span className="provider-dd__dot" style={{ background: active?.accent ?? 'var(--muted)' }} />
-      <select
-        className="provider-dd__select"
-        aria-label="Provider for new turns"
-        value={activeProvider}
-        onClick={(e) => e.stopPropagation()}
-        onChange={(e) => { const id = e.target.value as EngineId; if (id !== activeProvider) onSetActive(id); }}
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className={`provider-dd nodrag nopan ${open ? 'is-open' : ''}`}
+        title="Provider for new turns"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        onMouseDown={(e) => e.stopPropagation()}
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
       >
-        {PROVIDER_CATALOG.map((p) => (
-          <option key={p.id} value={p.id} disabled={!p.implemented}>
-            {p.name}{p.implemented ? '' : ' — soon'}
-          </option>
-        ))}
-      </select>
-    </div>
+        <span className="provider-dd__dot" style={{ background: active?.accent ?? 'var(--muted)' }} />
+        <span className="provider-dd__name">{active?.name ?? 'Claude'}</span>
+        <span className="provider-dd__chev" aria-hidden="true">▾</span>
+      </button>
+      {open && (
+        <ProviderMenu
+          anchorRef={btnRef}
+          activeProvider={activeProvider}
+          onPick={(id) => { setOpen(false); if (id !== activeProvider) onSetActive(id); }}
+          onClose={() => setOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
