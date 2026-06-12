@@ -26,6 +26,15 @@ const SUMMARY_MODEL = 'claude-haiku-4-5-20251001'; // M3 collapsed-summary model
 // setting). 30 min comfortably covers normal background tasks / minute-granularity wakeups. (AD5, 异步续接)
 const DEFAULT_IDLE_CAP_MS = 30 * 60_000;
 const DEFAULT_WARM_IDLE_MS = 10 * 60_000;
+// A queued follow-up is held while a background continuation is imminent (continuationImminent) so the CLI
+// can't interleave it with the auto-re-driven turn (turnIndex / route desync). But a background task that
+// LINGERS (long-running, or that never re-drives a continuation) would otherwise hold the queued follow-up —
+// including a queued CHILD BOARD — FOREVER: at this settle path no idle cap is armed, so the session stays
+// open and the board sits "Queued" with no continuation ever clearing the gate. Bound the hold: if no
+// continuation begins within this grace of the settling turn (reset whenever the bg task makes progress),
+// release the held follow-up anyway. (queued-child starvation fix: "queued boards won't run after the
+// parent finished")
+const DEFAULT_BG_HOLD_GRACE_MS = 8_000;
 
 // System prompt for condensing a verbose native /compact <analysis> summary into a short, glanceable
 // digest card shown on the compacted board (compacted-context digest). Mirrors the Q/A card summarizer's
@@ -261,6 +270,15 @@ export class ClaudeAdapter implements Engine {
     // round slot → the board sticks in 'Generating…' forever. So hold the follow-up until no background
     // continuation is imminent (crons fire far in the future and don't block). (异步续接 + follow-up fix)
     const continuationImminent = () => holdEnabled && latestPending.background.length > 0;
+    // Bounded backstop for continuationImminent: a lingering background task must not hold a queued follow-up
+    // (or routed child board) forever. Armed when a turn settles with the queue still held; if it fires (no
+    // continuation began in time), `bgHoldExpired` lets the generator release the held item anyway. Reset by a
+    // new turn (the imminence resolved) or ongoing task progress (keep waiting while the task is alive).
+    let bgGraceTimer: ReturnType<typeof setTimeout> | undefined;
+    let bgHoldExpired = false;
+    const bgHoldGraceMs = req.bgHoldGraceMs ?? DEFAULT_BG_HOLD_GRACE_MS;
+    const cancelBgGrace = () => { if (bgGraceTimer) { clearTimeout(bgGraceTimer); bgGraceTimer = undefined; } };
+    const armBgGrace = () => { cancelBgGrace(); bgGraceTimer = setTimeout(() => { bgHoldExpired = true; wakeUp(); }, bgHoldGraceMs); };
 
     const state = initParseState(req.turnIndex ?? 0);
     async function* input() {
@@ -269,9 +287,12 @@ export class ClaudeAdapter implements Engine {
       yield userMessage(req.prompt, req.images);  // turn 1 — turnInFlight already true
       while (!closed) {
         // Release a queued follow-up only at a SAFE input boundary: the prior turn settled (gate open) AND no
-        // background-task continuation is imminent. Otherwise park (re-checked on every wakeUp).
-        if (turnInFlight || queue.length === 0 || continuationImminent()) { await new Promise<void>((r) => { wake = r; }); if (closed) break; continue; }
+        // background-task continuation is imminent — UNLESS the imminent-continuation hold timed out
+        // (bgHoldExpired), in which case release anyway so a lingering background task can't starve the queue
+        // forever. Otherwise park (re-checked on every wakeUp).
+        if (turnInFlight || queue.length === 0 || (continuationImminent() && !bgHoldExpired)) { await new Promise<void>((r) => { wake = r; }); if (closed) break; continue; }
         turnInFlight = true;
+        bgHoldExpired = false; cancelBgGrace();   // consuming the held slot — the next item re-arms fresh
         state.pendingUserInit = true;             // the next init is THIS follow-up = a USER turn (advances turnIndex)
         const next = queue.shift()!;
         nextUserRoute = next.route;
@@ -315,7 +336,7 @@ export class ClaudeAdapter implements Engine {
                 activeRoute = nextUserRoute ?? { boardId, turnIndex: e.turnIndex };
                 nextUserRoute = undefined;
               }
-              if (e.reset || e.continuation) { turnSettled = false; interrupted = false; turnInFlight = true; waiting = false; cancelIdle(); }
+              if (e.reset || e.continuation) { turnSettled = false; interrupted = false; turnInFlight = true; waiting = false; cancelIdle(); bgHoldExpired = false; cancelBgGrace(); }
               break;
             case 'session': sink.session(activeRoute.boardId, e.sessionId); break;
             case 'model': sink.model(e.model); break;
@@ -323,7 +344,7 @@ export class ClaudeAdapter implements Engine {
             case 'thinking': sink.thinking(activeRoute.boardId, activeRoute.turnIndex, e.thinks); break;
             case 'toolUse': sink.toolUse(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
             case 'toolResult': sink.toolResult(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
-            case 'task': sink.task(activeRoute.boardId, activeRoute.turnIndex, e.ev); break;
+            case 'task': sink.task(activeRoute.boardId, activeRoute.turnIndex, e.ev); if (bgGraceTimer) armBgGrace(); break; // active bg progress → keep holding the queue a bit longer
             case 'rateLimit': sink.rateLimit({ ...e.snapshot, provider: this.id }); break;
             case 'commands': sink.commands(e.commands); break;
             case 'result':
@@ -353,6 +374,13 @@ export class ClaudeAdapter implements Engine {
                   if (req.warmSession) ctl.onWarmIdle?.(true);
                   idleTimer = setTimeout(() => { closed = true; wakeUp(); }, req.warmSession ? warmIdleMs : FOLLOWUP_GRACE_MS);
                 }
+              } else if (queue.length > 0 && continuationImminent()) {
+                // The queue can't drain at this boundary — a background continuation is imminent, so the
+                // generator holds the next follow-up to avoid the CLI interleaving it with the auto-re-driven
+                // turn. Nothing else arms a timer on this path, so a lingering / never-completing background
+                // task would hold the queued child board FOREVER. Bound the hold: if no continuation begins
+                // within the grace (re-armed by ongoing task progress), `bgHoldExpired` releases it anyway.
+                armBgGrace();
               }
               wakeUp(); // release a held follow-up now, or let the generator re-await / observe `closed`
               break;
@@ -368,7 +396,7 @@ export class ClaudeAdapter implements Engine {
       if (ctl.abort.signal.aborted) { if (!turnSettled) settle(false); }
       else if (!turnSettled) sink.error(activeRoute.boardId, activeRoute.turnIndex, String(e?.message ?? e));
     } finally {
-      closed = true; cancelIdle(); wakeUp();
+      closed = true; cancelIdle(); cancelBgGrace(); wakeUp();
       // A warm session shared by a continuation chain can be torn down (abort / delete / config-change dispose)
       // while a cross-board continuation still sits QUEUED — it never got a turn, so its board would otherwise
       // hang in 'streaming' forever. Surface each stranded routed message on its OWN board so it settles

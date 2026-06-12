@@ -5,6 +5,67 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Braid Unreal PoC</title>
   <link rel="stylesheet" href="./webview.css">
+  <!--
+    Polyfills for Unreal's embedded CEF (Chromium 90 in UE 5.5). The Braid webview bundle uses runtime
+    APIs newer than Chrome 90, which crash the React render ("Object.hasOwn is not a function"). These
+    guarded shims run BEFORE webview.js (head, before the body script) so the bundle finds them present.
+    Each is a no-op where native exists (so this file stays correct on a future modern-CEF engine).
+    Currently bundled post-90 APIs: Object.hasOwn (Chrome 93), structuredClone (Chrome 98).
+  -->
+  <script>
+    (function () {
+      if (typeof Object.hasOwn !== 'function') {
+        Object.defineProperty(Object, 'hasOwn', {
+          value: function (obj, prop) {
+            if (obj === null || obj === undefined) {
+              throw new TypeError('Cannot convert undefined or null to object');
+            }
+            return Object.prototype.hasOwnProperty.call(Object(obj), prop);
+          },
+          configurable: true,
+          writable: true
+        });
+      }
+
+      if (typeof globalThis.structuredClone !== 'function') {
+        globalThis.structuredClone = function structuredClone(input) {
+          var seen = new WeakMap();
+          function clone(val) {
+            if (val === null || typeof val !== 'object') return val;
+            if (seen.has(val)) return seen.get(val);
+            if (val instanceof Date) return new Date(val.getTime());
+            if (val instanceof RegExp) return new RegExp(val.source, val.flags);
+            if (typeof ArrayBuffer !== 'undefined' && val instanceof ArrayBuffer) return val.slice(0);
+            if (typeof ArrayBuffer !== 'undefined' && ArrayBuffer.isView(val)) {
+              try { return new val.constructor(val); } catch (e) { return val; }
+            }
+            var out;
+            if (val instanceof Map) {
+              out = new Map(); seen.set(val, out);
+              val.forEach(function (v, k) { out.set(clone(k), clone(v)); });
+              return out;
+            }
+            if (val instanceof Set) {
+              out = new Set(); seen.set(val, out);
+              val.forEach(function (v) { out.add(clone(v)); });
+              return out;
+            }
+            if (Array.isArray(val)) {
+              out = new Array(val.length); seen.set(val, out);
+              for (var i = 0; i < val.length; i++) out[i] = clone(val[i]);
+              return out;
+            }
+            out = {}; seen.set(val, out);
+            for (var key in val) {
+              if (Object.prototype.hasOwnProperty.call(val, key)) out[key] = clone(val[key]);
+            }
+            return out;
+          }
+          return clone(input);
+        };
+      }
+    }());
+  </script>
   <script>
     (function () {
       const storagePrefix = 'braid.unreal.poc.';

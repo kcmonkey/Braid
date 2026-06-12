@@ -39,6 +39,9 @@ export interface TurnRequest {
   asyncContinuation?: boolean;
   // Safety cap: close a held-open (waiting) session after this much inactivity. Omitted ⇒ adapter default.
   idleCapMs?: number;
+  // Bound on how long a queued follow-up may be held behind an imminent background continuation before it's
+  // released anyway (so a lingering background task can't starve a queued child board). Omitted ⇒ adapter default.
+  bgHoldGraceMs?: number;
   // Warm-process reuse: after a normal turn settles with no pending async work, keep the streaming-input
   // session open for this bounded idle window so a linear continuation can push into it.
   warmSession?: boolean;

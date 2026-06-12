@@ -704,4 +704,62 @@ describe('ClaudeAdapter.runTurn — async continuation (hold-open gate)', () => 
     // turn1=round0, continuation re-settles round0 (NOT a phantom round1), follow-up=round1. No turnIdx≥2.
     expect(calls.filter((c) => c.t === 'done').map((d) => d.ti)).toEqual([0, 0, 1]);
   });
+
+  // Regression (queued-child starvation): the reported "queued boards won't run after the previous node
+  // finished" bug. A turn settles with a routed CHILD BOARD queued AND a background task still pending →
+  // continuationImminent holds the child so the CLI can't interleave it with an imminent continuation. But
+  // if that background task LINGERS (long-running, or never re-drives a continuation), nothing on this path
+  // arms a timer, so the child board would sit "Queued" FOREVER. The bounded bgHoldGrace must release it.
+  it('releases a queued child board when a lingering background task never re-drives (bounded hold)', async () => {
+    const pulledInput: any[] = [];
+    const out: any[] = [];
+    let outWake: (() => void) | null = null;
+    let outDone = false;
+    let promptIterable: AsyncIterable<any> | null = null;
+    let capturedOptions: any = null;
+    const wake = () => { if (outWake) { const w = outWake; outWake = null; w(); } };
+    const q: any = {
+      async *[Symbol.asyncIterator]() {
+        (async () => { try { for await (const msg of promptIterable as AsyncIterable<any>) pulledInput.push(msg); } finally { outDone = true; wake(); } })();
+        while (true) { while (out.length) yield out.shift(); if (outDone) return; await new Promise<void>((r) => { outWake = r; }); }
+      },
+      interrupt: async () => {},
+      stopTask: async () => {},
+    };
+    const sdk = { query: (args: any) => { promptIterable = args.prompt; capturedOptions = args.options; return q; } };
+    const adapter = new ClaudeAdapter({ loadSdk: async () => sdk, readProviderConfig: () => cfg });
+    const { sink, calls } = recordingSink();
+    let handle: TurnHandle | undefined;
+    const p = adapter.runTurn(req({ kind: 'fresh' }, { bgHoldGraceMs: 30 }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } });
+    const emit = (m: any) => { out.push(m); wake(); };
+    const t = () => new Promise((r) => setTimeout(r, 10));
+
+    await t();
+    const stop = capturedOptions.hooks.Stop[0].hooks[0];
+    expect(pulledInput.length).toBe(1); // parent turn handed over
+
+    // Parent settles with a routed child queued (board b2) AND a background task still pending.
+    emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    handle!.push('do a code review', undefined, { boardId: 'b2', turnIndex: 0 });
+    await stop({ background_tasks: [{ id: 't1', type: 'shell', status: 'running' }], session_crons: [] });
+    emit({ type: 'result', is_error: false, session_id: 's1' });
+    await t();
+    expect(pulledInput.length).toBe(1); // still HELD right after the result (continuation imminent)
+
+    // The background task never completes / re-drives. After the bounded grace, the child is released anyway.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(pulledInput.length).toBe(2); // child released — NOT starved behind the lingering bg task
+
+    // The released child runs as its OWN turn, routed to b2.
+    emit({ type: 'system', subtype: 'init', session_id: 's1' });
+    emit({ type: 'assistant', message: { content: [{ type: 'text', text: 'review' }] } });
+    emit({ type: 'result', is_error: false });
+    await t();
+    outDone = true; wake();
+    await p;
+    expect(calls.filter((c) => c.t === 'done').map((d) => ({ b: d.b, ti: d.ti }))).toEqual([
+      { b: 'b1', ti: 0 }, // parent
+      { b: 'b2', ti: 0 }, // queued child ran on its own board
+    ]);
+  });
 });
