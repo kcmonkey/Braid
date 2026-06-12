@@ -2,7 +2,7 @@
   "name": "braid",
   "displayName": "Braid",
   "description": "Node-based canvas for Claude and Codex coding-agent conversations: boards, branching, dedupe-merge, summaries, and compaction.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "local",
   "private": true,
   "license": "MIT",
@@ -309,7 +309,7 @@
     "gen-manifest": "node scripts/gen-sdk-manifest.mjs",
     "stage:unreal": "node esbuild.mjs && node scripts/stage-unreal.mjs",
     "package": "npx --yes @vscode/vsce package --allow-missing-repository",
-    "deploy": "npm run package && code --install-extension braid-0.2.1.vsix --force",
+    "deploy": "npm run package && code --install-extension braid-0.2.2.vsix --force",
     "vscode:prepublish": "node esbuild.mjs"
   },
   "dependencies": {
