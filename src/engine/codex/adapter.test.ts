@@ -229,3 +229,61 @@ describe('CodexAdapter requestUserInput (native AskUserQuestion)', () => {
     expect(h.getResponse()).toEqual({ answers: {} });
   });
 });
+
+// Permission-PROFILE elevation (capability-layer P3): item/permissions/requestApproval no longer returns an
+// invalid {} — it reuses the neutral approval card and replies with a GrantedPermissionProfile + scope.
+describe('CodexAdapter permissions/requestApproval (profile grant)', () => {
+  function harness(verdict: any) {
+    let response: any;
+    let seenAsk: any;
+    const a = new CodexAdapter({ resolveBinary: () => undefined, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {}, dispose: () => {},
+      request: async (method: string, _params: any) => {
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') return { thread: { id: 'T' } };
+        if (method === 'turn/start') {
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          response = await handlers.onServerRequest('item/permissions/requestApproval', 9, {
+            itemId: 'perm-1', reason: 'needs network', cwd: 'D:\\work',
+            permissions: { network: { allowAll: true }, fileSystem: null },
+          });
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+    const sink: any = {
+      session: () => {}, model: () => {}, update: () => {}, thinking: () => {}, toolUse: () => {}, toolResult: () => {},
+      rateLimit: () => {}, commands: () => {}, waiting: () => {}, task: () => {},
+      error: (_b: string, _ti: number | undefined, m: string) => { throw new Error(m); }, done: () => {},
+    };
+    const pre: any = {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async (_b: string, _ti: number, ask: any) => { seenAsk = ask; return verdict; },
+      onUserInput: async () => ({ answers: {}, canceled: true }),
+    };
+    const ctl: any = { abort: new AbortController(), onLive: () => {} };
+    return { run: () => a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'hi', cwd: 'D:\\work' }, sink, pre, ctl), getResponse: () => response, getAsk: () => seenAsk };
+  }
+
+  it('allow → grants the requested profile for this turn (null fields dropped)', async () => {
+    const h = harness({ allow: true });
+    await h.run();
+    expect(h.getAsk()).toMatchObject({ toolName: 'Permissions', description: 'needs network' });
+    expect(h.getResponse()).toEqual({ permissions: { network: { allowAll: true } }, scope: 'turn' });
+  });
+
+  it('always → widens the grant scope to the session', async () => {
+    const h = harness({ allow: true, always: true });
+    await h.run();
+    expect(h.getResponse()).toEqual({ permissions: { network: { allowAll: true } }, scope: 'session' });
+  });
+
+  it('deny → grants an empty profile for this turn only (the response has no decline field)', async () => {
+    const h = harness({ deny: true });
+    await h.run();
+    expect(h.getResponse()).toEqual({ permissions: {}, scope: 'turn' });
+  });
+});

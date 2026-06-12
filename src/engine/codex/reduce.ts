@@ -196,10 +196,34 @@ function toolNameInput(item: any): { name: string; input: Record<string, unknown
       return { name: 'WebSearch', input: webSearchInput(item) };
     case 'plan':
       return { name: 'Plan', input: { text: item.text ?? '' } };
+    // P2 display mappings (capability-layer): no contract change — these flow through the generic tool card.
+    case 'dynamicToolCall':
+      return { name: typeof item.tool === 'string' && item.tool ? item.tool : 'DynamicTool',
+        input: (item.arguments && typeof item.arguments === 'object' ? item.arguments : {}) as Record<string, unknown> };
+    case 'collabAgentToolCall':
+      // Codex subagent op (spawnAgent/sendInput/wait/…). Flat card for now; cross-thread parentId nesting is
+      // best-effort/future (the sub-agent runs in its own thread). (plan P2)
+      return { name: typeof item.tool === 'string' && item.tool ? item.tool : 'Agent',
+        input: { prompt: item.prompt ?? '', model: item.model ?? undefined, receiverThreadIds: Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : [] } };
+    case 'imageView':
+      return { name: 'ViewImage', input: { file_path: item.path ?? '' } };
+    case 'imageGeneration':
+      return { name: 'GenerateImage', input: { prompt: item.revisedPrompt ?? '', savedPath: item.savedPath } };
+    case 'enteredReviewMode':
+      return { name: 'Review', input: { text: item.review ?? '', phase: 'entered' } };
+    case 'exitedReviewMode':
+      return { name: 'Review', input: { text: item.review ?? '', phase: 'exited' } };
     default:
       return null; // userMessage / agentMessage / reasoning / contextCompaction handled elsewhere
   }
 }
+
+// Codex ThreadItem types that carry a settling result → emit a toolResult on item/completed. `plan` is
+// intentionally absent (a one-shot display item with no result). (plan P2)
+const RESULT_ITEM_TYPES = new Set([
+  'commandExecution', 'fileChange', 'mcpToolCall', 'webSearch',
+  'dynamicToolCall', 'collabAgentToolCall', 'imageView', 'imageGeneration', 'enteredReviewMode', 'exitedReviewMode',
+]);
 
 /** The toolResult content for a completed tool item. */
 function toolResultOf(item: any): { content: string; isError: boolean } {
@@ -214,6 +238,22 @@ function toolResultOf(item: any): { content: string; isError: boolean } {
       return { content: cap(item.error ?? item.result ?? ''), isError: !!item.error };
     case 'webSearch':
       return { content: cap(webSearchResult(item)), isError: item.status === 'failed' };
+    case 'dynamicToolCall': {
+      const items = Array.isArray(item.contentItems) ? item.contentItems : [];
+      const text = items.map((c: any) => (typeof c?.text === 'string' ? c.text : c == null ? '' : JSON.stringify(c))).join('\n');
+      return { content: cap(text), isError: item.success === false || item.status === 'failed' };
+    }
+    case 'collabAgentToolCall': {
+      const recv = Array.isArray(item.receiverThreadIds) && item.receiverThreadIds.length ? `→ ${item.receiverThreadIds.join(', ')}` : '';
+      return { content: cap([item.tool, item.status, recv].filter(Boolean).join(' ')), isError: item.status === 'failed' };
+    }
+    case 'imageView':
+      return { content: cap(item.path ?? ''), isError: false };
+    case 'imageGeneration':
+      return { content: cap(item.savedPath ?? item.result ?? ''), isError: item.status === 'failed' };
+    case 'enteredReviewMode':
+    case 'exitedReviewMode':
+      return { content: cap(item.review ?? ''), isError: false };
     default:
       return { content: '', isError: item?.status === 'failed' };
   }
@@ -271,7 +311,7 @@ export function reduceCodexNotification(s: CodexParseState, method: string, para
           s.thinkOpen = -1; s.thinkStart = undefined;
           out.push({ t: 'thinking', turnIndex: s.turnIndex, thinks: [...s.thinks] });
         }
-      } else if (item?.type === 'commandExecution' || item?.type === 'fileChange' || item?.type === 'mcpToolCall' || item?.type === 'webSearch') {
+      } else if (RESULT_ITEM_TYPES.has(item?.type)) {
         const r = toolResultOf(item);
         out.push({ t: 'toolResult', turnIndex: s.turnIndex, ev: { toolUseId: item.id, content: r.content, isError: r.isError } });
       }

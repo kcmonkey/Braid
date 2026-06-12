@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
-  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, forkableSession, isFreshBoard, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
+  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, forkableSession, isFreshBoard, materializeSendPlan, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   planAutoCollapseAfterDone, applyCollapsePlans,
@@ -1727,6 +1727,55 @@ describe('isFreshBoard / forkableSession (STM clean model)', () => {
     expect(forkableSession(node('P', 1, { sessionId: 'sp' }).data)).toBe('sp');
     expect(forkableSession(node('K', 1, { compact: true, compactSession: 'cs' }).data)).toBe('cs');
     expect(forkableSession(node('K2', 1, { compact: true }).data)).toBeUndefined();
+  });
+});
+
+describe('materializeSendPlan (STM send-time base)', () => {
+  const cn = (id: string, seq: number, extra: Partial<BoardData> = {}) => node(id, seq, { engine: 'claude', ...extra });
+
+  it('root (no parent) → fresh session', () => {
+    const R = cn('R', 1, { prompt: '', answer: '', status: 'idle' });
+    expect(materializeSendPlan(R, [R], [], 'claude')).toEqual({ fork: false });
+  });
+
+  it('Claude clean first continuation → resume parent session + fork:false (spine warm-reuse preserved)', () => {
+    const P = cn('P', 1, { sessionId: 'sp', messageUuid: 'up' });
+    const C = cn('C', 2, { prompt: '', answer: '', status: 'idle' });
+    expect(materializeSendPlan(C, [P, C], [forkEdge('P', 'C')], 'claude')).toEqual({ resume: 'sp', fork: false, resumeAt: undefined });
+  });
+
+  it('Claude second/sibling continuation → branch mid-fork (resumeAt = parent uuid)', () => {
+    const P = cn('P', 1, { sessionId: 'sp', messageUuid: 'up' });
+    const C1 = cn('C1', 2, { sessionId: 'sc1' });                       // earliest = spine (already ran)
+    const C2 = cn('C2', 3, { prompt: '', answer: '', status: 'idle' }); // later = branch
+    const edges = [forkEdge('P', 'C1'), forkEdge('P', 'C2')];
+    expect(materializeSendPlan(C2, [P, C1, C2], edges, 'claude')).toEqual({ resume: 'sp', fork: true, resumeAt: 'up' });
+  });
+
+  it('Codex (midpointFork=false) → per-board fork, no resumeAt', () => {
+    const P = node('P', 1, { engine: 'codex', sessionId: 'tp', messageUuid: 'up' });
+    const C = node('C', 2, { engine: 'codex', prompt: '', answer: '', status: 'idle' });
+    expect(materializeSendPlan(C, [P, C], [forkEdge('P', 'C')], 'codex', false)).toEqual({ resume: 'tp', fork: true, resumeAt: undefined });
+  });
+
+  it('cross-engine fork, no same-engine ancestor → fresh session + text replay seed', () => {
+    const P = cn('P', 1, { sessionId: 'sp', prompt: 'q-P', answer: 'a-P' });
+    const C = node('C', 2, { engine: 'codex', prompt: '', answer: '', status: 'idle' });
+    const r = materializeSendPlan(C, [P, C], [forkEdge('P', 'C')], 'codex');
+    expect(r.resume).toBeUndefined();
+    expect(r.fork).toBe(false);
+    expect(r.promptPrefix).toContain('q-P');
+  });
+
+  it('merge product → recomputed dedup base (heaviest same-engine) + excerpt for the turn engine', () => {
+    const A = cn('A', 1, { sessionId: 'sa', prompt: 'q-A', answer: 'a-A', contextTokens: 100 });
+    const B = cn('B', 2, { sessionId: 'sb', prompt: 'q-B', answer: 'a-B', contextTokens: 50 });
+    const M = cn('M', 3, { merged: true, prompt: '', answer: '', status: 'idle' });
+    const edges = [mergeEdge('A', 'M'), mergeEdge('B', 'M')];
+    const r = materializeSendPlan(M, [A, B, M], edges, 'claude');
+    expect(r.resume).toBe('sa');
+    expect(r.fork).toBe(true);
+    expect(r.promptPrefix).toContain('q-B'); // the lighter branch replayed as text
   });
 });
 

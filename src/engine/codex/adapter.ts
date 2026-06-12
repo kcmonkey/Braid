@@ -185,6 +185,25 @@ export class CodexAdapter implements Engine {
         if ('deny' in verdict) return { decision: 'decline' };
         return { decision: verdict.always ? 'acceptForSession' : 'accept' };
       }
+      if (method === 'item/permissions/requestApproval') {
+        // A permission-PROFILE elevation (network / filesystem). Reuse the neutral approval card; on allow,
+        // grant the requested profile (echoed back) — `always` widens scope to the whole session; on deny,
+        // grant an EMPTY profile for this turn only (the response shape has no decline field). The execpolicy
+        // / network "precise always" amendment variants are deferred — they need their own UI. (capability P3)
+        const verdict: PermissionVerdict = await pre.onPermissionRequest(req.boardId, state.turnIndex, {
+          toolUseId: params?.itemId ?? '',
+          toolName: 'Permissions',
+          input: { permissions: params?.permissions ?? {}, cwd: params?.cwd },
+          description: params?.reason ?? 'Codex is requesting elevated permissions.',
+          canAlways: true,
+        }, ctl.abort.signal);
+        if ('deny' in verdict) return { permissions: {}, scope: 'turn' };
+        const requested = params?.permissions ?? {};
+        const granted: Record<string, unknown> = {};
+        if (requested.network) granted.network = requested.network;
+        if (requested.fileSystem) granted.fileSystem = requested.fileSystem;
+        return { permissions: granted, scope: verdict.always ? 'session' : 'turn' };
+      }
       if (method === 'item/tool/requestUserInput') {
         // Native AskUserQuestion. Map Codex's questions onto the neutral UserInputQuestion shape, render the
         // existing AskUserCard via a synthesized toolUse, block on the user's STRUCTURED answer, then reply in

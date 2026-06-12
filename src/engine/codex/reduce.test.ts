@@ -138,6 +138,95 @@ describe('reduceCodexNotification — tools', () => {
   });
 });
 
+describe('reduceCodexNotification — P2 display item mappings (capability-layer)', () => {
+  it('dynamicToolCall → a card named after the tool + contentItems result', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'dynamicToolCall', id: 'd1', namespace: 'ns', tool: 'my_tool', arguments: { x: 1 }, status: 'inProgress' } }],
+      ['item/completed', { item: { type: 'dynamicToolCall', id: 'd1', tool: 'my_tool', status: 'completed', success: true, contentItems: [{ text: 'done' }] } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev).toMatchObject({ name: 'my_tool', input: { x: 1 } });
+    const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
+    expect(tr.ev).toEqual({ toolUseId: 'd1', content: 'done', isError: false });
+  });
+
+  it('dynamicToolCall failure (success=false) → isError', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/completed', { item: { type: 'dynamicToolCall', id: 'd2', tool: 't', status: 'completed', success: false, contentItems: [{ text: 'nope' }] } }],
+    ]);
+    const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
+    expect(tr.ev.isError).toBe(true);
+  });
+
+  it('collabAgentToolCall → a card named after the collab verb + receiver summary', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'collabAgentToolCall', id: 'c1', tool: 'spawnAgent', status: 'inProgress', prompt: 'go', model: 'gpt-5.5', receiverThreadIds: ['TH9'] } }],
+      ['item/completed', { item: { type: 'collabAgentToolCall', id: 'c1', tool: 'spawnAgent', status: 'completed', receiverThreadIds: ['TH9'] } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev).toMatchObject({ name: 'spawnAgent', input: { prompt: 'go', model: 'gpt-5.5', receiverThreadIds: ['TH9'] } });
+    const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
+    expect(tr.ev).toEqual({ toolUseId: 'c1', content: 'spawnAgent completed → TH9', isError: false });
+  });
+
+  it('imageView → a ViewImage card with the file path', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'imageView', id: 'iv1', path: '/w/shot.png' } }],
+      ['item/completed', { item: { type: 'imageView', id: 'iv1', path: '/w/shot.png' } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev).toMatchObject({ name: 'ViewImage', input: { file_path: '/w/shot.png' } });
+    const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
+    expect(tr.ev).toEqual({ toolUseId: 'iv1', content: '/w/shot.png', isError: false });
+  });
+
+  it('imageGeneration → a GenerateImage card; failed status → isError', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'imageGeneration', id: 'ig1', status: 'inProgress', revisedPrompt: 'a cat' } }],
+      ['item/completed', { item: { type: 'imageGeneration', id: 'ig1', status: 'failed', revisedPrompt: 'a cat', result: 'err' } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev).toMatchObject({ name: 'GenerateImage', input: { prompt: 'a cat' } });
+    const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
+    expect(tr.ev.isError).toBe(true);
+  });
+
+  it('review-mode boundary (entered) → Review card with phase + review text result', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'enteredReviewMode', id: 'rv1', review: 'reviewing diff' } }],
+      ['item/completed', { item: { type: 'enteredReviewMode', id: 'rv1', review: 'reviewing diff' } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev).toMatchObject({ name: 'Review', input: { text: 'reviewing diff', phase: 'entered' } });
+    const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
+    expect(tr.ev).toEqual({ toolUseId: 'rv1', content: 'reviewing diff', isError: false });
+  });
+
+  it('exitedReviewMode → Review card phase=exited', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'exitedReviewMode', id: 'rv2', review: 'done' } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev.input).toMatchObject({ phase: 'exited' });
+  });
+
+  it('plan stays a one-shot card (no toolResult on completed)', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'plan', id: 'p1', text: 'the plan' } }],
+      ['item/completed', { item: { type: 'plan', id: 'p1', text: 'the plan' } }],
+    ]);
+    expect(events.filter((e) => e.t === 'toolResult')).toHaveLength(0);
+  });
+});
+
 describe('reduceCodexNotification — reasoning marks', () => {
   it('reasoning item opens an active mark then closes it with a duration', () => {
     let now = 1000;

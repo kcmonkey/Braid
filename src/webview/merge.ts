@@ -1020,6 +1020,39 @@ export function forkBaseFor(
 }
 
 /**
+ * Send-Time Materialization (D2): compute a FRESH board's send payload from the CURRENT graph at dispatch,
+ * instead of a provider-native base cached at creation (which goes stale across provider switches / reloads).
+ * `turnEngine` = the engine this turn runs on (the board's own `engine`); `midpointFork` = that engine's
+ * capability. This is exactly the prior creation-time forkBaseFor / mergeBaseFor + continuationMode, just
+ * consumed ephemerally at send. Pure → unit-tested; the send path no longer trusts any stored native pointer.
+ *   - merge product → recompute dedup base + excerpt for `turnEngine`.
+ *   - fork continuation → native-fork the same-engine anchor (or replay a cross-engine/dirty limb as text).
+ *   - root → fresh session.
+ * (decisions.md D2)
+ */
+export function materializeSendPlan(
+  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[], turnEngine: EngineId, midpointFork = true,
+): { resume?: string; fork: boolean; resumeAt?: string; promptPrefix?: string } {
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
+  const mergeParents = edges.filter((e) => e.target === board.id && (e.data?.kind as string) === 'merge').map((e) => e.source);
+  if (board.data.merged && mergeParents.length >= 2) {
+    const m = mergeBaseFor(mergeParents, byId, edges, turnEngine);
+    return { resume: m.parentSessionId, fork: !!m.parentSessionId, promptPrefix: m.mergeContext };
+  }
+  const forkParent = edges.find((e) => e.target === board.id && ((e.data?.kind as string) ?? 'fork') !== 'merge')?.source;
+  const parent = forkParent ? byId[forkParent] : undefined;
+  if (!parent) return { fork: false }; // root → fresh session
+  const base = forkBaseFor(parent, nodes, edges, turnEngine);
+  if (base.mergeContext) {
+    // cross-engine / lineage-dirty rebuild: fork the same-engine anchor (if any), replay the skipped limb as text.
+    return { resume: base.parentSessionId, fork: !!base.parentSessionId, resumeAt: base.resumeAt, promptPrefix: base.mergeContext };
+  }
+  // clean same-engine continuation: spine resume (append) vs branch mid-fork, gated by the engine's midpointFork.
+  const mode = continuationMode(board, nodes, edges, midpointFork);
+  return { resume: base.parentSessionId, fork: mode.fork, resumeAt: mode.resumeAt };
+}
+
+/**
  * Walk DOWN from `startId` following the unique continuation child at each step, stopping at the first
  * node that is a leaf (0 continuation children) or a branch (≥2). Returns that endpoint (= `startId`
  * itself when it is already a leaf/branch). Cycle-guarded. Lets entering a mid-chain node in the
