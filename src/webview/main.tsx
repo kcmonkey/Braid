@@ -17,7 +17,7 @@ import {
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
   GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, forkBaseFor, mergeBaseFor, restampActiveProvider, mergeFit, mergeUnion, modelWindowFor,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
-  fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, hasPendingAsk, hasPendingPermission, nextPermMode,
+  contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   needsCollapseDigest, collapseDigestKey, collapseDigestText,
@@ -814,11 +814,6 @@ const SearchCtx = React.createContext<{ active: boolean; matched: Set<string> }>
 // each BoardNode shows this as its in-card title (scales with the board). (Branch-Signposts plan)
 const SignpostCtx = React.createContext<Map<string, string>>(new Map());
 
-// M12 drag-fusion: the board currently hovered as a VALID fuse drop-target during an active drag (or
-// null). Provided by App so that board shows a `.fuse-target` ring — live "drop here to merge" feedback.
-// Same context pattern as DirCtx/MergeCtxHL (React Flow's node memo doesn't block context propagation).
-const FuseTargetCtx = React.createContext<string | null>(null);
-
 // Visual graph collapse, provided by App so each BoardNode can offer a per-board collapse affordance (in
 // detail LOD only) and a collapsed representative can expand. `collapsible` = ids whose prior visible history
 // can be folded (a non-empty collapse plan); `collapse(id)` folds it, `expand(id)` restores a collapsed node.
@@ -1197,8 +1192,6 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // Ancestor of a merge-selected board (its context will be folded into the merge) but not itself
   // directly selected → softer outline. Directly selected boards keep the prominent `.selected` ring.
   const inMergeCtx = React.useContext(MergeCtxHL).has(id) && !selected;
-  // M12: this board is the live fuse drop-target under a dragged board → prominent ring.
-  const isFuseTarget = React.useContext(FuseTargetCtx) === id;
   // Just jumped here from a completion notification → transient pulse ring (cleared by App).
   const revealed = React.useContext(RevealCtx) === id;
   // Canvas-Search: this board is faded because a search is active and it is NOT a match.
@@ -1330,7 +1323,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
     <div
-      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${dimmed ? 'dimmed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''} ${isCollapsedGraph ? 'collapsed-graph' : ''}`}
+      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${revealed ? 'revealed' : ''} ${dimmed ? 'dimmed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''} ${isCollapsedGraph ? 'collapsed-graph' : ''}`}
     >
       <Handle type="target" position={targetPos} />
       {/* Zoom-LOD content wrapper: keyed on `lod` so it remounts (and re-runs the dissolve) on a
@@ -2988,7 +2981,7 @@ function App() {
   const [resolvedModel, setResolvedModel] = useState<string | null>(null); // full model id from last query's init
   const [noticePanelOpen, setNoticePanelOpen] = useState(false); // in-canvas notification panel open?
   // Merge context-budget guard: a transient warning shown when a merge is blocked because its combined
-  // context would overflow the model window (the user must compress first). Mirrors fuseNote's pattern.
+  // context would overflow the model window (the user must compress first). Mirrors hintNote's pattern.
   const [mergeNote, setMergeNote] = useState('');
   const mergeNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // M8 MCP manager: panel open state + last status snapshot + names mid-reconnect (host-pushed).
@@ -4318,9 +4311,9 @@ function App() {
             const parts: string[] = [];
             if (r) parts.push(`rolled back ${r} file${r === 1 ? '' : 's'}`);
             if (s) parts.push(`${s} kept (in use by surviving boards)`);
-            setFuseNote(parts.join(' · '));
-            if (fuseNoteTimerRef.current) clearTimeout(fuseNoteTimerRef.current);
-            fuseNoteTimerRef.current = setTimeout(() => setFuseNote(''), 3000);
+            setHintNote(parts.join(' · '));
+            if (hintNoteTimerRef.current) clearTimeout(hintNoteTimerRef.current);
+            hintNoteTimerRef.current = setTimeout(() => setHintNote(''), 3000);
           }
           break;
         }
@@ -4860,114 +4853,10 @@ function App() {
     return () => window.removeEventListener('keydown', onPermKey);
   }, [setConfigField]);
 
-  // M12 drag-fusion: a transient hint shown when a board is dropped on a non-fusable neighbor.
-  const [fuseNote, setFuseNote] = useState('');
-  const fuseNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The board currently hovered as a VALID fuse drop-target during a drag (live highlight), and a pending
-  // confirm before the (destructive) contraction actually runs. fuseTargetRef mirrors the state so the
-  // per-tick drag handler can compare without re-rendering unless the candidate changes.
-  const [fuseTarget, setFuseTarget] = useState<string | null>(null);
-  const fuseTargetRef = useRef<string | null>(null);
-  const [fuseConfirm, setFuseConfirm] = useState<{ ancestorId: string; descendantId: string } | null>(null);
-  // Set after a fusion commits: a deferred signal to re-measure node internals so React Flow re-routes
-  // the survivor's edges (incl. its incoming parent edge). RF caches handle/dimension geometry per node;
-  // replacing the survivor + removing the descendant in one update leaves that cache stale, so without a
-  // forced re-measure the survivor's edges (the parent edge most visibly) render detached/dropped. Mirrors
-  // the [dir] updateNodeInternals fix. (decisions.md: React Flow handle-geometry caching)
-  const fuseDirtyRef = useRef(false);
-
-  // The eligible fuse target (an adjacent done fork parent↔child with a descendant sessionId) among the
-  // boards the dragged node currently overlaps, or null. Shared by the drag-highlight + drop handlers.
-  const fuseHitOf = useCallback((node: Node): { ancestorId: string; descendantId: string } | null => {
-    const inst = rfRef.current;
-    if (!inst) return null;
-    const curEdges = edgesRef.current;
-    const byIdNow = Object.fromEntries(nodesRef.current.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
-    for (const h of inst.getIntersectingNodes(node) as BoardNodeT[]) {
-      const elig = fuseEligibility(curEdges, node.id, h.id, byIdNow);
-      if (elig) return elig;
-    }
-    return null;
-  }, []);
-
-  // During a drag: highlight the drop-target board IF dropping there would fuse (live "drop here to
-  // merge" feedback). Only setState when the candidate changes (like the LOD/dir guards) so a drag
-  // doesn't re-render every tick. The highlighted id = the descendant being absorbed OR the ancestor
-  // survivor, whichever is under the dragged board — we highlight the OTHER board (the drop target).
-  const onNodeDrag = useCallback((_: MouseEvent | TouchEvent, node: Node) => {
-    const elig = fuseHitOf(node);
-    const target = elig ? (elig.ancestorId === node.id ? elig.descendantId : elig.ancestorId) : null;
-    if (target !== fuseTargetRef.current) { fuseTargetRef.current = target; setFuseTarget(target); }
-  }, [fuseHitOf]);
-
-  // Drop: clear the highlight, then — a drop on a fusable neighbor opens a CONFIRM (fusion is
-  // destructive); a non-fusable overlapping drop shows a hint; an empty-space drop is a plain reposition
-  // (kept). The dragged node snaps back to its dagre slot in the first two cases so the graph stays tidy
-  // while the confirm is up; the actual contraction runs in commitFuse only on confirm. (decisions.md M12)
-  const onNodeDragStop = useCallback((_: MouseEvent | TouchEvent, node: Node) => {
-    if (fuseTargetRef.current) { fuseTargetRef.current = null; setFuseTarget(null); }
-    const inst = rfRef.current;
-    if (!inst) return;
-    if (!(inst.getIntersectingNodes(node) as BoardNodeT[]).length) return; // no overlap → keep drop position
-    const elig = fuseHitOf(node);
-    setNodes(autoLayout(nodesRef.current, edgesRef.current)); // snap the dragged node back to its slot
-    if (!elig) {
-      // Tailor the hint: if the overlap WAS an adjacent fork pair rejected only because the parent still
-      // has sibling branches, say so (the generic "not adjacent" line would be misleading there).
-      const curEdges = edgesRef.current;
-      const byIdNow = Object.fromEntries(nodesRef.current.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
-      const hits = inst.getIntersectingNodes(node) as BoardNodeT[];
-      const adjFork = (h: BoardNodeT) => curEdges.find((x) => (x.data?.kind ?? 'fork') === 'fork' &&
-        ((x.source === node.id && x.target === h.id) || (x.source === h.id && x.target === node.id)));
-      // M-MultiEngine (AD3): an adjacent fork pair rejected purely because the two boards ran on DIFFERENT
-      // engines — fuse can't adopt one engine's session forward, so steer to Merge (the cross-engine combiner).
-      const crossEngineBlocked = hits.some((h) => {
-        const e = adjFork(h);
-        return !!e && boardEngine(byIdNow[e.source]!.data) !== boardEngine(byIdNow[e.target]!.data);
-      });
-      const branchBlocked = hits.some((h) => {
-        const e = adjFork(h);
-        return !!e && continuationChildren(e.source, curEdges).length > 1;
-      });
-      setFuseNote(crossEngineBlocked
-        ? 'Can’t fuse across providers — these boards ran on different engines. Use “Merge” to combine them.'
-        : branchBlocked
-          ? 'Can’t fuse: the parent has multiple branches — delete or merge the other branches first'
-          : 'Only adjacent parent/child boards can be fused (use "Merge" across branches)');
-      if (fuseNoteTimerRef.current) clearTimeout(fuseNoteTimerRef.current);
-      fuseNoteTimerRef.current = setTimeout(() => setFuseNote(''), 2600);
-      return;
-    }
-    setFuseConfirm(elig); // ask before the destructive contraction
-  }, [autoLayout, fuseHitOf]);
-
-  // Commit the confirmed fusion: ancestor survives, absorbs the descendant's round(s) + session; the
-  // survivor's summary is cleared so the auto-summary effect regenerates it over the combined content.
-  // Re-checks eligibility (the graph may have changed while the confirm was up). (decisions.md M12)
-  const commitFuse = useCallback((c: { ancestorId: string; descendantId: string }) => {
-    setFuseConfirm(null);
-    const curNodes = nodesRef.current, curEdges = edgesRef.current;
-    const byIdNow = Object.fromEntries(curNodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
-    if (!fuseEligibility(curEdges, c.ancestorId, c.descendantId, byIdNow)) return;
-    const fused = fuseAdjacent(curNodes, curEdges, c.ancestorId, c.descendantId);
-    summaryReqRef.current.delete(c.ancestorId); // re-summarize the survivor over the combined content
-    summaryFailRef.current.delete(c.ancestorId); // combined content → reset the retry budget
-    if (focusedIdRef.current === c.descendantId) { focusedIdRef.current = c.ancestorId; setFocusedId(c.ancestorId); setFocusEntryId(c.ancestorId); }
-    const laid = autoLayout(fused.nodes, fused.edges);
-    nodesRef.current = laid;
-    edgesRef.current = fused.edges;
-    setNodes(laid);
-    setEdges(fused.edges);
-    fuseDirtyRef.current = true; // re-measure node internals after this commit so edges re-route (see effect)
-  }, [autoLayout]);
-
-  // After a fusion commits, force React Flow to re-measure every node's handle geometry so the survivor's
-  // edges (its incoming parent edge especially) re-route to the new node instead of rendering detached.
-  useEffect(() => {
-    if (!fuseDirtyRef.current) return;
-    fuseDirtyRef.current = false;
-    for (const n of nodesRef.current) updateNodeInternals(n.id);
-  }, [nodes, updateNodeInternals]);
+  // A transient toast shown at the top of the canvas (currently: the best-effort file-rollback summary
+  // after a board delete — see the `rollbackResult` host message). Auto-clears via hintNoteTimerRef.
+  const [hintNote, setHintNote] = useState('');
+  const hintNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // New conversation via canvas gestures (not just the toolbar button):
   //  - double-click empty canvas → create immediately
@@ -5045,7 +4934,6 @@ function App() {
     <MergeCtxHL.Provider value={mergeCtxIds}>
     <SignpostCtx.Provider value={signpostLabels}>
     <RevealCtx.Provider value={revealedId}>
-    <FuseTargetCtx.Provider value={fuseTarget}>
     <CollapseCtx.Provider value={collapseState}>
     <SearchCtx.Provider value={searchCtxValue}>
     <AttachCtx.Provider value={attachState}>
@@ -5069,8 +4957,6 @@ function App() {
         onInit={(inst) => { rfRef.current = inst; }}
         onMove={onMove}
         onNodeDoubleClick={onNodeDoubleClick}
-        onNodeDrag={onNodeDrag}
-        onNodeDragStop={onNodeDragStop}
         onSelectionStart={onSelectionStart}
         onSelectionEnd={onSelectionEnd}
         zoomOnDoubleClick={false}
@@ -5173,30 +5059,11 @@ function App() {
         )}
       </div>
 
-      {/* M12: transient hint when a board is dropped on a non-fusable neighbor. */}
-      {fuseNote && <div className="fuse-hint">{fuseNote}</div>}
+      {/* Transient top-of-canvas toast (currently the post-delete file-rollback summary). */}
+      {hintNote && <div className="fuse-hint">{hintNote}</div>}
 
       {/* Merge context-budget guard: transient warning when a merge is blocked for exceeding the window. */}
       {mergeNote && <div className="merge-hint">{mergeNote}</div>}
-
-      {/* M12: secondary confirmation before the (destructive) fusion. Backdrop / "Cancel" cancels. */}
-      {fuseConfirm && (
-        <div className="fuse-confirm__backdrop" onClick={() => setFuseConfirm(null)}>
-          <div className="fuse-confirm" onClick={(e) => e.stopPropagation()}>
-            <div className="fuse-confirm__title">Fuse these two boards?</div>
-            <div className="fuse-confirm__pair">
-              <span className="fuse-confirm__chip">{firstLine(byId[fuseConfirm.descendantId]?.data.prompt ?? '') || '(untitled)'}</span>
-              <span className="fuse-confirm__arrow" title="fuses into">⛓</span>
-              <span className="fuse-confirm__chip">{firstLine(byId[fuseConfirm.ancestorId]?.data.prompt ?? '') || '(untitled)'}</span>
-            </div>
-            <div className="fuse-confirm__hint">The two rounds merge into one board; their content stays browsable. This cannot be undone.</div>
-            <div className="fuse-confirm__actions">
-              <button className="btn" onClick={() => setFuseConfirm(null)}>Cancel</button>
-              <button className="btn primary" onClick={() => commitFuse(fuseConfirm)}>Fuse</button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {deleteConfirm && (
         <div className="fuse-confirm__backdrop" onClick={() => setDeleteConfirm(null)}>
@@ -5384,7 +5251,6 @@ function App() {
     </AttachCtx.Provider>
     </SearchCtx.Provider>
     </CollapseCtx.Provider>
-    </FuseTargetCtx.Provider>
     </RevealCtx.Provider>
     </SignpostCtx.Provider>
     </MergeCtxHL.Provider>

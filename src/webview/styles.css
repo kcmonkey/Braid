@@ -303,8 +303,6 @@ body {
   border: 1px solid var(--border-sub); border-radius: 8px; padding: 8px 14px;
   box-shadow: 0 6px 20px rgba(0,0,0,.4); pointer-events: none;
 }
-/* M12: live fuse drop-target ring while a board is dragged over a fusable neighbor (blue, like merge). */
-.board.fuse-target { border-color: var(--merge); box-shadow: 0 0 0 3px var(--merge-soft), 0 6px 24px rgba(0,0,0,.4); }
 /* Merge context-budget guard: transient warning when a merge is blocked for exceeding the model window.
    Amber (warn) palette, same placement as .fuse-hint; wider + centered for the actionable message. */
 .merge-hint {
