@@ -1,9 +1,13 @@
 # Board Canvas / Braid
 
-This file is the Codex-facing project prompt. The canonical project rules live under `.claude/rules/`
-because the repository started on Claude, but those rules are provider-neutral unless explicitly marked
-otherwise. Do **not** create a parallel `.codex/` or `.Codex/` rule tree; keep one source of truth and update
-this file only when Codex needs an accurate entry point.
+This file is the Codex-facing project prompt and the only rule file Codex should assume is auto-loaded.
+The repository also has Claude-era reference docs under `.claude/rules/`; Codex does **not** get any special
+loader semantics for that directory. Treat those files as ordinary local documentation: read the relevant
+one explicitly when this file points there, but do not depend on Codex discovering them automatically.
+
+Do **not** create a parallel `.codex/` or `.Codex/` rule tree just to mirror the same content; that would
+create drift. Keep the mandatory Codex contract summarized in this `AGENTS.md`, and use `.claude/rules/` as
+the shared detailed reference while it exists.
 
 ## 项目是什么
 
@@ -28,7 +32,8 @@ import `vscode`。
 
 项目已远超早期 M1/M2/M3：已经有文件持久化、摘要/tag、工具卡、权限审批、AskUserQuestion、compact、
 multi-canvas、per-board provider ownership、Claude/Codex/DeepSeek 多引擎、Codex branch-context 修复、
-自动视觉 collapse 等。以 README 和 `.claude/rules/decisions.md` / archive 为准，不要按旧 milestone 文案推断。
+自动视觉 collapse 等。以 README、本文件摘要、以及本机存在时的 `.claude/rules/decisions.md` / archive 为准，
+不要按旧 milestone 文案推断。
 
 ## 技术栈与命令
 
@@ -73,8 +78,9 @@ npm test
 
 ### 先证据后理论
 
-涉及 SDK 调用、会话、fork、merge、认证、Codex app-server 协议、DeepSeek harness 的改动，先读
-`.claude/rules/knowledge.md` 相关章节。不要凭记忆推导，那里记录了多次 probe 推翻旧假设的事实。
+涉及 SDK 调用、会话、fork、merge、认证、Codex app-server 协议、DeepSeek harness 的改动，先读本文件的
+provider-specific 摘要；如果本机存在 `.claude/rules/knowledge.md`，再显式读取相关章节。不要凭记忆推导，
+那里记录了多次 probe 推翻旧假设的事实。
 
 ### 供应商中性
 
@@ -107,7 +113,8 @@ npm test
 
 ### 收尾记录
 
-涉及行为落地、bug 修复、prompt/rules 调整、架构决策时，按 `.claude/rules/decisions.md` 顶部规则分流：
+涉及行为落地、bug 修复、prompt/rules 调整、架构决策时，按 `.claude/rules/decisions.md` 顶部规则分流
+（若本机没有 `.claude/`，至少在最终回复里明确说明未能写归档）：
 
 - 普通落地和 prompt/rules 调整 -> `.claude/archive/decisions-<YYYY-MM>.md`，并在 `decisions.md` 归档索引加一行。
 - 真正改变地基方向 -> 才改 `decisions.md` 的地基章节。
