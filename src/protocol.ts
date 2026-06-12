@@ -100,6 +100,10 @@ export interface ProviderCapabilitiesView {
   // Whether this provider accepts image content blocks. Drives gating of paste/drop image attachments per the
   // active provider (a no-vision provider rejects images). Claude = true. (M-MultiEngine)
   images: boolean;
+  // Whether forking a session at a mid-point isolates context (see EngineCapabilities.midpointFork). When
+  // false (Codex), the webview never shares a session across boards — every continuation forks its own
+  // thread, so a branch can't inherit later sibling turns. Claude = true. (Codex branching bug, 2026-06-12)
+  midpointFork: boolean;
   models: ModelOption[];
 }
 

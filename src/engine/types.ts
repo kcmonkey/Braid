@@ -209,6 +209,14 @@ export interface EngineCapabilities {
   // Whether the engine accepts image content blocks (vision). Claude = true; a text-only provider returns
   // false so the webview can gate image paste/drop per the active provider. (M-MultiEngine)
   images: boolean;
+  // Whether forking a session at an arbitrary mid-point (parent.messageUuid) ISOLATES context — the branch
+  // sees only history up to that point, not later turns on the same session. Claude's resume+forkSession
+  // does. Codex's thread/fork+rollback does NOT: rollback trims the turn LIST but the model is still fed the
+  // full rollout (probe-verified — see knowledge.md "Codex 无 mid-point fork"). The webview uses this to
+  // decide whether a linear chain may SHARE one session (the "spine"): when false, every board forks its own
+  // thread so the parent's session is always exactly its own ancestry and a branch can never inherit sibling
+  // turns. (Codex branching bug, 2026-06-12)
+  midpointFork: boolean;
   // The provider's selectable models (SSOT = PROVIDER_CATALOG). Drives the model dropdown; surfaced to the
   // webview via ProviderCapabilitiesView. ('compact' support is NOT here — it's derived from `compact.mode`.)
   models: ModelOption[];

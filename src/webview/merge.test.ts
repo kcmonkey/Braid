@@ -248,6 +248,23 @@ describe('continuationMode (Lazy Fork)', () => {
     const K = node('K', 1, { compact: true, parentSessionId: 'Scompacted' }); // resumes a forked compacted session
     expect(continuationMode(K, [P, K], [compactEdge('P', 'K')])).toEqual({ fork: true });
   });
+  // midpointFork=false (Codex): an engine that can't isolate a mid-point fork must NEVER share a session
+  // across boards — every continuation forks its own thread, so a branch can't inherit sibling turns. The
+  // first/only child (which would otherwise be the spine) forks too, and no resumeAt is passed. (Codex bug)
+  it('midpointFork=false: the spine child forks instead of resuming (per-board threads)', () => {
+    const P = node('P', 0, { sessionId: 'sP', messageUuid: 'uP' });
+    const C = node('C', 1, { parentSessionId: 'sP', status: 'idle', prompt: '', answer: '' });
+    expect(continuationMode(C, [P, C], [forkEdge('P', 'C')], true)).toEqual({ fork: false }); // Claude: spine
+    expect(continuationMode(C, [P, C], [forkEdge('P', 'C')], false)).toEqual({ fork: true }); // Codex: per-board fork
+  });
+  it('midpointFork=false: later branch forks WITHOUT a mid-point marker (engine cannot honor it)', () => {
+    const P = node('P', 0, { sessionId: 'sP', messageUuid: 'uP' });
+    const C1 = node('C1', 1, { parentSessionId: 'sP' });
+    const C2 = node('C2', 2, { parentSessionId: 'sP' });
+    const edges = [forkEdge('P', 'C1'), forkEdge('P', 'C2')];
+    expect(continuationMode(C2, [P, C1, C2], edges, false)).toEqual({ fork: true }); // no resumeAt
+    expect(continuationMode(C1, [P, C1, C2], edges, false)).toEqual({ fork: true }); // earliest also forks
+  });
 });
 
 describe('contractDelete + Lazy Fork (trailing delete)', () => {

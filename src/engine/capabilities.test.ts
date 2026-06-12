@@ -21,6 +21,7 @@ describe('toCapabilitiesView', () => {
       routedFollowups: true,
       compact: true, // derived: compact.mode === 'native' !== 'none'
       images: true,  // Claude is a vision provider (M-MultiEngine)
+      midpointFork: true, // Claude's forkSession isolates a mid-point branch
       models: claudeModels,
     });
   });
@@ -53,6 +54,7 @@ describe('toCapabilitiesView', () => {
       routedFollowups: false,
       compact: true,
       images: false,
+      midpointFork: true, // DeepSeek's frozen packed per-board snapshots isolate inherently
       models: deepSeekModels,
     });
   });

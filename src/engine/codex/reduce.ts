@@ -24,8 +24,9 @@ export interface CodexParseState {
   baseTurn: number;
   turnIndex: number;
   threadId?: string;          // set by the adapter from thread/start|resume|fork; feeds TurnDone.sessionId
-  lastTurnId?: string;        // last turn/started turn.id → TurnDone.messageUuid (Lazy-Fork mid-point marker:
-                              // a branch off this board forks the thread then rolls back to this turn)
+  lastTurnId?: string;        // last turn/started turn.id → TurnDone.messageUuid. Recorded for parity with
+                              // Claude, but NOT used to fork Codex at a mid-point — Codex has no working
+                              // mid-point fork (knowledge.md), so branches fork the whole (clean) parent thread.
   answer: string;
   thinking: string;
   thinks: ThinkMark[];
@@ -231,9 +232,10 @@ export function buildCodexTurnDone(s: CodexParseState, isError: boolean, now: nu
   s.thinkOpen = -1; s.thinkStart = undefined;
   return {
     sessionId: s.threadId,
-    // Lazy-Fork mid-point marker = the board's last turn id. A branch off this board forks the thread then
-    // thread/rollback's the trailing turns back to this turn (CodexAdapter.runTurn), so it inherits only the
-    // history up to here — NOT sibling/later turns. (probe-verified fork+rollback)
+    // The board's last turn id. Recorded for parity with Claude's mid-point marker, but Codex does NOT
+    // fork at a mid-point (thread/rollback doesn't isolate context — knowledge.md). Sibling bleed is
+    // prevented upstream instead: the webview never shares a Codex thread (midpointFork=false), so each
+    // board's thread is already exactly its own ancestry and a whole-thread fork is correct.
     messageUuid: s.lastTurnId,
     isError,
     text: codexView(s),

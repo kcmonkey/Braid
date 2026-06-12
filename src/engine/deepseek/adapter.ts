@@ -74,7 +74,10 @@ export class DeepSeekAdapter implements Engine {
 
   async capabilities(): Promise<EngineCapabilities> {
     const desc = PROVIDER_CATALOG.find((p) => p.id === this.id);
-    return { fork: 'replay', steer: true, reasoning: true, routedFollowups: false, images: false, models: desc?.models ?? [] };
+    // midpointFork: true — DeepSeek packs each board's full conversation into an immutable, frozen SessionRef
+    // and CLONES it on attach, so a board's session is always exactly its own ancestry (no shared mutable
+    // thread that could accumulate sibling turns). A branch off any board therefore isolates correctly.
+    return { fork: 'replay', steer: true, reasoning: true, routedFollowups: false, images: false, midpointFork: true, models: desc?.models ?? [] };
   }
 
   async runTurn(req: TurnRequest, sink: EventSink, pre: PreToolInterceptor, ctl: TurnControl): Promise<void> {

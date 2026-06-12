@@ -108,7 +108,11 @@ export class CodexAdapter implements Engine {
 
   async capabilities(): Promise<EngineCapabilities> {
     const codex = PROVIDER_CATALOG.find((p) => p.id === 'codex');
-    return { fork: 'native', steer: true, reasoning: true, routedFollowups: false, images: true, models: codex?.models ?? [] };
+    // midpointFork: false — Codex CANNOT isolate a mid-point fork. thread/fork copies the whole thread and
+    // thread/rollback only trims the turn LIST, not the rollout the model is fed (probe-verified, knowledge.md).
+    // So the webview must NOT share one Codex thread across boards: every board forks its own, keeping each
+    // thread = exactly its own ancestry. (Codex branching bug, 2026-06-12)
+    return { fork: 'native', steer: true, reasoning: true, routedFollowups: false, images: true, midpointFork: false, models: codex?.models ?? [] };
   }
 
   /** Open a connected app-server: spawn + `initialize` handshake + `initialized`. Caller disposes. */
@@ -137,20 +141,16 @@ export class CodexAdapter implements Engine {
     await rpc.request('account/login/start', { type: 'apiKey', apiKey: key }, 30_000);
   }
 
-  /** Fork a thread, optionally truncated to a mid-point. Codex `thread/fork` copies the WHOLE thread (no
-   * anchor param), so to fork AT a board's turn (Lazy-Fork `at` = that board's last turnId, emitted as
-   * messageUuid) we fork then `thread/rollback` the trailing turns — keeping only history up to (and
-   * including) the fork point. Without this, a branch off a mid-conversation board inherits its sibling /
-   * later turns (context bleed). `at` absent or not found in the fork's `turns` → no rollback (whole-thread
-   * fork, the safe fallback; correct anyway when forking off the tail board). (probe-verified fork+rollback) */
-  private async forkAt(rpc: CodexRpc, threadId: string, at: string | undefined, startOpts: Record<string, unknown>): Promise<any> {
-    const forked = (await rpc.request('thread/fork', { threadId, ...startOpts }))?.thread;
-    if (!forked?.id || !at || !Array.isArray(forked.turns)) return forked;
-    const idx = forked.turns.findIndex((t: any) => t?.id === at);
-    const drop = idx >= 0 ? forked.turns.length - (idx + 1) : 0;
-    if (drop <= 0) return forked; // at = the last turn (tail fork) or not found → keep the whole fork
-    const rolled = (await rpc.request('thread/rollback', { threadId: forked.id, numTurns: drop }))?.thread;
-    return rolled ?? forked;
+  /** Fork a thread for a branch/continuation. Codex `thread/fork` copies the WHOLE thread, and there is NO
+   * working way to fork it at an earlier mid-point: `thread/rollback` trims the turn LIST but the model is
+   * still fed the full rollout (probe-verified — the rolled-back fork still answers from the dropped turns,
+   * across resume and a fresh process; see knowledge.md "Codex 无 mid-point fork"). Correctness instead comes
+   * from the webview NEVER sharing a Codex thread across boards (capability midpointFork=false → per-board
+   * fork): the source thread is then always exactly the parent's own ancestry, so forking it whole is right
+   * and no truncation is needed. (Earlier fork+rollback was a no-op for context and is removed.) (Codex
+   * branching bug, 2026-06-12) */
+  private async forkThread(rpc: CodexRpc, threadId: string, startOpts: Record<string, unknown>): Promise<any> {
+    return (await rpc.request('thread/fork', { threadId, ...startOpts }))?.thread;
   }
 
   // ---- main turn ----
@@ -224,7 +224,9 @@ export class CodexAdapter implements Engine {
       if (attach.kind === 'resume') {
         thread = (await rpc.request('thread/resume', { threadId: attach.session.raw, ...startOpts }))?.thread;
       } else if (attach.kind === 'fork') {
-        thread = await this.forkAt(rpc, attach.session.raw, attach.at, startOpts);
+        // Whole-thread fork only — Codex has no working mid-point fork (attach.at is ignored). Correctness
+        // relies on per-board threads (midpointFork=false) keeping the source = the parent's own ancestry.
+        thread = await this.forkThread(rpc, attach.session.raw, startOpts);
       } else {
         thread = (await rpc.request('thread/start', startOpts))?.thread;
       }

@@ -729,13 +729,20 @@ export function continuationChildren(id: string, edges: Edge[]): string[] {
  * → branch falls back to forkSession-from-end (no resumeAt), i.e. the old eager behavior. (plans/Lazy-Fork)
  */
 export function continuationMode(
-  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[],
+  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[], midpointFork = true,
 ): { fork: boolean; resumeAt?: string } {
   const parentId = edges.find(
     (e) => e.target === board.id && ((e.data?.kind as string) ?? 'fork') !== 'merge',
   )?.source;
   const parent = parentId ? nodes.find((n) => n.id === parentId) : undefined;
   if (!parent?.data.sessionId) return { fork: !!board.data.parentSessionId }; // unresolvable parent → legacy
+  // Engines that can't isolate a mid-point fork (midpointFork=false, e.g. Codex: thread/rollback trims the
+  // turn list but NOT the rollout the model is fed) must NEVER share one session across boards — else a later
+  // branch off a mid-spine board inherits the sibling turns appended after it (the Codex branching bug). So
+  // every continuation FORKS its own thread: the parent's session is then always exactly its own ancestry
+  // (nothing was ever appended to it), and forking it whole is correct. No mid-point marker is passed — the
+  // engine couldn't honor it, and it isn't needed. (Codex branching bug, 2026-06-12)
+  if (!midpointFork) return { fork: true };
   // M-MultiEngine note (AD3): a cross-engine continuation never reaches here — forkBaseFor rebuilds it onto a
   // same-engine anchor with `mergeContext` set, and onSend only consults continuationMode when `!mergeContext`.
   // The line below (parentSessionId ≠ graph-parent.sessionId → fork) also already covers any such board, so no

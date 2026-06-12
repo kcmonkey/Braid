@@ -3004,6 +3004,9 @@ function App() {
   // together with the state on every `config` push.
   const activeProviderRef = useRef<EngineId>('claude');
   const [providerCaps, setProviderCaps] = useState<Partial<Record<EngineId, ProviderCapabilitiesView>>>({});
+  // Ref mirror so onSend/continuationMode (run outside render) can read the latest per-provider capabilities
+  // synchronously — needed to gate the shared-spine vs per-board-fork decision by `midpointFork`. (like configRef)
+  const providerCapsRef = useRef(providerCaps);
   const [acctPanelOpen, setAcctPanelOpen] = useState(false);
   const [accounts, setAccounts] = useState<Partial<Record<EngineId, { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }>>>({});
   // Claude API-key auth status per provider (secret-safe: presence + last-4 hint + ambient-env detection).
@@ -3245,7 +3248,11 @@ function App() {
     let fork = !!parentSessionId;
     let resumeAt: string | undefined = node?.data.resumeAt; // dirty-rebuild truncation point from forkBaseFor (Phase 2)
     if (parentSessionId && !mergeContext && node && !node.data.lineageDirty) {
-      const mode = continuationMode(node, nodesRef.current, edgesRef.current);
+      // Gate the shared-spine optimization by the board engine's `midpointFork` capability: an engine that
+      // can't isolate a mid-point fork (Codex) must fork per board so a branch never inherits sibling turns.
+      // Default true (unknown caps / Claude) preserves the existing spine behavior. (Codex branching bug)
+      const canMidpointFork = providerCapsRef.current[boardEngine(node.data)]?.midpointFork !== false;
+      const mode = continuationMode(node, nodesRef.current, edgesRef.current, canMidpointFork);
       fork = mode.fork;
       resumeAt = mode.resumeAt;
     }
@@ -4285,7 +4292,7 @@ function App() {
             setSlashCommands([]);
           }
           setConfig(m.config); configRef.current = m.config;
-          setActiveProviderState(m.activeProvider); activeProviderRef.current = m.activeProvider; setProviderCaps(m.capabilities);
+          setActiveProviderState(m.activeProvider); activeProviderRef.current = m.activeProvider; setProviderCaps(m.capabilities); providerCapsRef.current = m.capabilities;
           break;
         case 'account':
           setAccounts((prev) => ({ ...prev, [m.provider]: { account: m.account, usage: m.usage, busy: m.busy } }));
