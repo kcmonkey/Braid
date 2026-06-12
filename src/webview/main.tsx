@@ -19,7 +19,7 @@ import {
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
-  planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
+  planCollapseSelection, collapseSelection, planAutoCollapseAfterDone, applyCollapsePlans, expandCollapsedGraph, syncHiddenEdges,
   needsCollapseDigest, collapseDigestKey, collapseDigestText,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
@@ -2122,6 +2122,27 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
             onChange={(e) => onChange({ expandAncestorsOnSelect: e.target.checked })}
           />
         </label>
+        <label className="settings__row" title="After a board completes, fold older visible history when a lineage gets long.">
+          <span className="settings__lbl">Auto-collapse history</span>
+          <input
+            type="checkbox" checked={config.autoCollapseEnabled}
+            onChange={(e) => onChange({ autoCollapseEnabled: e.target.checked })}
+          />
+        </label>
+        <label className={`settings__row ${config.autoCollapseEnabled ? '' : 'settings__gated'}`} title="Maximum visible boards kept in one plain linear segment before folding its front.">
+          <span className="settings__lbl">Linear collapse length</span>
+          <input
+            type="number" min={3} max={64} value={config.autoCollapseLinearThreshold} disabled={!config.autoCollapseEnabled}
+            onChange={(e) => onChange({ autoCollapseLinearThreshold: Math.max(3, Math.min(64, Math.floor(Number(e.target.value) || 8))) })}
+          />
+        </label>
+        <label className={`settings__row ${config.autoCollapseEnabled ? '' : 'settings__gated'}`} title="Longer lineage length required before folding common history into a branch point.">
+          <span className="settings__lbl">Branch collapse length</span>
+          <input
+            type="number" min={4} max={128} value={config.autoCollapseBranchThreshold} disabled={!config.autoCollapseEnabled}
+            onChange={(e) => onChange({ autoCollapseBranchThreshold: Math.max(4, Math.min(128, Math.floor(Number(e.target.value) || 14))) })}
+          />
+        </label>
         <label className={`settings__row ${compact ? '' : 'settings__gated'}`} title="Auto-spawn a compact node when the chain's context fill crosses the threshold.">
           <span className="settings__lbl">Auto-compact{compact ? '' : ` (n/a for ${pName})`}</span>
           <input
@@ -3060,6 +3081,7 @@ function App() {
   const focusClosingRef = useRef(false); // synchronous guard so a repeated exit doesn't restart the close animation
   const configRef = useRef<BraidConfig | null>(null); // M11: config mirror for the message handler (read latest without re-subscribing the listener)
   const autoCompactPendingRef = useRef<string | null>(null); // M11: a board queued for self-driven auto-compact, fired once its 'done' state commits to nodesRef
+  const autoCollapsePendingRef = useRef<string | null>(null); // Visual auto-collapse: queued only by a newly completed board, never by passive graph/view changes
   const tabStateRef = useRef({ pending: false, busy: false }); // last-reported tab-icon state, so we post `attention` only when it flips
   // Pending jump-to-board request from a notification. Held in a ref so it survives until the target
   // node actually exists (a freshly re-opened panel restores its graph async — see the retry effect).
@@ -3451,8 +3473,9 @@ function App() {
     () => selectedIds.some((id) => { const s = byId[id]?.data.status; return s === 'streaming' || s === 'waiting'; }),
     [selectedIds, byId],
   );
-  // Multi-select visual collapse: valid only when the selected visible boards form one direct continuation
-  // line. The last selected line node remains visible as the representative; earlier selected nodes hide.
+  // Multi-select visual collapse: valid only when the selected visible boards sit on one unique continuation
+  // line. Missing boards between the first and last selected board are auto-filled; the last selected line
+  // node remains visible as the representative, and every earlier board in the materialized span hides.
   const collapsePlans = useMemo(
     () => planCollapseSelection(nodes, edges, selectedIds),
     [nodes, edges, selectedIds],
@@ -4079,6 +4102,38 @@ function App() {
     onCompact(id);
   }, [nodes, onCompact]);
 
+  // Visual auto-collapse is deliberately completion-triggered: the `done` message queues the completed board,
+  // then this effect runs once after the done patch commits. Ordinary selection/expand/layout changes never
+  // queue it, so reading or expanding a collapsed node is not disturbed by a render loop.
+  useEffect(() => {
+    const id = autoCollapsePendingRef.current;
+    if (!id) return;
+    const cfg = configRef.current;
+    if (!cfg?.autoCollapseEnabled) { autoCollapsePendingRef.current = null; return; }
+    const board = nodesRef.current.find((n) => n.id === id);
+    if (!board) { autoCollapsePendingRef.current = null; return; }
+    if (board.data.status !== 'done') return; // wait for the done patch to commit
+    autoCollapsePendingRef.current = null;
+
+    const curNodes = nodesRef.current;
+    const curEdges = edgesRef.current;
+    const plans = planAutoCollapseAfterDone(curNodes, curEdges, id, {
+      enabled: cfg.autoCollapseEnabled,
+      linearThreshold: cfg.autoCollapseLinearThreshold,
+      branchThreshold: cfg.autoCollapseBranchThreshold,
+    });
+    if (!plans.length) return;
+    const collapsed = applyCollapsePlans(curNodes, plans);
+    if (!collapsed.changed) return;
+    const targetId = plans[0]?.targetId ?? id;
+    const newEdges = syncHiddenEdges(collapsed.nodes, curEdges);
+    const laid = relayoutAnchored(collapsed.nodes, newEdges, dirRef.current, targetId);
+    nodesRef.current = laid;
+    edgesRef.current = newEdges;
+    setEdges(newEdges);
+    setNodes(laid);
+  }, [nodes]);
+
   // Zoom past ENTER_ZOOM → focus the node under the cursor (React Flow zooms toward the pointer,
   // so the board you zoom *at* is the one you mean), falling back to nearest.
   const onMove = useCallback((_: unknown, vp: Viewport) => {
@@ -4371,12 +4426,19 @@ function App() {
             // M11: if this turn pushed context past the threshold (and the engine didn't already
             // auto-compact internally), queue a self-driven compact node. Fired by the [nodes] effect
             // once the board's 'done' state commits to nodesRef (onCompact guards on status==='done').
+            let queuedCompact = false;
             if (!m.isError && !m.autoCompacted) {
               const cfg = configRef.current;
               const pct = contextPct(m.contextTokens, m.contextWindow);
               if (cfg && shouldAutoCompact(pct, cfg.autoCompactEnabled, cfg.autoCompactThreshold)) {
                 autoCompactPendingRef.current = m.boardId;
+                queuedCompact = true;
               }
+            }
+            // Visual-only auto-collapse is intentionally completion-triggered, not an always-on graph effect.
+            // Let semantic /compact win when both would fire on the same completed turn.
+            if (!m.isError && !queuedCompact && configRef.current?.autoCollapseEnabled) {
+              autoCollapsePendingRef.current = m.boardId;
             }
           }
           break;
@@ -5174,9 +5236,9 @@ function App() {
             className="btn collapse"
             onClick={collapseSelected}
             disabled={selectionBusy || !collapsePlans.length}
-            title={collapsePlans.length ? 'Collapse the selected consecutive boards' : 'Collapse requires consecutive boards on one line'}
+            title={collapsePlans.length ? 'Collapse this ancestor span; boards between selections are included' : 'Collapse requires one ancestor line with a single last board'}
           >
-            Collapse selected
+            Collapse span
           </button>
           {mLeaves.length >= 2 && !selectionBusy && (
             <button className="btn merge" onClick={doMerge}>Merge context - new conversation</button>
@@ -5192,7 +5254,7 @@ function App() {
           ) : null}
           {!collapsePlans.length && !selectionBusy && (
             <span className="mergebar__count mergebar__warn">
-              Collapse needs consecutive boards on one line.
+              Collapse needs one ancestor line with a single last board.
             </span>
           )}
         </div>

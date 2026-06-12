@@ -526,6 +526,14 @@ export interface CollapsePlan {
   hiddenIds: string[];
 }
 
+export interface AutoCollapsePolicy {
+  enabled: boolean;
+  /** Keep at most this many visible boards in a plain linear segment before folding its front. */
+  linearThreshold: number;
+  /** When a branch point blocks the front, wait for the active lineage to get this long before folding into it. */
+  branchThreshold: number;
+}
+
 function edgeKind(e: Edge): EdgeKind {
   return ((e.data?.kind as EdgeKind | undefined) ?? 'fork');
 }
@@ -539,41 +547,101 @@ function isCollapseEdge(e: Edge): boolean {
   return edgeKind(e) === 'collapse';
 }
 
-function orderedSelectedLine(
-  edges: Edge[], selectedIds: string[], byId: Map<string, BoardNodeT>,
-): string[] | null {
+function visibleSelectedIds(selectedIds: string[], byId: Map<string, BoardNodeT>): string[] {
   const selected = [...new Set(selectedIds.filter((id) => {
     const n = byId.get(id);
     return !!n && !n.hidden;
   }))];
+  return selected;
+}
+
+function visibleLineageChildren(edges: Edge[], byId: Map<string, BoardNodeT>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const e of edges) {
+    if (e.hidden || !isLineageEdge(e)) continue;
+    const source = byId.get(e.source);
+    const target = byId.get(e.target);
+    if (!source || !target || source.hidden || target.hidden) continue;
+    const kids = out.get(e.source) ?? [];
+    kids.push(e.target);
+    out.set(e.source, kids);
+  }
+  return out;
+}
+
+function visibleLineageParents(edges: Edge[], byId: Map<string, BoardNodeT>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const e of edges) {
+    if (e.hidden || !isLineageEdge(e)) continue;
+    const source = byId.get(e.source);
+    const target = byId.get(e.target);
+    if (!source || !target || source.hidden || target.hidden) continue;
+    const parents = out.get(e.target) ?? [];
+    parents.push(e.source);
+    out.set(e.target, parents);
+  }
+  return out;
+}
+
+function reachableFrom(children: Map<string, string[]>, from: string, to: string): boolean {
+  const seen = new Set<string>();
+  const stack = [...(children.get(from) ?? [])];
+  while (stack.length) {
+    const cur = stack.pop()!;
+    if (cur === to) return true;
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    stack.push(...(children.get(cur) ?? []));
+  }
+  return false;
+}
+
+function uniqueLineagePath(children: Map<string, string[]>, from: string, to: string): string[] | null {
+  let found: string[] | null = null;
+  let count = 0;
+  const seen = new Set<string>();
+
+  const walk = (id: string, path: string[]) => {
+    if (count > 1) return;
+    if (id === to) {
+      found = path;
+      count += 1;
+      return;
+    }
+    if (seen.has(id)) return;
+    seen.add(id);
+    for (const child of children.get(id) ?? []) walk(child, [...path, child]);
+    seen.delete(id);
+  };
+
+  walk(from, [from]);
+  return count === 1 ? found : null;
+}
+
+function materializedSelectedLine(
+  edges: Edge[], selectedIds: string[], byId: Map<string, BoardNodeT>,
+): string[] | null {
+  const selected = visibleSelectedIds(selectedIds, byId);
   if (selected.length < 2) return null;
 
-  const selectedSet = new Set(selected);
-  const parentsInSelection = (id: string) => edges
-    .filter((e) => !e.hidden && isLineageEdge(e) && e.target === id && selectedSet.has(e.source))
-    .map((e) => e.source);
-  const childrenInSelection = (id: string) => edges
-    .filter((e) => !e.hidden && isLineageEdge(e) && e.source === id && selectedSet.has(e.target))
-    .map((e) => e.target);
+  const children = visibleLineageChildren(edges, byId);
+  const reaches = (a: string, b: string) => reachableFrom(children, a, b);
 
-  for (const id of selected) {
-    if (parentsInSelection(id).length > 1 || childrenInSelection(id).length > 1) return null;
+  for (let i = 0; i < selected.length; i += 1) {
+    for (let j = i + 1; j < selected.length; j += 1) {
+      if (!reaches(selected[i], selected[j]) && !reaches(selected[j], selected[i])) return null;
+    }
   }
-  const heads = selected.filter((id) => parentsInSelection(id).length === 0);
+
+  const terminals = selected.filter((id) => !selected.some((other) => other !== id && reaches(id, other)));
+  if (terminals.length !== 1) return null;
+  const heads = selected.filter((id) => !selected.some((other) => other !== id && reaches(other, id)));
   if (heads.length !== 1) return null;
 
-  const ordered: string[] = [];
-  const seen = new Set<string>();
-  let cur = heads[0];
-  while (cur) {
-    if (seen.has(cur)) return null;
-    ordered.push(cur);
-    seen.add(cur);
-    const kids = childrenInSelection(cur);
-    if (!kids.length) break;
-    cur = kids[0];
-  }
-  return ordered.length === selectedSet.size ? ordered : null;
+  const path = uniqueLineagePath(children, heads[0], terminals[0]);
+  if (!path) return null;
+  const pathSet = new Set(path);
+  return selected.every((id) => pathSet.has(id)) ? path : null;
 }
 
 function collapseWouldDetachVisibleBranch(
@@ -599,9 +667,45 @@ function collapseWouldDetachVisibleBranch(
   return externalParents.size > 1;
 }
 
+function uniqueVisibleLineageTo(
+  targetId: string, byId: Map<string, BoardNodeT>, parents: Map<string, string[]>,
+): string[] | null {
+  const target = byId.get(targetId);
+  if (!target || target.hidden) return null;
+  const reversed = [targetId];
+  const seen = new Set<string>([targetId]);
+  let cur = targetId;
+  while (true) {
+    const ps = parents.get(cur) ?? [];
+    if (!ps.length) break;
+    if (ps.length > 1) return null;
+    cur = ps[0];
+    if (seen.has(cur)) return null;
+    seen.add(cur);
+    reversed.push(cur);
+  }
+  return reversed.reverse();
+}
+
+function collapsePlanFromPathSpan(
+  path: string[], startIndex: number, targetIndex: number,
+  edges: Edge[], byId: Map<string, BoardNodeT>,
+): CollapsePlan[] {
+  if (targetIndex <= startIndex) return [];
+  const targetId = path[targetIndex];
+  const hiddenIds = path.slice(startIndex, targetIndex);
+  const target = byId.get(targetId);
+  if (!target || target.hidden || !hiddenIds.length) return [];
+  if (collapseWouldDetachVisibleBranch(edges, byId, targetId, hiddenIds)) return [];
+  const existing = target.data.collapsedGraph?.hiddenIds ?? [];
+  return hiddenIds.some((id) => !existing.includes(id))
+    ? [{ targetId, hiddenIds }]
+    : [];
+}
+
 export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): CollapsePlan[] {
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
-  const ordered = orderedSelectedLine(edges, selectedIds, byId);
+  const ordered = materializedSelectedLine(edges, selectedIds, byId);
   if (!ordered) return [];
 
   const targetId = ordered[ordered.length - 1];
@@ -617,8 +721,52 @@ export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], select
     : [];
 }
 
-export function collapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): { nodes: BoardNodeT[]; plans: CollapsePlan[]; changed: boolean } {
-  const plans = planCollapseSelection(nodes, edges, selectedIds);
+export function planAutoCollapseAfterDone(
+  nodes: BoardNodeT[], edges: Edge[], completedId: string, policy: AutoCollapsePolicy,
+): CollapsePlan[] {
+  if (!policy.enabled) return [];
+  const linearThreshold = Math.max(2, Math.floor(policy.linearThreshold || 0));
+  const branchThreshold = Math.max(linearThreshold + 1, Math.floor(policy.branchThreshold || 0));
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const completed = byId.get(completedId);
+  if (!completed || completed.hidden || completed.data.status !== 'done') return [];
+
+  const children = visibleLineageChildren(edges, byId);
+  const parents = visibleLineageParents(edges, byId);
+  const path = uniqueVisibleLineageTo(completedId, byId, parents);
+  if (!path || path.length <= linearThreshold) return [];
+
+  const isBranchPoint = (idx: number) => idx < path.length - 1 && (children.get(path[idx])?.length ?? 0) > 1;
+
+  // First fold the front of any long linear segment without hiding a branch point.
+  let segmentStart = 0;
+  for (let i = 0; i <= path.length; i += 1) {
+    const atEnd = i === path.length;
+    const barrier = !atEnd && isBranchPoint(i);
+    if (!atEnd && !barrier) continue;
+
+    const segmentEnd = (barrier ? i : path.length) - 1;
+    if (segmentEnd >= segmentStart) {
+      const segmentLength = segmentEnd - segmentStart + 1;
+      if (segmentLength > linearThreshold) {
+        const targetIndex = segmentStart + (segmentLength - linearThreshold);
+        const plan = collapsePlanFromPathSpan(path, segmentStart, targetIndex, edges, byId);
+        if (plan.length) return plan;
+      }
+    }
+    if (barrier) segmentStart = i + 1;
+  }
+
+  // If a branch point near the front prevents further linear folding, wait longer, then fold the common
+  // prefix into the branch point itself. This keeps all branch children visible while decluttering history.
+  const firstBranchIndex = path.findIndex((_, idx) => isBranchPoint(idx));
+  if (firstBranchIndex > 0 && path.length >= branchThreshold) {
+    return collapsePlanFromPathSpan(path, 0, firstBranchIndex, edges, byId);
+  }
+  return [];
+}
+
+export function applyCollapsePlans(nodes: BoardNodeT[], plans: CollapsePlan[]): { nodes: BoardNodeT[]; plans: CollapsePlan[]; changed: boolean } {
   if (!plans.length) return { nodes, plans, changed: false };
   const hide = new Set(plans.flatMap((p) => p.hiddenIds));
   const byTarget = new Map(plans.map((p) => [p.targetId, p.hiddenIds] as const));
@@ -635,6 +783,10 @@ export function collapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedId
     return { ...n, selected: false, data: { ...n.data, collapsedGraph: { hiddenIds } } };
   });
   return { nodes: out, plans, changed: true };
+}
+
+export function collapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): { nodes: BoardNodeT[]; plans: CollapsePlan[]; changed: boolean } {
+  return applyCollapsePlans(nodes, planCollapseSelection(nodes, edges, selectedIds));
 }
 
 export function expandCollapsedGraph(nodes: BoardNodeT[], targetId: string): { nodes: BoardNodeT[]; changed: boolean } {

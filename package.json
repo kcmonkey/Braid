@@ -72,6 +72,25 @@
           "maximum": 100,
           "markdownDescription": "auto-compact trigger threshold (percent of the model's context window). Default `95` (≈ the official level). Only applies when `autoCompactEnabled` is on. The mechanism reads the model's real window size, so it adapts to both 200K and 1M windows."
         },
+        "braid.autoCollapseEnabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically fold older visible boards into collapsed-history nodes when a lineage gets long. Runs only when a new board finishes, so expanding or reading collapsed nodes does not retrigger it."
+        },
+        "braid.autoCollapseLinearThreshold": {
+          "type": "number",
+          "default": 8,
+          "minimum": 3,
+          "maximum": 64,
+          "markdownDescription": "Maximum visible boards kept in one plain linear segment before auto-collapse folds the segment's front. Default `8`. Only applies when `autoCollapseEnabled` is on."
+        },
+        "braid.autoCollapseBranchThreshold": {
+          "type": "number",
+          "default": 14,
+          "minimum": 4,
+          "maximum": 128,
+          "markdownDescription": "Lineage length required before auto-collapse folds common history into a branch point. This uses a longer threshold so branch structure stays visible longer. Default `14`."
+        },
         "braid.expandAncestorsOnSelect": {
           "type": "boolean",
           "default": false,

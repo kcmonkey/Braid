@@ -5,6 +5,7 @@ import {
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
+  planAutoCollapseAfterDone, applyCollapsePlans,
   needsCollapseDigest, collapseDigestKey, collapseDigestText, COLLAPSE_DIGEST_VERSION,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, shouldAutoCompact, CONTEXT_WARN_PCT, CONTEXT_HIGH_PCT,
@@ -511,17 +512,50 @@ describe('visual graph collapse', () => {
     expect(out.nodes.find((n) => n.id === 'd')!.data.collapsedGraph).toEqual({ hiddenIds: ['b', 'c'] });
   });
 
-  it('requires at least two boards and a direct visible line', () => {
+  it('requires at least two boards but auto-fills gaps on one visible line', () => {
     const nodes = [node('a', 0), node('b', 1), node('c', 2)];
     const edges = [forkEdge('a', 'b'), forkEdge('b', 'c')];
     expect(planCollapseSelection(nodes, edges, ['c'])).toEqual([]);
-    expect(planCollapseSelection(nodes, edges, ['a', 'c'])).toEqual([]);
+    expect(planCollapseSelection(nodes, edges, ['a', 'c'])).toEqual([{ targetId: 'c', hiddenIds: ['a', 'b'] }]);
+  });
+
+  it('collapses everything before the last selected board on the selected ancestor span', () => {
+    const nodes = [node('a', 0), node('b', 1), node('c', 2), node('d', 3), node('e', 4)];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e')];
+    const out = collapseSelection(nodes, edges, ['b', 'e']);
+    expect(out.plans).toEqual([{ targetId: 'e', hiddenIds: ['b', 'c', 'd'] }]);
+    expect(out.nodes.find((n) => n.id === 'b')!.hidden).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'c')!.hidden).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'd')!.hidden).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'e')!.data.collapsedGraph).toEqual({ hiddenIds: ['b', 'c', 'd'] });
   });
 
   it('rejects selected sibling leaves instead of collapsing their shared ancestor', () => {
     const nodes = [node('root', 0), node('shared', 1), node('left', 2), node('right', 3)];
     const edges = [forkEdge('root', 'shared'), forkEdge('shared', 'left'), forkEdge('shared', 'right')];
     expect(planCollapseSelection(nodes, edges, ['left', 'right'])).toEqual([]);
+  });
+
+  it('rejects middle nodes on different long branches', () => {
+    const nodes = [
+      node('root', 0),
+      node('left1', 1), node('left2', 2), node('left3', 3),
+      node('right1', 4), node('right2', 5), node('right3', 6),
+    ];
+    const edges = [
+      forkEdge('root', 'left1'), forkEdge('left1', 'left2'), forkEdge('left2', 'left3'),
+      forkEdge('root', 'right1'), forkEdge('right1', 'right2'), forkEdge('right2', 'right3'),
+    ];
+    expect(planCollapseSelection(nodes, edges, ['left2', 'right2'])).toEqual([]);
+  });
+
+  it('rejects ambiguous endpoint selections with more than one lineage path', () => {
+    const nodes = [node('root', 0), node('left', 1), node('right', 2), node('leaf', 3)];
+    const edges = [
+      forkEdge('root', 'left'), forkEdge('left', 'leaf'),
+      forkEdge('root', 'right'), forkEdge('right', 'leaf'),
+    ];
+    expect(planCollapseSelection(nodes, edges, ['root', 'leaf'])).toEqual([]);
   });
 
   it('rejects a line that would hide a branch point with a visible unselected child', () => {
@@ -533,6 +567,7 @@ describe('visual graph collapse', () => {
       forkEdge('shared', 'sibling'),
     ];
     expect(planCollapseSelection(nodes, edges, ['shared', 'spine', 'leaf'])).toEqual([]);
+    expect(planCollapseSelection(nodes, edges, ['shared', 'leaf'])).toEqual([]);
   });
 
   it('allows a line below a branch point and creates a visual proxy edge', () => {
@@ -581,6 +616,59 @@ describe('visual graph collapse', () => {
     const nodes = [node('a', 0), node('b', 1), node('m', 2, { merged: true })];
     const edges = [mergeEdge('a', 'm'), mergeEdge('b', 'm')];
     expect(planCollapseSelection(nodes, edges, ['a', 'm'])).toEqual([]);
+  });
+});
+
+describe('auto visual graph collapse', () => {
+  const policy = { enabled: true, linearThreshold: 4, branchThreshold: 7 };
+
+  it('does nothing when disabled or when the completed lineage is still short', () => {
+    const nodes = [node('a', 0), node('b', 1), node('c', 2), node('d', 3)];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd')];
+    expect(planAutoCollapseAfterDone(nodes, edges, 'd', { ...policy, enabled: false })).toEqual([]);
+    expect(planAutoCollapseAfterDone(nodes, edges, 'd', policy)).toEqual([]);
+  });
+
+  it('folds the front of an over-long linear lineage and keeps the recent window visible', () => {
+    const nodes = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id, i) => node(id, i));
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'), forkEdge('e', 'f'), forkEdge('f', 'g')];
+    const plans = planAutoCollapseAfterDone(nodes, edges, 'g', policy);
+    expect(plans).toEqual([{ targetId: 'd', hiddenIds: ['a', 'b', 'c'] }]);
+
+    const out = applyCollapsePlans(nodes, plans);
+    expect(out.changed).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'd')!.data.collapsedGraph).toEqual({ hiddenIds: ['a', 'b', 'c'] });
+  });
+
+  it('folds a long post-branch segment without hiding the branch point or its sibling', () => {
+    const nodes = ['root', 'branch', 'c', 'd', 'e', 'f', 'g', 'sibling'].map((id, i) => node(id, i));
+    const edges = [
+      forkEdge('root', 'branch'),
+      forkEdge('branch', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'), forkEdge('e', 'f'), forkEdge('f', 'g'),
+      forkEdge('branch', 'sibling'),
+    ];
+    expect(planAutoCollapseAfterDone(nodes, edges, 'g', { ...policy, branchThreshold: 20 }))
+      .toEqual([{ targetId: 'd', hiddenIds: ['c'] }]);
+  });
+
+  it('waits longer, then folds the common prefix into the first branch point', () => {
+    const nodes = ['a', 'b', 'branch', 'c', 'd', 'e', 'f', 'sibling'].map((id, i) => node(id, i));
+    const edges = [
+      forkEdge('a', 'b'), forkEdge('b', 'branch'),
+      forkEdge('branch', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'), forkEdge('e', 'f'),
+      forkEdge('branch', 'sibling'),
+    ];
+    expect(planAutoCollapseAfterDone(nodes, edges, 'e', policy)).toEqual([]);
+    expect(planAutoCollapseAfterDone(nodes, edges, 'f', policy))
+      .toEqual([{ targetId: 'branch', hiddenIds: ['a', 'b'] }]);
+  });
+
+  it('does not auto-collapse through merge-only ancestry or unfinished boards', () => {
+    const nodes = [node('a', 0), node('b', 1), node('m', 2, { merged: true }), node('live', 3, { status: 'streaming' })];
+    const edges = [mergeEdge('a', 'm'), mergeEdge('b', 'm'), forkEdge('m', 'live')];
+    expect(planAutoCollapseAfterDone(nodes, edges, 'm', policy)).toEqual([]);
+    expect(planAutoCollapseAfterDone(nodes, edges, 'live', policy)).toEqual([]);
   });
 });
 

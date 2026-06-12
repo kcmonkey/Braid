@@ -1070,7 +1070,7 @@ function restoreRolledBackFiles(canvasId: string, boardIds: string[]) {
 }
 
 // The provider-NEUTRAL canvas keys (kept as flat `braid.*` settings, outside the provider hierarchy).
-const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin', 'warmSessionEnabled', 'warmSessionIdleCapMin', 'warmSessionMax'];
+const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'autoCollapseEnabled', 'autoCollapseLinearThreshold', 'autoCollapseBranchThreshold', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin', 'warmSessionEnabled', 'warmSessionIdleCapMin', 'warmSessionMax'];
 
 /** Read the legacy flat `braid.*` provider keys (pre-multi-provider). Fallbacks reproduce the OLD package.json
  * per-key defaults (effort 'xhigh', thinking 'adaptive', …) so an unconfigured install migrates to identical
@@ -1110,6 +1110,9 @@ function readSettings(canvasId?: string): BraidSettings {
   const canvas: CanvasConfig = {
     autoCompactEnabled: c.get<boolean>('autoCompactEnabled', DEFAULT_CANVAS_CONFIG.autoCompactEnabled),
     autoCompactThreshold: c.get<number>('autoCompactThreshold', DEFAULT_CANVAS_CONFIG.autoCompactThreshold),
+    autoCollapseEnabled: c.get<boolean>('autoCollapseEnabled', DEFAULT_CANVAS_CONFIG.autoCollapseEnabled),
+    autoCollapseLinearThreshold: c.get<number>('autoCollapseLinearThreshold', DEFAULT_CANVAS_CONFIG.autoCollapseLinearThreshold),
+    autoCollapseBranchThreshold: c.get<number>('autoCollapseBranchThreshold', DEFAULT_CANVAS_CONFIG.autoCollapseBranchThreshold),
     expandAncestorsOnSelect: c.get<boolean>('expandAncestorsOnSelect', DEFAULT_CANVAS_CONFIG.expandAncestorsOnSelect),
     asyncContinuationEnabled: c.get<boolean>('asyncContinuationEnabled', DEFAULT_CANVAS_CONFIG.asyncContinuationEnabled),
     asyncContinuationIdleCapMin: c.get<number>('asyncContinuationIdleCapMin', DEFAULT_CANVAS_CONFIG.asyncContinuationIdleCapMin),
