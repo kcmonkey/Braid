@@ -13,6 +13,7 @@ media/demo/**
 mockups/**
 CLAUDE.md
 AGENTS.md
+unreal/**
 .git/**
 .gitignore
 .vscode/**
@@ -27,6 +28,7 @@ node_modules/@anthropic-ai/claude-agent-sdk-*/**
 # Dev probes / scratch — investigation artifacts, never shipped
 probe-*
 tmp-codex-schema/**
+tmp-unreal-install-test-*/**
 
 # Misc
 *.vsix
