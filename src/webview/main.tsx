@@ -24,6 +24,7 @@ import {
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
+import { rankResults, parseQuery, type SearchHit } from './search';
 import { relayoutAnchored, type LayoutDir } from './layout';
 import { markdownUrlTransform, parseLocalPathLink } from './localLinks';
 import type {
@@ -803,6 +804,11 @@ const MergeCtxHL = React.createContext<Set<string>>(new Set());
 // matching BoardNode shows a transient pulse ring (`.board.revealed`) until App clears it after a beat.
 const RevealCtx = React.createContext<string | null>(null);
 
+// Canvas-Search (Phase 2): while the search bar is open with a non-empty query, `active` is true and
+// `matched` holds the hit ids. A BoardNode dims itself when `active && !matched.has(id)`, turning the
+// canvas into a live visual filter. Transient UI only — never persisted (no serializeGraph impact).
+const SearchCtx = React.createContext<{ active: boolean; matched: Set<string> }>({ active: false, matched: new Set() });
+
 // Branch-Signposts: signpost id → its branch-label text. Only signposts (root / branch head / merge /
 // compact) with a non-empty label are present. Provided by App (memoized over the graph); in 'far-far' LOD
 // each BoardNode shows this as its in-card title (scales with the board). (Branch-Signposts plan)
@@ -1195,6 +1201,9 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const isFuseTarget = React.useContext(FuseTargetCtx) === id;
   // Just jumped here from a completion notification → transient pulse ring (cleared by App).
   const revealed = React.useContext(RevealCtx) === id;
+  // Canvas-Search: this board is faded because a search is active and it is NOT a match.
+  const search = React.useContext(SearchCtx);
+  const dimmed = search.active && !search.matched.has(id);
   // Branch-Signposts: this board's branch-label text (present only for signpost nodes with a non-empty
   // label). Shown as the in-card title in 'far-far' LOD (the branch map), where it replaces the gist.
   const signpostLabel = React.useContext(SignpostCtx).get(id);
@@ -1321,7 +1330,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         and the layout reflows to their real heights, so nothing is pinned to a detail-height slot. */}
     <div className="board-slot">
     <div
-      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''} ${isCollapsedGraph ? 'collapsed-graph' : ''}`}
+      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${isFuseTarget ? 'fuse-target' : ''} ${revealed ? 'revealed' : ''} ${dimmed ? 'dimmed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''} ${isCollapsedGraph ? 'collapsed-graph' : ''}`}
     >
       <Handle type="target" position={targetPos} />
       {/* Zoom-LOD content wrapper: keyed on `lod` so it remounts (and re-runs the dissolve) on a
@@ -2820,6 +2829,125 @@ const BRANCH_SUMMARY_RETRY_BASE_MS = 1500;
 // content key (collapseDigestKey) so folding more in gets a fresh budget. (Branch shares its concurrency cap.)
 const MAX_COLLAPSE_DIGEST_ATTEMPTS = 4;
 const COLLAPSE_DIGEST_RETRY_BASE_MS = 1500;
+
+// Canvas-Search: wrap each occurrence of any query term in <mark>. Case-insensitive; overlapping/adjacent
+// hits merged so a term that is a prefix of another doesn't double-wrap. Pure display helper.
+function Mark({ text, terms }: { text: string; terms: string[] }) {
+  const real = terms.filter(Boolean);
+  if (!real.length || !text) return <>{text}</>;
+  const low = text.toLowerCase();
+  const raw: Array<{ start: number; end: number }> = [];
+  for (const t of real) {
+    let from = 0;
+    for (;;) { const i = low.indexOf(t, from); if (i < 0) break; raw.push({ start: i, end: i + t.length }); from = i + t.length; }
+  }
+  raw.sort((a, b) => a.start - b.start);
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (const r of raw) { const l = ranges[ranges.length - 1]; if (l && r.start <= l.end) l.end = Math.max(l.end, r.end); else ranges.push({ ...r }); }
+  const out: React.ReactNode[] = [];
+  let pos = 0;
+  ranges.forEach((r, i) => {
+    if (r.start > pos) out.push(text.slice(pos, r.start));
+    out.push(<mark key={i}>{text.slice(r.start, r.end)}</mark>);
+    pos = r.end;
+  });
+  if (pos < text.length) out.push(text.slice(pos));
+  return <>{out}</>;
+}
+
+const SEARCH_KIND_ICON: Record<string, string> = { merge: '✦', compact: '🗜', root: '◆', fork: '⎇' };
+
+// Top-center search overlay (Ctrl+F). Closed → a small discoverable hint chip (twin of the zoom hint);
+// open → input + live result count + ↑/↓ nav, with a ranked results list below. Pure presentation: all
+// matching/navigation lives in App, this just renders state and forwards events. (Canvas-Search Phase 1)
+function SearchBox({
+  open, query, terms, hits, activeIndex, inputRef,
+  onOpen, onClose, onChange, onArrow, onEnter, onPick, onOpenHit,
+}: {
+  open: boolean;
+  query: string;
+  terms: string[];
+  hits: SearchHit[];
+  activeIndex: number;
+  inputRef: React.RefObject<HTMLInputElement>;
+  onOpen: () => void;
+  onClose: () => void;
+  onChange: (v: string) => void;
+  onArrow: (delta: number) => void;
+  onEnter: () => void;
+  onPick: (i: number) => void;
+  onOpenHit: (i: number) => void;
+}) {
+  if (!open) {
+    return (
+      <button className="search-hint nodrag nopan" onClick={onOpen} title="Search this canvas (Ctrl+F)">
+        <span className="tb-ico">🔍</span> Search <span className="search__kbd">Ctrl F</span>
+      </button>
+    );
+  }
+  const has = query.trim().length > 0;
+  return (
+    <div className="search nodrag nopan">
+      <div className="search__bar">
+        <span className="search__mag tb-ico">🔍</span>
+        <input
+          ref={inputRef}
+          className="search__input"
+          placeholder="Search this canvas…"
+          value={query}
+          autoComplete="off"
+          spellCheck={false}
+          onChange={(e) => onChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown') { e.preventDefault(); onArrow(1); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); onArrow(-1); }
+            else if (e.key === 'Enter') { e.preventDefault(); onEnter(); }
+            else if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+          }}
+        />
+        <span className="search__count">{has ? (hits.length ? `${activeIndex + 1} / ${hits.length}` : '0 results') : ''}</span>
+        <div className="search__nav">
+          <button className="navbtn" onClick={() => onArrow(-1)} disabled={!hits.length} title="Previous match (↑)">▲</button>
+          <button className="navbtn" onClick={() => onArrow(1)} disabled={!hits.length} title="Next match (↓)">▼</button>
+        </div>
+        <span className="search__div" />
+        <button className="navbtn" onClick={onClose} title="Close (Esc)">✕</button>
+      </div>
+      {has && (
+        <div className="results">
+          {hits.length === 0 ? (
+            <div className="results__empty">No boards match “{query.trim()}”</div>
+          ) : (
+            <>
+              <div className="results__hint">↑↓ cycle · Enter locates · Enter again opens</div>
+              {hits.map((h, i) => (
+                <div
+                  key={h.id}
+                  className={`res ${i === activeIndex ? 'active' : ''}`}
+                  onClick={() => onPick(i)}
+                  onDoubleClick={() => onOpenHit(i)}
+                  title="Click to locate · double-click to open"
+                >
+                  <div className="res__ico">{SEARCH_KIND_ICON[h.kind] ?? '⎇'}</div>
+                  <div className="res__main">
+                    <div className="res__q"><Mark text={h.prompt || '(no prompt yet)'} terms={terms} /></div>
+                    <div className="res__snip"><Mark text={h.snippet.text} terms={terms} /></div>
+                    <div className="res__where">{[h.kind, ...h.tags.map((t) => `#${t}`)].join(' · ')}</div>
+                  </div>
+                  <div className="res__meta">
+                    <span className="res__seq">#{h.seq}</span>
+                    <span className={`res__eng ${h.engine}`}>{h.engine}</span>
+                  </div>
+                </div>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function App() {
   const idRef = useRef(2);
   const seqRef = useRef(1); // root is seq 0; every new board takes the next seq
@@ -2849,6 +2977,13 @@ function App() {
   const [focusOrigin, setFocusOrigin] = useState<{ x: number; y: number } | null>(null); // screen anchor for the zoom-into/out-of animation (the focused board's center)
   const [focusClosing, setFocusClosing] = useState(false); // true during the exit animation, before the overlay unmounts
   const [revealedId, setRevealedId] = useState<string | null>(null); // board just jumped-to from a notification → transient pulse ring
+  // Canvas-Search (Ctrl+F) — pure-webview transient UI, never persisted.
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchActive, setSearchActive] = useState(0); // active hit index in the results list
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchOpenRef = useRef(false);                  // mirror for the global keydown handler
+  const searchLocatedRef = useRef<string | null>(null); // last located hit id → Enter#1 locates, Enter#2 opens
   const [config, setConfig] = useState<BraidConfig | null>(null); // braid.* settings (null until host replies)
   const [resolvedModel, setResolvedModel] = useState<string | null>(null); // full model id from last query's init
   const [noticePanelOpen, setNoticePanelOpen] = useState(false); // in-canvas notification panel open?
@@ -3859,6 +3994,121 @@ function App() {
     tryReveal();
   }, [tryReveal]);
 
+  // ===== Canvas content search (Canvas-Search plan) — pure webview, no host/engine/protocol. =====
+  // Ranked hits for the current query over the LIVE node set (streaming / waiting / multi-turn boards
+  // included). rankResults is pure & cheap (in-memory substring scans); recompute on node/query change.
+  const searchHits = useMemo(
+    () => (searchOpen && searchQuery.trim() ? rankResults(nodesRef.current, searchQuery) : []),
+    // `nodes` (state) is the change signal; nodesRef.current is the same array, read for freshness.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [searchOpen, searchQuery, nodes],
+  );
+  const searchTerms = useMemo(() => parseQuery(searchQuery).terms, [searchQuery]);
+  const searchActiveOn = searchOpen && searchQuery.trim().length > 0;
+  const matchedIds = useMemo(() => new Set(searchHits.map((h) => h.id)), [searchHits]);
+  const searchCtxValue = useMemo(
+    () => ({ active: searchActiveOn, matched: matchedIds }),
+    [searchActiveOn, matchedIds],
+  );
+  // MiniMap tint: a fresh closure whenever the matched set / active flag changes → the <MiniMap> nodeColor
+  // prop ref changes, so it recomputes colors. Search hits win over the normal type colors. No module
+  // state, no node-data mutation (nothing extra to strip from serializeGraph). (Phase 2)
+  const minimapColor = useCallback(
+    (n: Node) => (searchActiveOn && matchedIds.has(n.id) ? '#d97757' : minimapNodeColor(n)),
+    [searchActiveOn, matchedIds],
+  );
+  // Clamp the active row when the hit list shrinks (e.g. query narrowed).
+  useEffect(() => { setSearchActive((i) => (i >= searchHits.length ? 0 : i)); }, [searchHits.length]);
+
+  const openSearch = useCallback(() => {
+    setSearchOpen(true);
+    requestAnimationFrame(() => { const el = searchInputRef.current; if (el) { el.focus(); el.select(); } });
+  }, []);
+  const closeSearch = useCallback(() => {
+    setSearchOpen(false);
+    setSearchQuery('');
+    setSearchActive(0);
+    searchLocatedRef.current = null;
+  }, []);
+  const onSearchChange = useCallback((v: string) => {
+    setSearchQuery(v);
+    setSearchActive(0);
+    searchLocatedRef.current = null;  // a query change means the next Enter locates (not opens)
+  }, []);
+
+  // Resolve a hit id to a reveal target and reveal it. A hidden board (folded inside a collapsedGraph) is
+  // un-hidden by expanding its representative first; the retry-on-[nodes] effect then fires tryReveal once
+  // the node is visible (same path as newConversation). Visible boards reveal immediately.
+  const revealHit = useCallback((targetId: string, focus: boolean) => {
+    const node = nodesRef.current.find((n) => n.id === targetId);
+    if (node && !node.hidden) {
+      revealReqRef.current = { id: targetId, focus };
+      tryReveal();
+      return;
+    }
+    const rep = nodesRef.current.find((n) => (n.data.collapsedGraph?.hiddenIds ?? []).includes(targetId));
+    if (rep) {
+      expandCollapsed(rep.id);                       // un-hides into nodesRef + setNodes
+      revealReqRef.current = { id: targetId, focus }; // retry-on-[nodes] effect fires tryReveal post-commit
+      return;
+    }
+    revealReqRef.current = { id: targetId, focus };
+    tryReveal();
+  }, [tryReveal, expandCollapsed]);
+
+  // Locate = pan/zoom + pulse (focus:false). Remembers the located id so a SECOND Enter on the same hit opens it.
+  const locateHit = useCallback((i: number) => {
+    const hit = searchHits[i];
+    if (!hit) return;
+    setSearchActive(i);
+    searchLocatedRef.current = hit.id;
+    revealHit(hit.id, false);
+  }, [searchHits, revealHit]);
+  // Open = jump into the board's full-screen ChatView (focus:true).
+  const openHit = useCallback((i: number) => {
+    const hit = searchHits[i];
+    if (!hit) return;
+    setSearchActive(i);
+    revealHit(hit.id, true);
+  }, [searchHits, revealHit]);
+  // Enter from the search box: first press locates the active hit; a second press (already located) opens it.
+  const enterHit = useCallback(() => {
+    const hit = searchHits[searchActive];
+    if (!hit) return;
+    if (searchLocatedRef.current === hit.id) openHit(searchActive);
+    else locateHit(searchActive);
+  }, [searchHits, searchActive, locateHit, openHit]);
+  // ↑/↓ move the active hit AND locate it (browser-find-like: each step pans + pulses the match on the canvas).
+  const navHit = useCallback((delta: number) => {
+    if (!searchHits.length) return;
+    locateHit((searchActive + delta + searchHits.length) % searchHits.length);
+  }, [searchHits, searchActive, locateHit]);
+  // Click a result row → locate; click the already-located active row again → open (mirrors Enter's two stages).
+  const clickHit = useCallback((i: number) => {
+    const hit = searchHits[i];
+    if (!hit) return;
+    if (searchActive === i && searchLocatedRef.current === hit.id) openHit(i);
+    else locateHit(i);
+  }, [searchHits, searchActive, locateHit, openHit]);
+
+  // Ctrl/Cmd+F toggles search (does NOT bail on a focused composer — it is not a text-edit key; we want
+  // it to steal focus into the search box). Esc closes only when open (so it never hijacks ChatView's Esc).
+  // Mirrors the global Ctrl+Z / Shift+Tab keydown pattern. (Canvas-Search Phase 1)
+  useEffect(() => { searchOpenRef.current = searchOpen; }, [searchOpen]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+        e.preventDefault();
+        if (searchOpenRef.current) closeSearch(); else openSearch();
+      } else if (e.key === 'Escape' && searchOpenRef.current) {
+        e.preventDefault();
+        closeSearch();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [openSearch, closeSearch]);
+
   // Editor-tab status icon: `busy` = any board is streaming (a task executing); `pending` = any board
   // needs attention (boardNeedsAttention, the same predicate as the notification panel above). Report
   // both to the host only when either flips, so it can swap the panel's tab icon (the red attention dot
@@ -4851,6 +5101,7 @@ function App() {
     <RevealCtx.Provider value={revealedId}>
     <FuseTargetCtx.Provider value={fuseTarget}>
     <CollapseCtx.Provider value={collapseState}>
+    <SearchCtx.Provider value={searchCtxValue}>
     <AttachCtx.Provider value={attachState}>
     <ImageCtx.Provider value={imageState}>
     <DraftCtx.Provider value={draftState}>
@@ -4885,7 +5136,7 @@ function App() {
           position="bottom-left"
           pannable
           zoomable
-          nodeColor={minimapNodeColor}
+          nodeColor={minimapColor}
           nodeStrokeColor="transparent"
           nodeBorderRadius={3}
           maskColor="rgba(20,19,18,.62)"
@@ -4899,6 +5150,24 @@ function App() {
       {/* Always-visible permission-mode chip (twin of the zoom hint): read-only display of the active
           mode. Cycle with Shift+Tab (global keydown handler) or change in Settings. Hidden until config loads. */}
       {config && <PermModeHint mode={config.permissionMode} />}
+
+      {/* Canvas content search (Ctrl+F): top-center overlay — closed shows a small hint chip, open shows
+          the search bar + ranked results. Hidden until invoked; matching/nav handled in App. (Canvas-Search) */}
+      <SearchBox
+        open={searchOpen}
+        query={searchQuery}
+        terms={searchTerms}
+        hits={searchHits}
+        activeIndex={searchActive}
+        inputRef={searchInputRef}
+        onOpen={openSearch}
+        onClose={closeSearch}
+        onChange={onSearchChange}
+        onArrow={navHit}
+        onEnter={enterHit}
+        onPick={clickHit}
+        onOpenHit={openHit}
+      />
 
       {/* Top-right account bar (mockup parity): active-provider usage chip · account avatar · ⚙ settings.
           Each element floats separately (no wrapping dock chrome), like the official extension's top-right. */}
@@ -5167,6 +5436,7 @@ function App() {
     </DraftCtx.Provider>
     </ImageCtx.Provider>
     </AttachCtx.Provider>
+    </SearchCtx.Provider>
     </CollapseCtx.Provider>
     </FuseTargetCtx.Provider>
     </RevealCtx.Provider>
