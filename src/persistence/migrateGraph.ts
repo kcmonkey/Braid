@@ -31,6 +31,19 @@ function nodeV1toV2(n: SNode): SNode {
   return d === n.data ? n : { ...n, data: d };
 }
 
+/** v2 → v3 (strip fresh native base). A fresh board no longer persists a provider-native send base — send-time
+ * materialization recomputes it from the graph (D2). Strip `parentSessionId`/`resumeAt` from every fresh board,
+ * plus a non-merge fresh board's dead `mergeContext` replay seed (a merge board keeps `mergeContext` as a
+ * display-only preview, D6). Per-field guards keep it idempotent. */
+function nodeV2toV3(n: SNode): SNode {
+  const d = n.data;
+  if (!isFreshBoard(d)) return n;
+  const dropSeed = !d.merged; // a fork board's mergeContext is a dead replay seed; a merge board keeps it (preview, D6)
+  if (d.parentSessionId == null && d.resumeAt == null && !(dropSeed && d.mergeContext != null)) return n;
+  const { parentSessionId, resumeAt, mergeContext, ...rest } = d;
+  return { ...n, data: dropSeed ? rest : { ...rest, ...(mergeContext != null ? { mergeContext } : {}) } };
+}
+
 /** Bring `g` to GRAPH_VERSION. No-op when already current/newer or structurally invalid (idempotent). Chained:
  * add an `if (v < N)` step per future bump. */
 export function migrateGraph(g: SerializedGraph): SerializedGraph {
@@ -38,6 +51,6 @@ export function migrateGraph(g: SerializedGraph): SerializedGraph {
   let nodes = g.nodes;
   let v = g.version;
   if (v < 2) { nodes = nodes.map(nodeV1toV2); v = 2; }
-  // future: if (v < 3) { nodes = nodes.map(nodeV2toV3); v = 3; }
+  if (v < 3) { nodes = nodes.map(nodeV2toV3); v = 3; }
   return { ...g, version: GRAPH_VERSION, nodes };
 }

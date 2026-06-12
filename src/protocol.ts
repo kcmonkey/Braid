@@ -220,6 +220,13 @@ export interface UserInputAsk { toolUseId: string; questions: UserInputQuestion[
 // (+ any freeform "other" text) as a string[]. `canceled` is an EXPLICIT state (not an empty map).
 export interface UserInputAnswer { answers: Record<string, string[]>; canceled: boolean }
 
+// Neutral elicitation shapes (capability-layer P4). url mode only for now: a provider (Codex MCP server)
+// asks the user to visit a URL to complete something (e.g. an OAuth authorize). The host reuses the
+// approval card so the user CONSENTS before the browser opens; `accept` → host opens the URL. form mode
+// (dynamic schema-driven fields) is deferred — it needs a real form UI. (D5: rare; safe default otherwise)
+export interface ElicitAsk { toolUseId: string; mode: 'url'; message: string; url: string; serverName?: string }
+export interface ElicitOutcome { action: 'accept' | 'decline' | 'cancel' }
+
 /** webview → extension host */
 export type WebviewMessage =
   | { type: 'ready' }

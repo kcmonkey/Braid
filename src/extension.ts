@@ -1526,6 +1526,35 @@ function makePreToolInterceptor(canvasId: string, boardId: string, boardSignal: 
       pendingPermissions.delete(pk);
       return verdict;
     },
+    // Elicitation (capability-layer P4, url mode): show the message via the approval card so the user CONSENTS
+    // before the browser opens; on accept, open the URL. Reuses the permissionRequest message + PermissionCard
+    // + pendingPermissions (the Codex adapter synthesized a `toolUse(name:'Elicitation')` for the card to bind
+    // to). A board stop/delete or the engine's abort resolves to cancel.
+    onElicit: async (bId, turnIndex, ask, ctxSignal): Promise<ElicitOutcome> => {
+      const routeBoardId = bId || boardId;
+      const pk = `${canvasId}::${ask.toolUseId}`;
+      postTo(canvasId, {
+        type: 'permissionRequest', boardId: routeBoardId, turnIndex,
+        toolUseId: ask.toolUseId, toolName: 'Elicitation',
+        input: { url: ask.url, serverName: ask.serverName, mode: ask.mode },
+        description: ask.serverName ? `${ask.serverName}: ${ask.message}` : ask.message,
+        canAlways: false,
+      });
+      const verdict = await new Promise<PermissionVerdict>((resolve) => {
+        pendingPermissions.set(pk, resolve);
+        const onAbort = () => resolve({ deny: true, message: 'Canceled — the board was stopped.' });
+        if (boardSignal.aborted || ctxSignal?.aborted) onAbort();
+        else {
+          boardSignal.addEventListener('abort', onAbort, { once: true });
+          ctxSignal?.addEventListener('abort', onAbort, { once: true });
+        }
+      });
+      pendingPermissions.delete(pk);
+      if ('deny' in verdict) return { action: boardSignal.aborted || ctxSignal?.aborted ? 'cancel' : 'decline' };
+      try { await vscode.env.openExternal(vscode.Uri.parse(ask.url)); }
+      catch (e: any) { console.error('[Braid] elicitation openExternal failed:', e?.message ?? e); }
+      return { action: 'accept' };
+    },
   };
 }
 

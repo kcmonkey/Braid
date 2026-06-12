@@ -5,6 +5,7 @@ import type { ThinkMark } from '../webview/merge';
 import type {
   ImageInput, McpServerInfo, EngineId, ModelOption, ProviderAccount, ProviderUsage, RateLimitSnapshot,
   SlashCommandSpec, BackgroundTaskInfo, CronInfo, AsyncPending, TaskEvent, UserInputAsk, UserInputAnswer,
+  ElicitAsk, ElicitOutcome,
 } from '../protocol';
 
 // EngineId SSOT moved to protocol.ts (shared by both bundles + the catalog). Re-exported here so existing
@@ -141,6 +142,12 @@ export interface PreToolInterceptor {
   onUserInput(
     boardId: string, turnIndex: number, ask: UserInputAsk, signal: AbortSignal,
   ): Promise<UserInputAnswer>;
+  /** Elicitation (capability-layer P4, url mode): a provider asks the user to visit a URL. The host reuses
+   * the approval card so the user consents first; on `accept` it opens the URL. Blocks until answered (abort
+   * → cancel). The card is rendered from a synthesized `toolUse(name:'Elicitation')`. */
+  onElicit(
+    boardId: string, turnIndex: number, ask: ElicitAsk, signal: AbortSignal,
+  ): Promise<ElicitOutcome>;
 }
 
 export interface TurnRoute {

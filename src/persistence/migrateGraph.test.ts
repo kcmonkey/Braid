@@ -6,6 +6,7 @@ import type { SerializedGraph, SNode, SBoardData } from '../webview/merge';
 const sb = (extra: Partial<SBoardData> = {}): SBoardData => ({ prompt: '', answer: '', status: 'idle', seq: 0, ...extra });
 const snode = (id: string, data: Partial<SBoardData> = {}): SNode => ({ id, position: { x: 0, y: 0 }, data: sb(data) });
 const v1 = (nodes: SNode[]): SerializedGraph => ({ version: 1, nodes, edges: [], idCounter: nodes.length, seqCounter: nodes.length });
+const v2 = (nodes: SNode[]): SerializedGraph => ({ version: 2, nodes, edges: [], idCounter: nodes.length, seqCounter: nodes.length });
 
 describe('migrateGraph v1 -> v2', () => {
   it('moves a compact checkpoint pointer from parentSessionId to compactSession (and drops parentSessionId)', () => {
@@ -60,6 +61,40 @@ describe('migrateGraph v1 -> v2', () => {
     expect(out.idCounter).toBe(7);
     expect(out.seqCounter).toBe(3);
     expect(out.edges).toEqual(g.edges);
+  });
+});
+
+describe('migrateGraph v2 -> v3 (strip fresh native base)', () => {
+  it('strips parentSessionId / resumeAt / mergeContext from a fresh fork board', () => {
+    const out = migrateGraph(v2([snode('C', { parentSessionId: 'sp', resumeAt: 'u1', mergeContext: 'seed' })]));
+    const c = out.nodes[0].data;
+    expect(out.version).toBe(GRAPH_VERSION);
+    expect(c.parentSessionId).toBeUndefined();
+    expect(c.resumeAt).toBeUndefined();
+    expect(c.mergeContext).toBeUndefined();
+  });
+
+  it('keeps mergeContext on a fresh MERGE board (display preview) but strips the native base', () => {
+    const out = migrateGraph(v2([snode('M', { merged: true, parentSessionId: 'sa', mergeContext: 'excerpt' })]));
+    const m = out.nodes[0].data;
+    expect(m.parentSessionId).toBeUndefined();
+    expect(m.mergeContext).toBe('excerpt');
+  });
+
+  it('does not strip a ran board (only fresh boards lose the native base)', () => {
+    const out = migrateGraph(v2([snode('P', { prompt: 'q', status: 'done', sessionId: 'sp', parentSessionId: 'spp' })]));
+    expect(out.nodes[0].data.parentSessionId).toBe('spp');
+  });
+
+  it('is idempotent across the full v1 -> v3 chain', () => {
+    const make = () => v1([
+      snode('C', { parentSessionId: 'sp', resumeAt: 'u' }),
+      snode('P', { prompt: 'q', answer: 'a', status: 'done', sessionId: 'sp' }),
+    ]);
+    const once = migrateGraph(make());
+    expect(once.version).toBe(GRAPH_VERSION);
+    expect(migrateGraph(once)).toBe(once);            // already v3 → no-op
+    expect(migrateGraph(make())).toEqual(once);       // migrating twice = identical
   });
 });
 

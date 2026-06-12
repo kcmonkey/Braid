@@ -1796,11 +1796,12 @@ export function mergeFit(
 }
 
 // ---- Persistence (M3) ----
-// STM D0: bumped 1→2 for the clean board model (compact pointer moved to `compactSession`, `providerIntent`
-// added). migrateGraph (src/persistence/migrateGraph.ts) brings a v1 graph forward; the restore gate migrates
-// a non-null older graph rather than seed-wiping it. NEVER bump this while the restore gate still discards a
-// version mismatch. (decisions.md D0)
-export const GRAPH_VERSION = 2;
+// STM D0/D2: v2 = clean board model (compact pointer → `compactSession`, `providerIntent` added). v3 = strip the
+// native send base (`parentSessionId`/`resumeAt`, and a fork board's dead `mergeContext` replay seed) off FRESH
+// boards — send-time materialization recomputes it from the graph. migrateGraph (src/persistence/migrateGraph.ts)
+// brings older graphs forward; the restore gate migrates a non-null older graph rather than seed-wiping it. NEVER
+// bump this while the restore gate still discards a version mismatch. (decisions.md D0/D2)
+export const GRAPH_VERSION = 3;
 export type SBoardData = Omit<BoardData, 'onSend' | 'onFork' | 'onStop' | 'onCompact'>;
 export interface SNode { id: string; position: { x: number; y: number }; data: SBoardData; hidden?: boolean; }
 export type EdgeKind = 'fork' | 'merge' | 'compact' | 'collapse';

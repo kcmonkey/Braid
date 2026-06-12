@@ -15,7 +15,7 @@ import './styles.css';
 import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
-  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, forkBaseFor, mergeBaseFor, restampActiveProvider, mergeFit, mergeUnion, modelWindowFor,
+  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, descendToFork, mergeLeaves, materializeSendPlan, mergeBaseFor, restampActiveProvider, mergeFit, mergeUnion, modelWindowFor,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
@@ -823,6 +823,9 @@ type Lod = 'detail' | 'far' | 'far-far';
 // Ids of boards to render at full DETAIL: the selected board(s) + their ancestor lineage. Provided by
 // App; each BoardNode derives its own LOD from membership. (decisions.md 2026-06-09)
 const DetailIdsCtx = React.createContext<Set<string>>(new Set());
+// STM D1: ids of boards reached by an incoming 'fork' edge → drives the fork-vs-root badge from the GRAPH,
+// not a stored native pointer (fresh boards no longer carry one). Provided by App from edges.
+const ForkIdsCtx = React.createContext<Set<string>>(new Set());
 
 // Ids of boards whose context would be folded into the current merge selection — i.e. the
 // ancestors of the selected boards. Provided by App so each BoardNode can show a softer "will be
@@ -1217,6 +1220,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const collapseCtx = React.useContext(CollapseCtx);
   const dir = React.useContext(DirCtx);
   const detailSet = React.useContext(DetailIdsCtx);
+  const forkSet = React.useContext(ForkIdsCtx);
   // Ancestor of a merge-selected board (its context will be folded into the merge) but not itself
   // directly selected → softer outline. Directly selected boards keep the prominent `.selected` ring.
   const inMergeCtx = React.useContext(MergeCtxHL).has(id) && !selected;
@@ -1274,7 +1278,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
     ? { icon: '🗜', title: 'Compacted-context node' }
     : data.merged
     ? { icon: '⑃', title: 'Merge · deduped context from the selected boards' }
-    : data.parentSessionId
+    : forkSet.has(id)
     ? { icon: '⑂', title: 'Fork · branched from a parent conversation' }
     : { icon: '◉', title: 'Root · start of a conversation tree' };
 
@@ -3273,13 +3277,20 @@ function App() {
       nodesRef.current = newNodes;
       node = newNodes.find((n) => n.id === boardId);
     }
-    const parentSessionId = node?.data.parentSessionId;
-    const mergeContext = node?.data.mergeContext;
-    // The node displays the user's raw question; mergeContext / attachment are only prepended for the engine.
+    // STM D2: recompute the native attach from the CURRENT graph at send — never read a base cached at
+    // creation (which goes stale across provider switches / reloads). For a fresh root/fork/merge board this
+    // is the only authoritative materialization point. Mirrors the prior forkBaseFor/mergeBaseFor +
+    // continuationMode, consumed ephemerally here. (decisions.md D2)
+    const turnEngine = node ? boardEngine(node.data) : 'claude';
+    // midpointFork capability gates the shared-spine optimization (Codex forks per board). Default true
+    // (unknown caps / Claude) preserves the existing spine warm-reuse. (Codex branching bug)
+    const canMidpointFork = providerCapsRef.current[turnEngine]?.midpointFork !== false;
+    const plan: { resume?: string; fork: boolean; resumeAt?: string; promptPrefix?: string } =
+      node ? materializeSendPlan(node, nodesRef.current, edgesRef.current, turnEngine, canMidpointFork) : { fork: false };
+    // The node displays the user's raw question; the merge/replay excerpt + attachment are prepended for the engine only.
     patch(boardId, () => ({ prompt, answer: '', thinking: '', thinks: [], thoughtMs: undefined, status: 'streaming', steps: [], contextTokens: undefined, contextWindow: undefined, autoCompacted: undefined }));
-    // Merge board's first send: seed the fresh session with the deduped excerpt + the new question.
-    let sendPrompt = mergeContext
-      ? `${mergeContext}\n\nBased on the merged context above, answer my new question:\n${prompt}`
+    let sendPrompt = plan.promptPrefix
+      ? `${plan.promptPrefix}\n\nBased on the merged context above, answer my new question:\n${prompt}`
       : prompt;
     // M7: a pending editor-context attachment is prepended as a labeled block, then consumed.
     const attached = attachByBoardRef.current[fromId]?.attachment;
@@ -3287,29 +3298,13 @@ function App() {
       sendPrompt = `${buildEditorContextBlock(attached)}\n\n${sendPrompt}`;
       clearAttach(fromId);
     }
-    // Lazy Fork: a clean continuation child resumes its parent's session (spine → append, so a linear
-    // chain stays ONE session) when it's the parent's FIRST continuation child, else branches from the
-    // parent's exact mid-point (resumeSessionAt). Merge products / lineage-dirty rebuilds / new roots keep
-    // the legacy base (mergeContext set, or no parentSessionId). (plans/Lazy-Fork)
-    let fork = !!parentSessionId;
-    let resumeAt: string | undefined = node?.data.resumeAt; // dirty-rebuild truncation point from forkBaseFor (Phase 2)
-    if (parentSessionId && !mergeContext && node && !node.data.lineageDirty) {
-      // Gate the shared-spine optimization by the board engine's `midpointFork` capability: an engine that
-      // can't isolate a mid-point fork (Codex) must fork per board so a branch never inherits sibling turns.
-      // Default true (unknown caps / Claude) preserves the existing spine behavior. (Codex branching bug)
-      const canMidpointFork = providerCapsRef.current[boardEngine(node.data)]?.midpointFork !== false;
-      const mode = continuationMode(node, nodesRef.current, edgesRef.current, canMidpointFork);
-      fork = mode.fork;
-      resumeAt = mode.resumeAt;
-    }
     // M8: ship the composer's pending images with the turn (base64, only here); consume them after.
     const pendingImages = imagesByBoardRef.current[fromId] ?? [];
     post({
       type: 'send', boardId, prompt: sendPrompt,
-      resume: parentSessionId, fork, resumeAt,
-      // Route this turn to the board's OWN engine (AD2), not the global active provider — so a switch since
-      // creation can't re-home its session. Stamped at creation; defaults claude for a board without one.
-      engine: node ? boardEngine(node.data) : 'claude',
+      resume: plan.resume, fork: plan.fork, resumeAt: plan.resumeAt,
+      // Route this turn to the board's OWN engine (AD2): a switch since creation can't re-home its session.
+      engine: turnEngine,
       images: pendingImages.length ? pendingImages.map((i) => ({ mediaType: i.mediaType, data: i.data })) : undefined,
     });
     if (pendingImages.length) clearImages(fromId);
@@ -3426,8 +3421,9 @@ function App() {
       position: parent.position, // placeholder; layoutGraph assigns the real spot
       data: {
         prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
-        engine: activeProviderRef.current, // a NEW board runs on the active provider (AD1); cross-engine continuation replays (Phase 1)
-        ...forkBaseFor(parent, nodesRef.current, edgesRef.current, activeProviderRef.current), // parent's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
+        engine: activeProviderRef.current, // a NEW board runs on the active provider (AD1)
+        // STM D2: no native base stored here — the fork relationship is the graph edge; onSend recomputes the
+        // base from the graph at send (materializeSendPlan). (decisions.md D1/D2)
         onSend, onFork, onStop, onCompact,
       },
     };
@@ -3520,6 +3516,9 @@ function App() {
     if (expandAncestors) for (const id of selectedIds) for (const a of ancestorsOf(id, edges)) s.add(a);
     return s;
   }, [selectedIds, edges, expandAncestors]);
+  // STM D1: a board is a "fork" (vs root) iff it has an incoming 'fork' edge — derived from the graph so the
+  // badge no longer depends on a stored `parentSessionId` (which fresh boards no longer carry).
+  const forkIds = useMemo(() => new Set(edges.filter((e) => (e.data?.kind as string) === 'fork').map((e) => e.target)), [edges]);
 
   // Boards that currently RENDER at detail width (480px, vs the 320px far/far-far gist). Mirrors BoardNode's
   // `lod` predicate: a board is wide only at detail zoom (≥ COMPRESS_ZOOM) AND when it's selected/an ancestor
@@ -3600,7 +3599,7 @@ function App() {
     // (lossless, cache-warm shared history) and inject only the divergent branches (+ any shared the fork can't
     // cover) as text WITH tool steps; no compatible base → fresh session, everything as text. mergeBaseFor is
     // the SSOT for this base computation — restampActiveProvider re-homes a never-sent merge board through it too.
-    const { merge, base, parentSessionId: mergeParentSession, mergeContext } = mergeBaseFor(leaves, byId, curEdges, activeProviderRef.current);
+    const { merge, base, mergeContext } = mergeBaseFor(leaves, byId, curEdges, activeProviderRef.current);
     // Context-budget guard: the merged board's first send seeds a session with the LCA fork base's carried
     // context PLUS this excerpt text. If that would overflow the model window the query errors before it can
     // even auto-compact — and /compact can't shrink a single oversized first message. So block here and ask
@@ -3633,10 +3632,9 @@ function App() {
       id: mid, type: 'board', position: { x: 0, y: 0 }, selected: true,
       data: {
         prompt: '', answer: '', status: 'idle', merged: true,
-        engine: activeProviderRef.current, // the merge runs on the active provider (AD1) — mergeBaseFor chose a base of THIS engine
-        // base set → onSend does resume+fork from the heaviest compatible node's session AND prepends
-        // mergeContext (zero onSend change). mergeBaseFor only returns a forkable node's session, else undefined.
-        parentSessionId: mergeParentSession,
+        engine: activeProviderRef.current, // the merge runs on the active provider (AD1)
+        // STM D2/D6: mergeContext is a DISPLAY preview (card + drawer) only; the send seed + native base are
+        // recomputed from the graph at send (materializeSendPlan), never a stored pointer. (decisions.md D2/D6)
         mergeContext, seq: seqRef.current++, onSend, onFork, onStop, onCompact,
       },
     };
@@ -3770,8 +3768,8 @@ function App() {
       position: leaf.position, // placeholder; layoutGraph assigns the real spot
       data: {
         prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
-        engine: activeProviderRef.current, // a NEW board runs on the active provider (AD1); cross-engine continuation replays (Phase 1)
-        ...forkBaseFor(leaf, nodesRef.current, edgesRef.current, activeProviderRef.current), // leaf's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
+        engine: activeProviderRef.current, // a NEW board runs on the active provider (AD1)
+        // STM D2: no native base stored — onSend recomputes from the graph at send (materializeSendPlan).
         onSend, onFork, onStop, onCompact,
       },
     };
@@ -3779,8 +3777,8 @@ function App() {
     const newNodes = autoLayout(nodesRef.current.map((n): BoardNodeT => ({ ...n, selected: false })).concat(child), newEdges);
     setEdges(newEdges);
     setNodes(newNodes);
-    // Sync refs synchronously so onSend (reads parentSessionId from nodesRef.current) sees the new child
-    // this tick, before the [nodes,edges] syncing effect runs next render. (resume-loss lesson)
+    // Sync refs synchronously so onSend's materializeSendPlan (reads the graph from nodesRef/edgesRef.current)
+    // sees the new child + its fork edge this tick, before the [nodes,edges] effect runs. (resume-loss lesson)
     edgesRef.current = newEdges;
     nodesRef.current = newNodes;
     focusedIdRef.current = childId;
@@ -5034,6 +5032,7 @@ function App() {
     <CapabilitiesCtx.Provider value={providerCaps}>
     <DirCtx.Provider value={dir}>
     <DetailIdsCtx.Provider value={detailIds}>
+    <ForkIdsCtx.Provider value={forkIds}>
     <MergeCtxHL.Provider value={mergeCtxIds}>
     <SignpostCtx.Provider value={signpostLabels}>
     <RevealCtx.Provider value={revealedId}>
@@ -5367,6 +5366,7 @@ function App() {
     </RevealCtx.Provider>
     </SignpostCtx.Provider>
     </MergeCtxHL.Provider>
+    </ForkIdsCtx.Provider>
     </DetailIdsCtx.Provider>
     </DirCtx.Provider>
     </CapabilitiesCtx.Provider>
