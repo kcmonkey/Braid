@@ -1738,6 +1738,12 @@ describe('materializeSendPlan (STM send-time base)', () => {
     expect(materializeSendPlan(R, [R], [], 'claude')).toEqual({ fork: false });
   });
 
+  it('ignores a collapse proxy edge — a board with only a collapse edge is a root, not a fork', () => {
+    const P = cn('P', 1, { sessionId: 'sp' });
+    const C = cn('C', 2, { prompt: '', answer: '', status: 'idle' });
+    expect(materializeSendPlan(C, [P, C], [makeEdge('P', 'C', 'collapse')], 'claude')).toEqual({ fork: false });
+  });
+
   it('Claude clean first continuation → resume parent session + fork:false (spine warm-reuse preserved)', () => {
     const P = cn('P', 1, { sessionId: 'sp', messageUuid: 'up' });
     const C = cn('C', 2, { prompt: '', answer: '', status: 'idle' });

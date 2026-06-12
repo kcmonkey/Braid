@@ -1035,11 +1035,16 @@ export function materializeSendPlan(
 ): { resume?: string; fork: boolean; resumeAt?: string; promptPrefix?: string } {
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
   const mergeParents = edges.filter((e) => e.target === board.id && (e.data?.kind as string) === 'merge').map((e) => e.source);
-  if (board.data.merged && mergeParents.length >= 2) {
+  // A merge product recomputes its dedup base + excerpt from whatever merge parents REMAIN (a parent deleted
+  // before first send drops a merge edge — degrade gracefully from those left, rather than losing all context;
+  // 0 left → falls through to root). mergeBaseFor/computeMerge handle a single leaf. (review fix)
+  if (board.data.merged && mergeParents.length >= 1) {
     const m = mergeBaseFor(mergeParents, byId, edges, turnEngine);
     return { resume: m.parentSessionId, fork: !!m.parentSessionId, promptPrefix: m.mergeContext };
   }
-  const forkParent = edges.find((e) => e.target === board.id && ((e.data?.kind as string) ?? 'fork') !== 'merge')?.source;
+  // Continuation parent = a LINEAGE edge (fork/compact) — NOT merge, and NOT a visual 'collapse' proxy edge
+  // (isLineageEdge excludes both), matching forkBaseFor's own parent walk.
+  const forkParent = edges.find((e) => e.target === board.id && isLineageEdge(e))?.source;
   const parent = forkParent ? byId[forkParent] : undefined;
   if (!parent) return { fork: false }; // root → fresh session
   const base = forkBaseFor(parent, nodes, edges, turnEngine);
