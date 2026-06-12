@@ -5,7 +5,7 @@
 // maps / UI and drives this via the neutral Engine contract. (plans/Engine-Abstraction Phase 1+2)
 import type { ProviderConfig } from '../../sdkOptions';
 import { buildSdkOptions } from '../../sdkOptions';
-import type { ImageInput, McpServerInfo, SlashCommandSpec, ProviderAccount } from '../../protocol';
+import type { ImageInput, McpServerInfo, SlashCommandSpec, ProviderAccount, EngineId } from '../../protocol';
 import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle, Attach, TurnRoute,
@@ -47,14 +47,43 @@ const COMPACT_DIGEST_SYSTEM =
   `3. Then 3-6 "- " bullets covering the key topics / decisions / files·modules involved / and where it left off. Keep each short; omit any bullet with no content — less is more.\n` +
   `4. Write in the SAME language as the source summary. Do not wrap the whole output in a code block, and do not add a prefix like "Summary:".`;
 
+/** A third-party Anthropic-compatible endpoint the bundled Claude binary can be pointed at (instead of
+ * Anthropic's own), so a non-Claude provider inherits the WHOLE Claude Code harness — every tool, subagents,
+ * MCP, slash commands, native /compact, real session fork. The provider's API key is sent as
+ * ANTHROPIC_AUTH_TOKEN; Claude model aliases are remapped to the provider's models. (e.g. DeepSeek via
+ * api.deepseek.com/anthropic — probe-verified; knowledge.md "DeepSeek via Claude Code") */
+export interface AnthropicEndpointProfile {
+  baseUrl: string;                 // ANTHROPIC_BASE_URL
+  model: string;                   // ANTHROPIC_MODEL + opus/sonnet mapping (the primary model)
+  fastModel: string;               // ANTHROPIC_DEFAULT_HAIKU_MODEL + CLAUDE_CODE_SUBAGENT_MODEL (cheap/fast)
+  legacySessionPrefix?: string;    // session ids with this prefix predate the harness (another transport's
+                                   // packed session) → not a CLI session id → resume runs FRESH (migration guard)
+}
+
 export interface ClaudeAdapterDeps {
   loadSdk(): Promise<any | null>;
   readProviderConfig(): ProviderConfig;
   // The bundled `claude` binary path, for CLI subcommands the SDK doesn't expose (account sign-out). Optional.
   resolveBinary?(): string | undefined;
-  // The stored API key for this provider (from the host's SecretStorage cache), or undefined. Consumed only
-  // when authMethod==='apiKey'. The key never lives in config — the host owns it; the adapter injects it.
+  // The stored API key for this provider (from the host's SecretStorage cache), or undefined. Consumed when
+  // authMethod==='apiKey' OR an endpointProfile is set (3rd-party endpoints are always key-authed). The key
+  // never lives in config — the host owns it; the adapter injects it.
   getApiKey?(): string | undefined;
+  // ---- multi-endpoint knobs (all OPTIONAL → omitted = the Claude defaults, byte-for-byte unchanged) ----
+  // Engine id this instance reports (default 'claude'). A profiled instance (e.g. 'deepseek') is still a
+  // ClaudeAdapter — same binary, different endpoint/auth/model. (knowledge.md "换 endpoint 的 provider = 同一根轴")
+  id?: EngineId;
+  // When set, drive the binary against this third-party Anthropic-compatible endpoint (see above).
+  endpointProfile?: AnthropicEndpointProfile;
+  // Whether this provider accepts image input (default true = Claude is a vision provider).
+  images?: boolean;
+  // Model for the cheap one-shot digests (default Claude Haiku). A profiled provider points it at its fast model.
+  summaryModel?: string;
+  // Override account identity/usage (default = Claude OAuth via `claude auth status` + control session). A
+  // profiled provider supplies its OWN account surface (e.g. DeepSeek balance API) since the endpoint's auth
+  // is the provider's key, not a Claude login.
+  accountControl?(cwd: string): Promise<AccountController | null>;
+  accountIdentity?(cwd: string): Promise<ProviderAccount | null>;
 }
 
 /**
@@ -91,12 +120,20 @@ function userMessage(prompt: string, images?: ImageInput[]): any {
 }
 
 export class ClaudeAdapter implements Engine {
-  readonly id = 'claude' as const;
+  readonly id: EngineId;
   // Warm-session reuse is implemented here (hold-open after settle + route-aware cross-board `push`). The host
   // reads this SYNCHRONOUSLY in the turn hot-path to decide whether to keep the session warm / reuse it for a
   // spine continuation — like `id` / `compact.mode`, a static per-engine flag, not user-facing capability data.
   readonly warmReuse = true;
-  constructor(private readonly deps: ClaudeAdapterDeps) {}
+  private readonly endpointProfile?: AnthropicEndpointProfile;
+  private readonly summaryModel: string;
+  private readonly supportsImages: boolean;
+  constructor(private readonly deps: ClaudeAdapterDeps) {
+    this.id = deps.id ?? 'claude';
+    this.endpointProfile = deps.endpointProfile;
+    this.summaryModel = deps.summaryModel ?? SUMMARY_MODEL;
+    this.supportsImages = deps.images ?? true;
+  }
 
   /**
    * Resolve the spawn `env` for EVERY sdk.query in this adapter (turn / compact / summarize / control /
@@ -113,6 +150,25 @@ export class ClaudeAdapter implements Engine {
   private spawnEnv(): Record<string, string | undefined> | undefined {
     const cfg = this.deps.readProviderConfig();
     const extra = cfg.env && Object.keys(cfg.env).length ? cfg.env : null;
+    // Third-party Anthropic-compatible endpoint (e.g. DeepSeek): point the binary at profile.baseUrl, auth
+    // with the provider key as ANTHROPIC_AUTH_TOKEN, and remap Claude model aliases → the provider's models,
+    // so the provider runs the FULL Claude Code harness. (probe-verified; knowledge.md "DeepSeek via Claude Code")
+    if (this.endpointProfile) {
+      const p = this.endpointProfile;
+      const key = this.deps.getApiKey?.() || undefined;
+      return {
+        ...process.env,
+        ...(extra ?? {}),
+        ANTHROPIC_BASE_URL: p.baseUrl,
+        ...(key ? { ANTHROPIC_AUTH_TOKEN: key, ANTHROPIC_API_KEY: key } : {}),
+        ANTHROPIC_MODEL: p.model,
+        ANTHROPIC_DEFAULT_OPUS_MODEL: p.model,
+        ANTHROPIC_DEFAULT_SONNET_MODEL: p.model,
+        ANTHROPIC_DEFAULT_HAIKU_MODEL: p.fastModel,
+        CLAUDE_CODE_SUBAGENT_MODEL: p.fastModel,
+      };
+    }
+    // --- Claude (unchanged): subscription inherits process.env; apiKey injects ANTHROPIC_API_KEY ---
     const key = cfg.authMethod === 'apiKey' ? (this.deps.getApiKey?.() || undefined) : undefined;
     if (!extra && !key) return undefined; // subscription + no override → inherit process.env (unchanged)
     return {
@@ -125,8 +181,8 @@ export class ClaudeAdapter implements Engine {
   async capabilities(): Promise<EngineCapabilities> {
     // Model list is sourced from the catalog (SSOT) — returned by reference so consumers + tests can
     // assert identity. (compact support is expressed separately via `this.compact.mode`.)
-    const claude = PROVIDER_CATALOG.find((p) => p.id === 'claude');
-    return { fork: 'native', steer: true, reasoning: true, routedFollowups: true, images: true, midpointFork: true, models: claude?.models ?? [] };
+    const desc = PROVIDER_CATALOG.find((p) => p.id === this.id);
+    return { fork: 'native', steer: true, reasoning: true, routedFollowups: true, images: this.supportsImages, midpointFork: true, models: desc?.models ?? [] };
   }
 
   // ---- main turn (was runQuery) ----
@@ -224,6 +280,12 @@ export class ClaudeAdapter implements Engine {
     let attach: Attach = req.attach;
     if (attach.kind !== 'fresh' && attach.session.engine !== this.id) {
       console.warn(`[Braid] ClaudeAdapter received a '${attach.session.engine}' session for board ${boardId}; running FRESH (no resume) to avoid corruption — turn-routing bug?`);
+      attach = { kind: 'fresh' };
+    }
+    // Migration guard: a board created under a different transport (e.g. the standalone DeepSeek adapter's
+    // packed `ds1:` session) holds an id the bundled binary can't resume — run FRESH instead of erroring on
+    // an unknown rollout. Only trips for a profiled instance that declares a legacy session prefix.
+    if (attach.kind !== 'fresh' && this.endpointProfile?.legacySessionPrefix && attach.session.raw.startsWith(this.endpointProfile.legacySessionPrefix)) {
       attach = { kind: 'fresh' };
     }
     // Attach → SDK options. fresh → none; resume → resume; fork → resume + forkSession (+resumeSessionAt).
@@ -464,7 +526,7 @@ export class ClaudeAdapter implements Engine {
         // thinking:disabled → digest is a cheap classify/summarize task that needs no reasoning; set it
         // EXPLICITLY (not omitted) so the binary default can never turn thinking on and burn thinking
         // tokens. SUMMARY_MODEL is Haiku 4.5, which accepts {type:'disabled'} (only Fable 5 would 400).
-        options: { cwd, model: SUMMARY_MODEL, systemPrompt: system, settingSources: [], settings: { autoMemoryEnabled: false }, maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false, thinking: { type: 'disabled' }, env: this.spawnEnv() },
+        options: { cwd, model: this.summaryModel, systemPrompt: system, settingSources: [], settings: { autoMemoryEnabled: false }, maxTurns: 1, permissionMode: 'bypassPermissions', persistSession: false, thinking: { type: 'disabled' }, env: this.spawnEnv() },
       });
       for await (const m of q as AsyncIterable<any>) {
         if (m.type === 'assistant') { const full = extractText(m); if (full) text = full; }
@@ -580,6 +642,7 @@ export class ClaudeAdapter implements Engine {
 
   // ---- Account/usage control session (twin of mcpControl) ----
   async accountControl(cwd: string): Promise<AccountController | null> {
+    if (this.deps.accountControl) return this.deps.accountControl(cwd); // profiled provider (e.g. DeepSeek balance)
     const sdk = await this.deps.loadSdk();
     if (!sdk) return null;
     const ctrl = new ClaudeAccountControl(this.deps.resolveBinary?.());
@@ -601,7 +664,8 @@ export class ClaudeAdapter implements Engine {
   // ---- fast identity (no control session) ----
   // Spawns `claude auth status` (~250ms) so the host can show the avatar on canvas load without opening the
   // panel or spinning up the streaming control session. Never throws (null on unavailable / not signed in).
-  async accountIdentity(_cwd: string): Promise<ProviderAccount | null> {
+  async accountIdentity(cwd: string): Promise<ProviderAccount | null> {
+    if (this.deps.accountIdentity) return this.deps.accountIdentity(cwd); // profiled provider (e.g. DeepSeek balance)
     return claudeAccountIdentity(this.deps.resolveBinary?.());
   }
 

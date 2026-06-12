@@ -47,11 +47,11 @@ function fakeQuery() {
   return { q, emit: (m: any) => { buffer.push(m); wake(); }, finish: () => { done = true; wake(); }, get interrupts() { return interruptCount; } };
 }
 
-function harness(opts: { loadSdk?: () => Promise<any>; config?: ProviderConfig; getApiKey?: () => string | undefined } = {}) {
+function harness(opts: { loadSdk?: () => Promise<any>; config?: ProviderConfig; getApiKey?: () => string | undefined; endpointProfile?: any; id?: any } = {}) {
   const captured: { options?: any; prompt?: any } = {};
   const fake = fakeQuery();
   const sdk = { query: (args: any) => { captured.options = args.options; captured.prompt = args.prompt; return fake.q; } };
-  const adapter = new ClaudeAdapter({ loadSdk: opts.loadSdk ?? (async () => sdk), readProviderConfig: () => opts.config ?? cfg, getApiKey: opts.getApiKey });
+  const adapter = new ClaudeAdapter({ loadSdk: opts.loadSdk ?? (async () => sdk), readProviderConfig: () => opts.config ?? cfg, getApiKey: opts.getApiKey, endpointProfile: opts.endpointProfile, id: opts.id });
   return { adapter, fake, captured };
 }
 
@@ -91,6 +91,24 @@ describe('ClaudeAdapter.runTurn — auth method → spawn env (authMethod / bill
     await runFresh(h);
     expect(h.captured.options.env.FOO).toBe('bar');                              // braid.env merged over process.env
     expect(h.captured.options.env.ANTHROPIC_API_KEY).not.toBe('sk-should-not-be-used'); // our stored key NOT injected
+  });
+
+  it('endpoint profile (DeepSeek via Claude Code) injects base URL + auth token + model mapping', async () => {
+    const h = harness({
+      id: 'deepseek',
+      getApiKey: () => 'sk-deepseek',
+      endpointProfile: { baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', fastModel: 'deepseek-v4-flash' },
+    });
+    await runFresh(h);
+    const env = h.captured.options.env;
+    expect(env.ANTHROPIC_BASE_URL).toBe('https://api.deepseek.com/anthropic');
+    expect(env.ANTHROPIC_AUTH_TOKEN).toBe('sk-deepseek');           // 3rd-party endpoints auth via AUTH_TOKEN
+    expect(env.ANTHROPIC_API_KEY).toBe('sk-deepseek');              // + API_KEY (some binary versions read it)
+    expect(env.ANTHROPIC_MODEL).toBe('deepseek-v4-pro');
+    expect(env.ANTHROPIC_DEFAULT_OPUS_MODEL).toBe('deepseek-v4-pro');
+    expect(env.ANTHROPIC_DEFAULT_HAIKU_MODEL).toBe('deepseek-v4-flash');
+    expect(env.CLAUDE_CODE_SUBAGENT_MODEL).toBe('deepseek-v4-flash');
+    expect(Object.keys(env).length).toBeGreaterThan(8);            // process.env spread in (PATH/HOME kept), not just the 8 explicit keys
   });
 });
 

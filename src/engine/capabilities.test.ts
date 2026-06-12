@@ -41,7 +41,7 @@ describe('toCapabilitiesView', () => {
     ]);
   });
 
-  it('maps the DeepSeek engine to the neutral view', async () => {
+  it('maps the standalone DeepSeek adapter (fallback transport) to the neutral view', async () => {
     const view = await toCapabilitiesView(new DeepSeekAdapter({
       readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG, authMethod: 'apiKey' }),
       getApiKey: () => 'sk-deepseek-test',
@@ -56,6 +56,28 @@ describe('toCapabilitiesView', () => {
       images: false,
       midpointFork: true, // DeepSeek's frozen packed per-board snapshots isolate inherently
       models: deepSeekModels,
+    });
+  });
+
+  it('maps the REGISTERED DeepSeek (via Claude Code harness = ClaudeAdapter + endpoint profile) to the neutral view', async () => {
+    const harness = new ClaudeAdapter({
+      id: 'deepseek',
+      loadSdk: async () => null,
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG, authMethod: 'apiKey' }),
+      endpointProfile: { baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', fastModel: 'deepseek-v4-flash' },
+      images: false,
+      summaryModel: 'deepseek-v4-flash',
+    });
+    const view = await toCapabilitiesView(harness);
+    expect(view).toEqual({
+      id: 'deepseek',
+      reasoning: true,
+      steer: true,
+      routedFollowups: true,  // inherits the Claude Code harness → real routed follow-ups (queued children)
+      compact: true,          // native /compact via the bundled binary
+      images: false,          // DeepSeek is text-only
+      midpointFork: true,     // real forkSession (resumeSessionAt) via the binary
+      models: deepSeekModels, // sourced from the catalog by this.id
     });
   });
 });

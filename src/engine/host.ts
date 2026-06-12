@@ -4,7 +4,7 @@ import { DEFAULT_PROVIDER_CONFIG } from '../sdkOptions';
 import type { Engine, EngineId } from './types';
 import { ClaudeAdapter, loadClaudeSdk } from './claude/adapter';
 import { CodexAdapter } from './codex/adapter';
-import { DeepSeekAdapter } from './deepseek/adapter';
+import { DeepSeekAccountControl } from './deepseek/control';
 
 /** Host-internal nested config SSOT. The webview only ever sees the flat `BraidConfig` view (the active
  * provider's slice ∪ canvas); the host translates between the two. `providers` is partial — a provider
@@ -46,9 +46,24 @@ export class EngineHost {
       readProviderConfig: () => deps.readSettings().providers.codex ?? DEFAULT_PROVIDER_CONFIG,
       getApiKey: () => deps.getApiKey?.('codex'),
     }));
-    this.engines.set('deepseek', new DeepSeekAdapter({
+    // DeepSeek runs through the SAME bundled Claude binary as Claude, pointed at DeepSeek's Anthropic-compatible
+    // endpoint (api.deepseek.com/anthropic) via spawn-env — so it INHERITS Claude Code's full tool suite,
+    // subagents, MCP, slash commands, native /compact, and real session fork (probe-deepseek-anthropic.mjs
+    // verified: Read fired, result OK). Auth/identity stay on DeepSeek's OWN key + balance API, not a Claude
+    // login. The standalone DeepSeekAdapter (deepseek/adapter.ts) is retained as a fallback transport but is no
+    // longer registered. (knowledge.md "DeepSeek via Claude Code")
+    const deepseekAccount = () => new DeepSeekAccountControl({ getApiKey: () => deps.getApiKey?.('deepseek') });
+    this.engines.set('deepseek', new ClaudeAdapter({
+      id: 'deepseek',
+      loadSdk: () => loadClaudeSdk({ installDir: deps.getSdkInstallDir?.() }),
       readProviderConfig: () => deps.readSettings().providers.deepseek ?? { ...DEFAULT_PROVIDER_CONFIG, authMethod: 'apiKey' },
+      resolveBinary: deps.resolveBinary,
       getApiKey: () => deps.getApiKey?.('deepseek'),
+      endpointProfile: { baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', fastModel: 'deepseek-v4-flash', legacySessionPrefix: 'ds1:' },
+      images: false,
+      summaryModel: 'deepseek-v4-flash',
+      accountControl: async () => deepseekAccount(),
+      accountIdentity: async () => { const c = deepseekAccount(); try { return await c.info(); } finally { c.dispose(); } },
     }));
   }
 

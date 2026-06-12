@@ -401,7 +401,7 @@ async function checkEnvironment() {
     }
   }
 
-  if (provider === 'claude') {
+  if (usesClaudeBinary(provider)) {
     if (isDevMode) {
       out.appendLine('- Claude SDK: bundled in development host');
     } else if (provisionedSdkDir && extensionPathForSdk) {
@@ -474,6 +474,11 @@ const getCanvases = (): Canvas[] => graphStore().listCanvases();
 const setCanvases = (list: Canvas[]): void => graphStore().saveCanvases(list);
 const newId = () => 'c' + Math.random().toString(36).slice(2, 9);
 const DEFAULT_ACTIVE_PROVIDER: EngineId = 'claude';
+// Which providers run on the BUNDLED Claude binary (the Claude Agent SDK): Claude itself, and DeepSeek —
+// which is the same binary pointed at DeepSeek's Anthropic-compatible endpoint (see EngineHost). These need
+// the SDK provisioned before a turn / connection self-check; Codex uses its own app-server binary and does
+// not. (DeepSeek via Claude Code — add future Anthropic-endpoint providers here.)
+const usesClaudeBinary = (id: EngineId): boolean => id === 'claude' || id === 'deepseek';
 const isEngineId = (v: unknown): v is EngineId =>
   typeof v === 'string' && PROVIDER_CATALOG.some((p) => p.id === v);
 
@@ -1597,7 +1602,7 @@ async function runProvision(manifest: NonNullable<ReturnType<typeof loadManifest
 async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId: string) {
   const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   const runProvider = msg.engine && engineHost.has(msg.engine) ? msg.engine : DEFAULT_ACTIVE_PROVIDER;
-  if (runProvider === 'claude' && !(await ensureSdkReady())) {
+  if (usesClaudeBinary(runProvider) && !(await ensureSdkReady())) {
     makeSink(canvasId).error(msg.boardId, msg.turnIndex ?? 0,
       'Claude SDK is not set up yet. Run “Braid: Check Environment” to download it, then resend.');
     return;
