@@ -88,6 +88,11 @@ private:
                     .ShowAddressBar(false)
                     .ShowErrorMessage(true)
                     .SupportsTransparency(false)
+                    // UE's CEF runs windowless (off-screen) and repaints the page into a Slate texture.
+                    // The SWebBrowser default is only 24 fps (SWebBrowser.h _BrowserFrameRate(24)); CEF
+                    // clamps windowless OSR to 60 (WebBrowserSingleton MaxFrameRateClamp). Request 60 so
+                    // the React Flow canvas repaints as smoothly as this host path allows.
+                    .BrowserFrameRate(60)
                 ]
             ];
     }
