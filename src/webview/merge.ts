@@ -1,7 +1,7 @@
 // Pure graph/merge/serialization logic — no React/DOM deps so it's unit-testable in plain node.
 // Types from @xyflow/react are imported type-only (erased at compile time; xyflow is never loaded at runtime).
 import type { Node, Edge } from '@xyflow/react';
-import { TAG_VOCAB, PROVIDER_CATALOG, type BoardTag, type AsyncPending, type EngineId, type UserInputOption, type UserInputQuestion, type UserInputAnswer } from '../protocol';
+import { TAG_VOCAB, PROVIDER_CATALOG, type BoardTag, type AsyncPending, type EngineId, type ProviderCapabilitiesView, type UserInputOption, type UserInputQuestion, type UserInputAnswer } from '../protocol';
 
 // 'waiting' (异步续接) = the last round settled but the board's session is HELD OPEN for in-flight background
 // tasks / scheduled wakeups; the SDK re-drives → a new round may still arrive. Non-terminal (like 'streaming')
@@ -335,6 +335,10 @@ export interface BoardData {
   // child; both fields are stripped on persistence and cleared when the child settles.
   queueParentId?: string;
   queueStarted?: boolean;
+  // Deferred queued-child dispatch (parent engine WITHOUT routedFollowups, e.g. Codex): the prompt to send as
+  // this child's OWN turn once its parent settles — the live follow-up path can't route Codex output to a
+  // separate board. Transient: stripped on persistence, like queueParentId/queueStarted. (queued-child fix)
+  queuedPrompt?: string;
   // M11: context-window usage after this turn. contextTokens = the model's input+cache on its final
   // response (≈ getContextUsage totalTokens); contextWindow = that model's window. Drives the % badge
   // + auto-compact. autoCompacted = the ENGINE auto-compacted this turn internally (defensive flag →
@@ -1055,6 +1059,20 @@ export function materializeSendPlan(
   // clean same-engine continuation: spine resume (append) vs branch mid-fork, gated by the engine's midpointFork.
   const mode = continuationMode(board, nodes, edges, midpointFork);
   return { resume: base.parentSessionId, fork: mode.fork, resumeAt: mode.resumeAt };
+}
+
+// How a queued child (created under a still-live parent) dispatches its first turn, decided by the PARENT
+// engine's capability. 'live' = the parent CAN route a follow-up's output to a SEPARATE board
+// (routedFollowups: Claude/DeepSeek) → push the prompt into the parent's open session. 'deferred' = it can't
+// (Codex: its follow-up push has no per-board routing, and threading a follow-up into the parent's own thread
+// would re-contaminate its per-board spine) → store the prompt and dispatch the child as its OWN send once the
+// parent settles, so the child's output lands on the CHILD board, never merged into the parent. Unknown caps
+// default to 'deferred' (the safe choice — never misroute a child's turn into its parent). (queued-child fix)
+export function queuedChildDispatch(
+  parentEngine: EngineId,
+  caps: Partial<Record<EngineId, ProviderCapabilitiesView>>,
+): 'live' | 'deferred' {
+  return caps[parentEngine]?.routedFollowups === true ? 'live' : 'deferred';
 }
 
 /**
@@ -1846,7 +1864,7 @@ export function serializeGraph(nodes: BoardNodeT[], edges: Edge[], idCounter: nu
   return {
     version: GRAPH_VERSION,
     nodes: nodes.map((n) => {
-      const { onSend, onFork, onStop, onCompact, summarizing, branchSummarizing, asyncPending, queueParentId, queueStarted, ...data } = n.data; // drop callbacks + transient flags (incl. live async-pending / queued-child route)
+      const { onSend, onFork, onStop, onCompact, summarizing, branchSummarizing, asyncPending, queueParentId, queueStarted, queuedPrompt, ...data } = n.data; // drop callbacks + transient flags (incl. live async-pending / queued-child route)
       data.steps = stripStepPermissions(data.steps);
       if (data.turns) data.turns = data.turns.map((t) => (t.steps ? { ...t, steps: stripStepPermissions(t.steps) } : t));
       // Async continuation (AD6): a board held open for async work can't still be waiting in a fresh session →

@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
-  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, forkableSession, isFreshBoard, stripFreshNativeBase, materializeSendPlan, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
+  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, forkableSession, isFreshBoard, stripFreshNativeBase, materializeSendPlan, queuedChildDispatch, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   planAutoCollapseAfterDone, applyCollapsePlans,
@@ -1782,6 +1782,20 @@ describe('materializeSendPlan (STM send-time base)', () => {
     expect(r.resume).toBe('sa');
     expect(r.fork).toBe(true);
     expect(r.promptPrefix).toContain('q-B'); // the lighter branch replayed as text
+  });
+});
+
+describe('queuedChildDispatch — routed (live) vs non-routed (deferred) by parent capability', () => {
+  const caps = { claude: { routedFollowups: true }, codex: { routedFollowups: false } } as any;
+  it('routed parent (Claude) → live follow-up into the parent open session', () => {
+    expect(queuedChildDispatch('claude', caps)).toBe('live');
+  });
+  it('non-routed parent (Codex) → deferred dispatch as the child\'s own send', () => {
+    expect(queuedChildDispatch('codex', caps)).toBe('deferred');
+  });
+  it('unknown / missing caps default to deferred (never misroute a child into its parent)', () => {
+    expect(queuedChildDispatch('claude', {})).toBe('deferred');
+    expect(queuedChildDispatch('codex', { codex: {} } as any)).toBe('deferred');
   });
 });
 

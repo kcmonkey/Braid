@@ -15,7 +15,7 @@ import './styles.css';
 import {
   type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
-  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, descendToFork, mergeLeaves, materializeSendPlan, mergeBaseFor, restampActiveProvider, mergeFit, mergeUnion, modelWindowFor,
+  GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, descendToFork, mergeLeaves, materializeSendPlan, queuedChildDispatch, mergeBaseFor, restampActiveProvider, mergeFit, mergeUnion, modelWindowFor,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
@@ -3236,6 +3236,23 @@ function App() {
       const queueParent = nodesRef.current.find((n) => n.id === node!.data.queueParentId);
       const queueParentLive = !!queueParent && (queueParent.data.status === 'streaming' || queueParent.data.status === 'waiting');
       if (queueParentLive) {
+        // Codex (any engine without routedFollowups) can't stream a queued child through the parent's open
+        // session — its follow-up push has no per-board routing, so the child's output would merge into the
+        // PARENT board. Defer: stash the prompt; the parent-settle effect dispatches the child as its OWN send
+        // (materializeSendPlan forks the parent's final session → the answer streams onto the CHILD board).
+        if (queuedChildDispatch(boardEngine(queueParent.data), providerCapsRef.current) === 'deferred') {
+          if (fromId !== boardId) {
+            // Carry the composer's pending images/attachment to the CHILD so they travel at deferred dispatch.
+            setImagesByBoard((prev) => { const imgs = prev[fromId]; if (!imgs?.length) return prev; const { [fromId]: _drop, ...rest } = prev; return { ...rest, [boardId]: imgs }; });
+            setAttachByBoard((prev) => { const a = prev[fromId]; if (!a) return prev; const { [fromId]: _drop, ...rest } = prev; return { ...rest, [boardId]: a }; });
+          }
+          const deferred = nodesRef.current.map((n) => (n.id === boardId
+            ? { ...n, data: { ...n.data, prompt, answer: '', thinking: '', thinks: [], thoughtMs: undefined, status: 'streaming' as Status, steps: [], contextTokens: undefined, contextWindow: undefined, autoCompacted: undefined, summary: undefined, miniSummary: undefined, tags: undefined, queueParentId: queueParent.id, queueStarted: false, queuedPrompt: prompt } }
+            : n));
+          setNodes(deferred);
+          nodesRef.current = deferred;
+          return;
+        }
         let sendText = prompt;
         const attached = attachByBoardRef.current[fromId]?.attachment;
         if (attached) {
@@ -4631,6 +4648,27 @@ function App() {
     window.addEventListener('message', handler);
     return () => window.removeEventListener('message', handler);
   }, [patch, patchTurn, queueFinishFields, queueStartFields, rehomeFreshBoardsForProvider, restoreGraph, seedRoot, wantsAttention, tryReveal]);
+
+  // Deferred queued-child dispatch: a queued child under a non-routedFollowups parent (Codex) stored its
+  // prompt and is WAITING. Once its parent board settles (done/error), dispatch it as its OWN send so its
+  // answer streams onto the CHILD board (materializeSendPlan forks the parent's final session) instead of
+  // merging into the parent. Routed parents (Claude) never set queuedPrompt and keep the live follow-up path.
+  // One dispatch per tick; the resulting re-render drains any remaining queued siblings. (queued-child fix)
+  useEffect(() => {
+    for (const child of nodes) {
+      if (!child.data.queueParentId || !child.data.queuedPrompt || child.data.queueStarted) continue;
+      const parent = nodes.find((n) => n.id === child.data.queueParentId);
+      if (!parent || (parent.data.status !== 'done' && parent.data.status !== 'error')) continue;
+      const prompt = child.data.queuedPrompt;
+      // Clear queuedPrompt synchronously so this effect can't re-fire before onSend's setNodes lands; keep
+      // queueParentId so onSend sees the now-settled parent, clears the queue flags, and recomputes the base.
+      const cleared = nodesRef.current.map((n) => (n.id === child.id ? { ...n, data: { ...n.data, queuedPrompt: undefined } } : n));
+      nodesRef.current = cleared;
+      setNodes(cleared);
+      onSend(child.id, prompt);
+      break;
+    }
+  }, [nodes, onSend]);
 
   // auto-layout: when any node's measured height changes — content arriving, OR a board expanding to
   // detail / collapsing to far as the selection changes — re-run dagre so children stay tucked under
