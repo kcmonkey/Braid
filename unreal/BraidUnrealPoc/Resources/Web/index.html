@@ -24,7 +24,7 @@
         appendSystemPrompt: '',
         allowedTools: [],
         disallowedTools: [],
-        mcpEnabled: false,
+        mcpEnabled: true,
         env: {},
         autoCompactEnabled: true,
         autoCompactThreshold: 95,
@@ -32,7 +32,8 @@
         asyncContinuationEnabled: true,
         asyncContinuationIdleCapMin: 30,
         warmSessionEnabled: true,
-        warmSessionIdleCapMin: 10
+        warmSessionIdleCapMin: 10,
+        warmSessionMax: 6
       };
 
       function readJson(key, fallback) {
@@ -76,13 +77,20 @@
       };
 
       const capabilities = {
-        claude: { id: 'claude', reasoning: true, compact: true, steer: true, routedFollowups: true, images: true, models: models.claude },
-        codex: { id: 'codex', reasoning: true, compact: false, steer: true, routedFollowups: true, images: true, models: models.codex },
-        deepseek: { id: 'deepseek', reasoning: true, compact: false, steer: false, routedFollowups: false, images: false, models: models.deepseek }
+        claude: { id: 'claude', reasoning: true, compact: true, steer: true, routedFollowups: true, images: true, midpointFork: true, models: models.claude },
+        codex: { id: 'codex', reasoning: true, compact: false, steer: true, routedFollowups: true, images: true, midpointFork: false, models: models.codex },
+        deepseek: { id: 'deepseek', reasoning: true, compact: false, steer: false, routedFollowups: false, images: false, midpointFork: true, models: models.deepseek }
       };
 
+      // Emulate VS Code's ASYNC postMessage boundary. The real host replies cross-process, so its
+      // responses always arrive AFTER the webview has attached its `message` listener. If we dispatched
+      // synchronously, the responses to the mount-time `ready`/`getConfig`/`getSlashCommands` (posted in an
+      // effect that runs BEFORE the listener effect) would fire into the void — dropping graph restore +
+      // config/capabilities on load. setTimeout(0) defers past the current effect flush, like the real bridge.
       function dispatch(message) {
-        window.dispatchEvent(new MessageEvent('message', { data: message }));
+        setTimeout(function () {
+          window.dispatchEvent(new MessageEvent('message', { data: message }));
+        }, 0);
       }
 
       function pushConfig() {

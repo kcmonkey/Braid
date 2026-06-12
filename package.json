@@ -288,6 +288,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "gen-manifest": "node scripts/gen-sdk-manifest.mjs",
+    "stage:unreal": "node esbuild.mjs && node scripts/stage-unreal.mjs",
     "package": "npx --yes @vscode/vsce package --allow-missing-repository",
     "deploy": "npm run package && code --install-extension braid-0.2.0.vsix --force",
     "vscode:prepublish": "node esbuild.mjs"

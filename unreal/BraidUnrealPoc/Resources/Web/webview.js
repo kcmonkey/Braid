@@ -62487,12 +62487,13 @@ A: ${a}` : "";
   function continuationChildren(id2, edges) {
     return edges.filter((e) => e.source === id2 && (e.data?.kind ?? "fork") !== "merge").map((e) => e.target);
   }
-  function continuationMode(board, nodes, edges) {
+  function continuationMode(board, nodes, edges, midpointFork = true) {
     const parentId = edges.find(
       (e) => e.target === board.id && (e.data?.kind ?? "fork") !== "merge"
     )?.source;
     const parent = parentId ? nodes.find((n) => n.id === parentId) : void 0;
     if (!parent?.data.sessionId) return { fork: !!board.data.parentSessionId };
+    if (!midpointFork) return { fork: true };
     if (board.data.parentSessionId && board.data.parentSessionId !== parent.data.sessionId) return { fork: true };
     const sibs = continuationChildren(parent.id, edges).map((id2) => nodes.find((n) => n.id === id2)).filter((n) => !!n);
     const earliest = sibs.reduce(
@@ -62501,6 +62502,39 @@ A: ${a}` : "";
     );
     if (earliest && earliest.id === board.id) return { fork: false };
     return { fork: true, resumeAt: parent.data.messageUuid };
+  }
+  function forkBaseFor(parent, nodes, edges, turnEngine = "claude") {
+    const sameEngine = (d) => boardEngine(d) === turnEngine;
+    if (sameEngine(parent.data)) {
+      if (parent.data.compact) return { parentSessionId: parent.data.parentSessionId };
+      if (!parent.data.lineageDirty) return { parentSessionId: parent.data.sessionId };
+    }
+    const byId = new Map(nodes.map((n) => [n.id, n]));
+    const forkParentOf = (id2) => edges.find((e) => e.target === id2 && (e.data?.kind ?? "fork") !== "merge")?.source;
+    const chain = [parent];
+    let anchor;
+    let cur = parent.data.compact ? void 0 : parent.id;
+    const guard2 = /* @__PURE__ */ new Set([parent.id]);
+    while (cur) {
+      const p3 = forkParentOf(cur);
+      if (!p3 || guard2.has(p3)) break;
+      guard2.add(p3);
+      const pn2 = byId.get(p3);
+      if (!pn2) break;
+      if (!pn2.data.lineageDirty && pn2.data.sessionId && sameEngine(pn2.data)) {
+        anchor = pn2;
+        break;
+      }
+      chain.unshift(pn2);
+      if (pn2.data.compact) break;
+      cur = p3;
+    }
+    const crossEngine = chain.some((n) => !sameEngine(n.data));
+    return {
+      parentSessionId: anchor?.data.sessionId,
+      resumeAt: anchor?.data.messageUuid,
+      mergeContext: buildRebuildSeed(chain.map((n) => n.data), { withSteps: crossEngine })
+    };
   }
   function descendToFork(startId, edges) {
     let cur = startId;
@@ -62883,6 +62917,36 @@ A: ${d.answer}
     });
     return p3;
   }
+  function mergeBaseFor(leaves, byId, edges, turnEngine = "claude") {
+    const merge2 = computeMerge(leaves, edges, byId);
+    const base = pickForkBase(merge2, byId, edges, turnEngine);
+    const injected = base ? {
+      shared: merge2.shared.filter((id2) => !base.covered.has(id2)),
+      branches: merge2.branches.map((br2) => ({ leaf: br2.leaf, nodes: br2.nodes.filter((id2) => !base.covered.has(id2)) })).filter((br2) => br2.nodes.length)
+    } : merge2;
+    const mergeContext = buildPrompt(injected, byId, { withSteps: true });
+    return { merge: merge2, base, parentSessionId: base ? forkableSession(byId[base.baseId].data) : void 0, mergeContext };
+  }
+  function restampActiveProvider(nodes, edges, id2) {
+    const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+    return nodes.map((n) => {
+      const d = n.data;
+      const fresh = !d.prompt && d.status === "idle" && !d.compact && !d.collapsedGraph && !d.sessionId;
+      if (!fresh || boardEngine(d) === id2) return n;
+      let base;
+      const mergeParents = edges.filter((e) => e.target === n.id && e.data?.kind === "merge").map((e) => e.source);
+      if (d.merged && mergeParents.length >= 2) {
+        const m = mergeBaseFor(mergeParents, byId, edges, id2);
+        base = { parentSessionId: m.parentSessionId, resumeAt: void 0, mergeContext: m.mergeContext };
+      } else {
+        const forkParent = edges.find((e) => e.target === n.id && (e.data?.kind ?? "fork") !== "merge")?.source;
+        const parent = forkParent ? byId[forkParent] : void 0;
+        const r2 = parent ? forkBaseFor(parent, nodes, edges, id2) : {};
+        base = { parentSessionId: r2.parentSessionId, resumeAt: r2.resumeAt, mergeContext: r2.mergeContext };
+      }
+      return { ...n, data: { ...d, engine: id2, ...base } };
+    });
+  }
   var roughTokens = (s) => Math.round(s.length / 3);
   var MERGE_BUDGET_PCT = 90;
   function mergeFit(mergeContext, base, leaves, byId, targetWindow) {
@@ -63037,6 +63101,166 @@ A: ${d.answer}
       out[t.slice(0, eq).trim()] = t.slice(eq + 1).trim();
     }
     return out;
+  }
+
+  // src/webview/search.ts
+  var WEIGHT = {
+    prompt: 100,
+    answer: 80,
+    summary: 60,
+    tags: 60,
+    steps: 50,
+    branchSummary: 30,
+    compactSummary: 30,
+    mergeContext: 25
+  };
+  function boardKind(d) {
+    if (d.merged) return "merge";
+    if (d.compact) return "compact";
+    return d.parentSessionId ? "fork" : "root";
+  }
+  var FILTER_KEYS = /* @__PURE__ */ new Set(["tag", "engine", "status", "is"]);
+  function parseQuery(raw) {
+    const terms = [];
+    const filters = {};
+    for (const tok of raw.toLowerCase().split(/\s+/)) {
+      if (!tok) continue;
+      const ci = tok.indexOf(":");
+      if (ci > 0) {
+        const key = tok.slice(0, ci);
+        const val = tok.slice(ci + 1);
+        if (FILTER_KEYS.has(key) && val) {
+          const arr = filters[key] ?? [];
+          arr.push(val);
+          filters[key] = arr;
+          continue;
+        }
+      }
+      terms.push(tok);
+    }
+    return { terms, filters, raw };
+  }
+  function hasAnyFilter(q2) {
+    return !!(q2.filters.tag || q2.filters.engine || q2.filters.status || q2.filters.is);
+  }
+  function stepText(s) {
+    const parts = [s.name];
+    const inp = s.input ?? {};
+    for (const k2 of ["command", "file_path", "path", "pattern", "description", "url", "query"]) {
+      const v2 = inp[k2];
+      if (typeof v2 === "string" && v2) parts.push(v2);
+    }
+    return parts.join(" ");
+  }
+  function boardSearchText(d) {
+    const segs = [];
+    const push2 = (text7, field) => {
+      if (text7 && text7.trim()) segs.push({ text: text7, field, weight: WEIGHT[field] });
+    };
+    push2(d.prompt, "prompt");
+    push2(d.answer, "answer");
+    for (const t of d.turns ?? []) {
+      push2(t.prompt, "prompt");
+      push2(t.answer, "answer");
+      for (const s of t.steps ?? []) push2(stepText(s), "steps");
+    }
+    push2(d.summary, "summary");
+    push2(d.miniSummary, "summary");
+    if (d.tags && d.tags.length) push2(d.tags.join(" "), "tags");
+    for (const s of d.steps ?? []) push2(stepText(s), "steps");
+    push2(d.branchSummary, "branchSummary");
+    push2(d.compactSummary, "compactSummary");
+    push2(d.mergeContext, "mergeContext");
+    return segs;
+  }
+  function boardKindMatches(d, kind) {
+    return boardKind(d) === kind;
+  }
+  function bestByWeight(segs) {
+    let best;
+    for (const s of segs) if (!best || s.weight > best.weight) best = s;
+    return best;
+  }
+  function matchBoard(q2, d) {
+    if (q2.filters.tag && !q2.filters.tag.every((t) => (d.tags ?? []).some((tag) => tag.toLowerCase() === t))) return null;
+    if (q2.filters.engine && !q2.filters.engine.includes(boardEngine(d))) return null;
+    if (q2.filters.status && !q2.filters.status.includes(d.status)) return null;
+    if (q2.filters.is && !q2.filters.is.every((kind) => boardKindMatches(d, kind))) return null;
+    const segs = boardSearchText(d);
+    if (q2.terms.length === 0) {
+      if (!hasAnyFilter(q2)) return null;
+      const best2 = bestByWeight(segs);
+      return { field: best2?.field ?? "prompt", weight: best2?.weight ?? 0, termsMatched: 0, snippetSource: best2?.text ?? d.prompt ?? "" };
+    }
+    const combined = segs.map((s) => s.text).join("\n").toLowerCase();
+    if (!q2.terms.every((t) => combined.includes(t))) return null;
+    let best;
+    for (const s of segs) {
+      const low = s.text.toLowerCase();
+      if (!q2.terms.some((t) => low.includes(t))) continue;
+      if (!best || s.weight > best.weight) best = s;
+    }
+    const termsMatched = q2.terms.filter((t) => combined.includes(t)).length;
+    const chosen = best ?? bestByWeight(segs);
+    return { field: chosen?.field ?? "prompt", weight: chosen?.weight ?? 0, termsMatched, snippetSource: chosen?.text ?? d.prompt ?? "" };
+  }
+  function rankResults(nodes, raw) {
+    const q2 = parseQuery(raw);
+    if (q2.terms.length === 0 && !hasAnyFilter(q2)) return [];
+    const hits = [];
+    for (const n of nodes) {
+      const m = matchBoard(q2, n.data);
+      if (!m) continue;
+      hits.push({
+        id: n.id,
+        score: m.weight,
+        field: m.field,
+        termsMatched: m.termsMatched,
+        snippet: extractSnippet(m.snippetSource, q2.terms),
+        prompt: n.data.prompt ?? "",
+        kind: boardKind(n.data),
+        engine: boardEngine(n.data),
+        status: n.data.status,
+        seq: n.data.seq,
+        tags: n.data.tags ?? []
+      });
+    }
+    hits.sort(
+      (a, b) => b.score - a.score || b.termsMatched - a.termsMatched || b.seq - a.seq || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+    );
+    return hits;
+  }
+  function extractSnippet(text7, terms, window2 = 90) {
+    const real = terms.filter(Boolean).map((t) => t.toLowerCase());
+    const low = text7.toLowerCase();
+    let first = -1;
+    for (const t of real) {
+      const i = low.indexOf(t);
+      if (i >= 0 && (first < 0 || i < first)) first = i;
+    }
+    const before = 36;
+    const start3 = first < 0 ? 0 : Math.max(0, first - before);
+    const end = Math.min(text7.length, (first < 0 ? 0 : first) + window2);
+    const display = (start3 > 0 ? "\u2026" : "") + text7.slice(start3, end) + (end < text7.length ? "\u2026" : "");
+    const dlow = display.toLowerCase();
+    const raw = [];
+    for (const t of real) {
+      let from = 0;
+      for (; ; ) {
+        const i = dlow.indexOf(t, from);
+        if (i < 0) break;
+        raw.push({ start: i, end: i + t.length });
+        from = i + t.length;
+      }
+    }
+    raw.sort((a, b) => a.start - b.start);
+    const ranges = [];
+    for (const r2 of raw) {
+      const last = ranges[ranges.length - 1];
+      if (last && r2.start <= last.end) last.end = Math.max(last.end, r2.end);
+      else ranges.push({ ...r2 });
+    }
+    return { text: display, ranges };
   }
 
   // node_modules/@dagrejs/dagre/dist/dagre.esm.js
@@ -64800,6 +65024,75 @@ A: ${d.answer}
     return laid.map((n) => ({ ...n, position: { x: n.position.x + dx, y: n.position.y + dy } }));
   }
 
+  // src/webview/localLinks.ts
+  var WINDOWS_DRIVE_PATH = /^[a-zA-Z]:[\\/]/;
+  var SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+  var SAFE_PROTOCOL = /^(https?|ircs?|mailto|xmpp)$/i;
+  var SOURCEISH_FILE = /\.(?:build\.cs|c|cc|cpp|cs|css|csv|cxx|h|hpp|html|ini|js|json|jsx|lock|log|md|mjs|ps1|py|scss|sln|toml|ts|tsx|txt|uplugin|uproject|xml|ya?ml)$/i;
+  function safeDecode(s) {
+    try {
+      return decodeURIComponent(s);
+    } catch {
+      return s;
+    }
+  }
+  function splitLineSuffix(s) {
+    const hash = s.match(/^(.*)#(?:L|line-)?(\d+)$/i);
+    if (hash) return { path: hash[1], line: Number(hash[2]) };
+    const query = s.match(/^(.*)\?(?:.*&)?line=(\d+)(?:&.*)?$/i);
+    if (query) return { path: query[1], line: Number(query[2]) };
+    const suffix = s.match(/^(.*):(\d+)(?::\d+)?$/);
+    if (suffix && suffix[1] && !/^[a-zA-Z]$/.test(suffix[1])) {
+      return { path: suffix[1], line: Number(suffix[2]) };
+    }
+    return { path: s };
+  }
+  function parseFileUri(raw) {
+    try {
+      const u = new URL(raw);
+      if (u.protocol !== "file:") return null;
+      const line = u.hash.match(/^#(?:L|line-)?(\d+)$/i)?.[1];
+      let path2 = safeDecode(u.pathname);
+      if (/^\/[a-zA-Z]:\//.test(path2)) path2 = path2.slice(1);
+      if (u.host) path2 = `//${u.host}${path2}`;
+      const withLine = splitLineSuffix(path2);
+      return { path: withLine.path, ...line ? { line: Number(line) } : withLine.line ? { line: withLine.line } : {} };
+    } catch {
+      return null;
+    }
+  }
+  function isLocalPath(path2) {
+    if (!path2 || path2.startsWith("#")) return false;
+    if (WINDOWS_DRIVE_PATH.test(path2)) return true;
+    if (path2.startsWith("\\\\")) return true;
+    if (path2.startsWith("/") && !path2.startsWith("//")) return true;
+    if (path2.startsWith("./") || path2.startsWith("../") || path2.startsWith(".\\") || path2.startsWith("..\\")) return true;
+    if (path2.includes("/") || path2.includes("\\")) return true;
+    return SOURCEISH_FILE.test(path2);
+  }
+  function parseLocalPathLink(href) {
+    const raw = (href ?? "").trim();
+    if (!raw || raw.startsWith("#")) return null;
+    if (/^file:/i.test(raw)) return parseFileUri(raw);
+    if (raw.startsWith("//")) return null;
+    if (SCHEME.test(raw) && !WINDOWS_DRIVE_PATH.test(raw)) return null;
+    const withLine = splitLineSuffix(raw);
+    const decodedPath = safeDecode(withLine.path);
+    if (!isLocalPath(decodedPath)) return null;
+    return { path: decodedPath, ...withLine.line ? { line: withLine.line } : {} };
+  }
+  function markdownUrlTransform(url) {
+    if (parseLocalPathLink(url)) return url;
+    const colon = url.indexOf(":");
+    const questionMark = url.indexOf("?");
+    const numberSign = url.indexOf("#");
+    const slash = url.indexOf("/");
+    if (colon === -1 || slash !== -1 && colon > slash || questionMark !== -1 && colon > questionMark || numberSign !== -1 && colon > numberSign || SAFE_PROTOCOL.test(url.slice(0, colon))) {
+      return url;
+    }
+    return "";
+  }
+
   // src/webview/autofill.ts
   var TOKEN_AFTER = /^\S*/;
   function detectTrigger(text7, caret) {
@@ -64857,8 +65150,37 @@ A: ${d.answer}
     if (d.status === "streaming") return "#d97757";
     return "#6f6a62";
   }
+  var markdownComponents = {
+    a({ node: _node, href, children: children2, ...props }) {
+      const local = parseLocalPathLink(href);
+      if (!local) return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("a", { ...props, href, children: children2 });
+      return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+        "a",
+        {
+          ...props,
+          href,
+          title: `Open local path: ${local.path}`,
+          onClick: (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            post2({ type: "openFile", path: local.path, line: local.line });
+          },
+          children: children2
+        }
+      );
+    }
+  };
   var Markdown2 = import_react4.default.memo(function Markdown3({ text: text7 }) {
-    return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "md", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(Markdown, { remarkPlugins: [remarkGfm], rehypePlugins: [rehypeHighlight], children: text7 }) });
+    return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "md", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+      Markdown,
+      {
+        remarkPlugins: [remarkGfm],
+        rehypePlugins: [rehypeHighlight],
+        components: markdownComponents,
+        urlTransform: markdownUrlTransform,
+        children: text7
+      }
+    ) });
   });
   var MULTI_PROVIDER = PROVIDER_CATALOG.filter((p3) => p3.implemented).length > 1;
   var FILE_TOOLS = /* @__PURE__ */ new Set(["Read", "Edit", "Write", "NotebookEdit"]);
@@ -64879,6 +65201,10 @@ A: ${d.answer}
       case "Grep":
       case "Glob":
         return str("pattern");
+      case "WebSearch": {
+        const queries = Array.isArray(i.queries) ? i.queries.filter((q2) => typeof q2 === "string" && q2.trim().length > 0) : [];
+        return str("query") || (queries.length ? queries.join(" | ") : "") || str("url") || str("pattern") || str("action");
+      }
       default: {
         const k2 = Object.keys(i)[0];
         return k2 ? `${k2}: ${String(i[k2]).slice(0, 60)}` : "";
@@ -65369,6 +65695,7 @@ A: ${d.answer}
   var DetailIdsCtx = import_react4.default.createContext(/* @__PURE__ */ new Set());
   var MergeCtxHL = import_react4.default.createContext(/* @__PURE__ */ new Set());
   var RevealCtx = import_react4.default.createContext(null);
+  var SearchCtx = import_react4.default.createContext({ active: false, matched: /* @__PURE__ */ new Set() });
   var SignpostCtx = import_react4.default.createContext(/* @__PURE__ */ new Map());
   var FuseTargetCtx = import_react4.default.createContext(null);
   var CollapseCtx = import_react4.default.createContext({ expand: () => {
@@ -65630,6 +65957,8 @@ A: ${d.answer}
     const inMergeCtx = import_react4.default.useContext(MergeCtxHL).has(id2) && !selected2;
     const isFuseTarget = import_react4.default.useContext(FuseTargetCtx) === id2;
     const revealed = import_react4.default.useContext(RevealCtx) === id2;
+    const search2 = import_react4.default.useContext(SearchCtx);
+    const dimmed = search2.active && !search2.matched.has(id2);
     const signpostLabel = import_react4.default.useContext(SignpostCtx).get(id2);
     const needsAsk = hasPendingAsk(data);
     const needsPerm = hasPendingPermission(data);
@@ -65722,7 +66051,7 @@ A: ${d.answer}
       /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "board-slot", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
         "div",
         {
-          className: `board lod-${lod} ${selected2 ? "selected" : ""} ${inMergeCtx ? "ctx-hl" : ""} ${isFuseTarget ? "fuse-target" : ""} ${revealed ? "revealed" : ""} ${needsAsk ? "needs-ask" : ""} ${needsPerm ? "needs-perm" : ""} ${data.unread ? "unread" : ""} ${data.status} ${data.merged ? "merged" : ""} ${data.compact ? "compact" : ""} ${isCollapsedGraph ? "collapsed-graph" : ""}`,
+          className: `board lod-${lod} ${selected2 ? "selected" : ""} ${inMergeCtx ? "ctx-hl" : ""} ${isFuseTarget ? "fuse-target" : ""} ${revealed ? "revealed" : ""} ${dimmed ? "dimmed" : ""} ${needsAsk ? "needs-ask" : ""} ${needsPerm ? "needs-perm" : ""} ${data.unread ? "unread" : ""} ${data.status} ${data.merged ? "merged" : ""} ${data.compact ? "compact" : ""} ${isCollapsedGraph ? "collapsed-graph" : ""}`,
           children: [
             /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(Handle, { type: "target", position: targetPos }),
             /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "board__content", children: [
@@ -66454,6 +66783,20 @@ A: ${d.answer}
               onChange: (e) => onChange({ warmSessionIdleCapMin: Math.max(1, Math.min(120, Math.floor(Number(e.target.value) || 10))) })
             }
           )
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("label", { className: `settings__row ${config.warmSessionEnabled ? "" : "settings__gated"}`, title: "Cap on how many warm processes stay alive at once. Each also keeps its MCP servers loaded; the longest-idle one is closed past this limit.", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "settings__lbl", children: "Max warm sessions" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+            "input",
+            {
+              type: "number",
+              min: 1,
+              max: 64,
+              value: config.warmSessionMax,
+              disabled: !config.warmSessionEnabled,
+              onChange: (e) => onChange({ warmSessionMax: Math.max(1, Math.min(64, Math.floor(Number(e.target.value) || 6))) })
+            }
+          )
         ] })
       ] })
     ] });
@@ -66983,6 +67326,133 @@ A: ${d.answer}
   var BRANCH_SUMMARY_RETRY_BASE_MS = 1500;
   var MAX_COLLAPSE_DIGEST_ATTEMPTS = 4;
   var COLLAPSE_DIGEST_RETRY_BASE_MS = 1500;
+  function Mark({ text: text7, terms }) {
+    const real = terms.filter(Boolean);
+    if (!real.length || !text7) return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_jsx_runtime3.Fragment, { children: text7 });
+    const low = text7.toLowerCase();
+    const raw = [];
+    for (const t of real) {
+      let from = 0;
+      for (; ; ) {
+        const i = low.indexOf(t, from);
+        if (i < 0) break;
+        raw.push({ start: i, end: i + t.length });
+        from = i + t.length;
+      }
+    }
+    raw.sort((a, b) => a.start - b.start);
+    const ranges = [];
+    for (const r2 of raw) {
+      const l = ranges[ranges.length - 1];
+      if (l && r2.start <= l.end) l.end = Math.max(l.end, r2.end);
+      else ranges.push({ ...r2 });
+    }
+    const out = [];
+    let pos = 0;
+    ranges.forEach((r2, i) => {
+      if (r2.start > pos) out.push(text7.slice(pos, r2.start));
+      out.push(/* @__PURE__ */ (0, import_jsx_runtime3.jsx)("mark", { children: text7.slice(r2.start, r2.end) }, i));
+      pos = r2.end;
+    });
+    if (pos < text7.length) out.push(text7.slice(pos));
+    return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(import_jsx_runtime3.Fragment, { children: out });
+  }
+  var SEARCH_KIND_ICON = { merge: "\u2726", compact: "\u{1F5DC}", root: "\u25C6", fork: "\u2387" };
+  function SearchBox({
+    open,
+    query,
+    terms,
+    hits,
+    activeIndex,
+    inputRef,
+    onOpen,
+    onClose,
+    onChange,
+    onArrow,
+    onEnter,
+    onPick,
+    onOpenHit
+  }) {
+    if (!open) {
+      return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("button", { className: "search-hint nodrag nopan", onClick: onOpen, title: "Search this canvas (Ctrl+F)", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "tb-ico", children: "\u{1F50D}" }),
+        " Search ",
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "search__kbd", children: "Ctrl F" })
+      ] });
+    }
+    const has = query.trim().length > 0;
+    return /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "search nodrag nopan", children: [
+      /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "search__bar", children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "search__mag tb-ico", children: "\u{1F50D}" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+          "input",
+          {
+            ref: inputRef,
+            className: "search__input",
+            placeholder: "Search this canvas\u2026",
+            value: query,
+            autoComplete: "off",
+            spellCheck: false,
+            onChange: (e) => onChange(e.target.value),
+            onKeyDown: (e) => {
+              if (e.key === "ArrowDown") {
+                e.preventDefault();
+                onArrow(1);
+              } else if (e.key === "ArrowUp") {
+                e.preventDefault();
+                onArrow(-1);
+              } else if (e.key === "Enter") {
+                e.preventDefault();
+                onEnter();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                onClose();
+              }
+            }
+          }
+        ),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "search__count", children: has ? hits.length ? `${activeIndex + 1} / ${hits.length}` : "0 results" : "" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "search__nav", children: [
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { className: "navbtn", onClick: () => onArrow(-1), disabled: !hits.length, title: "Previous match (\u2191)", children: "\u25B2" }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { className: "navbtn", onClick: () => onArrow(1), disabled: !hits.length, title: "Next match (\u2193)", children: "\u25BC" })
+        ] }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: "search__div" }),
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("button", { className: "navbtn", onClick: onClose, title: "Close (Esc)", children: "\u2715" })
+      ] }),
+      has && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "results", children: hits.length === 0 ? /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "results__empty", children: [
+        "No boards match \u201C",
+        query.trim(),
+        "\u201D"
+      ] }) : /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(import_jsx_runtime3.Fragment, { children: [
+        /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "results__hint", children: "\u2191\u2193 cycle \xB7 Enter locates \xB7 Enter again opens" }),
+        hits.map((h, i) => /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
+          "div",
+          {
+            className: `res ${i === activeIndex ? "active" : ""}`,
+            onClick: () => onPick(i),
+            onDoubleClick: () => onOpenHit(i),
+            title: "Click to locate \xB7 double-click to open",
+            children: [
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "res__ico", children: SEARCH_KIND_ICON[h.kind] ?? "\u2387" }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "res__main", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "res__q", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(Mark, { text: h.prompt || "(no prompt yet)", terms }) }),
+                /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "res__snip", children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(Mark, { text: h.snippet.text, terms }) }),
+                /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("div", { className: "res__where", children: [h.kind, ...h.tags.map((t) => `#${t}`)].join(" \xB7 ") })
+              ] }),
+              /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "res__meta", children: [
+                /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("span", { className: "res__seq", children: [
+                  "#",
+                  h.seq
+                ] }),
+                /* @__PURE__ */ (0, import_jsx_runtime3.jsx)("span", { className: `res__eng ${h.engine}`, children: h.engine })
+              ] })
+            ]
+          },
+          h.id
+        ))
+      ] }) })
+    ] });
+  }
   function App() {
     const idRef = (0, import_react4.useRef)(2);
     const seqRef = (0, import_react4.useRef)(1);
@@ -67006,6 +67476,12 @@ A: ${d.answer}
     const [focusOrigin, setFocusOrigin] = (0, import_react4.useState)(null);
     const [focusClosing, setFocusClosing] = (0, import_react4.useState)(false);
     const [revealedId, setRevealedId] = (0, import_react4.useState)(null);
+    const [searchOpen, setSearchOpen] = (0, import_react4.useState)(false);
+    const [searchQuery, setSearchQuery] = (0, import_react4.useState)("");
+    const [searchActive, setSearchActive] = (0, import_react4.useState)(0);
+    const searchInputRef = (0, import_react4.useRef)(null);
+    const searchOpenRef = (0, import_react4.useRef)(false);
+    const searchLocatedRef = (0, import_react4.useRef)(null);
     const [config, setConfig] = (0, import_react4.useState)(null);
     const [resolvedModel, setResolvedModel] = (0, import_react4.useState)(null);
     const [noticePanelOpen, setNoticePanelOpen] = (0, import_react4.useState)(false);
@@ -67017,6 +67493,7 @@ A: ${d.answer}
     const [activeProvider, setActiveProviderState] = (0, import_react4.useState)("claude");
     const activeProviderRef = (0, import_react4.useRef)("claude");
     const [providerCaps, setProviderCaps] = (0, import_react4.useState)({});
+    const providerCapsRef = (0, import_react4.useRef)(providerCaps);
     const [acctPanelOpen, setAcctPanelOpen] = (0, import_react4.useState)(false);
     const [accounts, setAccounts] = (0, import_react4.useState)({});
     const [apiKeyStatus, setApiKeyStatus] = (0, import_react4.useState)({});
@@ -67203,7 +67680,8 @@ ${sendPrompt}`;
       let fork = !!parentSessionId;
       let resumeAt = node2?.data.resumeAt;
       if (parentSessionId && !mergeContext && node2 && !node2.data.lineageDirty) {
-        const mode = continuationMode(node2, nodesRef.current, edgesRef.current);
+        const canMidpointFork = providerCapsRef.current[boardEngine(node2.data)]?.midpointFork !== false;
+        const mode = continuationMode(node2, nodesRef.current, edgesRef.current, canMidpointFork);
         fork = mode.fork;
         resumeAt = mode.resumeAt;
       }
@@ -67286,36 +67764,6 @@ ${text7}` : text7;
       if (pendingImages.length) clearImages(leafId);
       if (attached) clearAttach(leafId);
     }, [clearImages, clearAttach]);
-    const forkBaseFor = (0, import_react4.useCallback)((parent, turnEngine = "claude") => {
-      const sameEngine = (d) => boardEngine(d) === turnEngine;
-      if (sameEngine(parent.data)) {
-        if (parent.data.compact) return { parentSessionId: parent.data.parentSessionId };
-        if (!parent.data.lineageDirty) return { parentSessionId: parent.data.sessionId };
-      }
-      const ns = nodesRef.current, es = edgesRef.current;
-      const byId2 = new Map(ns.map((n) => [n.id, n]));
-      const forkParentOf = (id2) => es.find((e) => e.target === id2 && (e.data?.kind ?? "fork") !== "merge")?.source;
-      const chain = [parent];
-      let anchor;
-      let cur = parent.data.compact ? void 0 : parent.id;
-      const guard2 = /* @__PURE__ */ new Set([parent.id]);
-      while (cur) {
-        const p3 = forkParentOf(cur);
-        if (!p3 || guard2.has(p3)) break;
-        guard2.add(p3);
-        const pn2 = byId2.get(p3);
-        if (!pn2) break;
-        if (!pn2.data.lineageDirty && pn2.data.sessionId && sameEngine(pn2.data)) {
-          anchor = pn2;
-          break;
-        }
-        chain.unshift(pn2);
-        if (pn2.data.compact) break;
-        cur = p3;
-      }
-      const crossEngine = chain.some((n) => !sameEngine(n.data));
-      return { parentSessionId: anchor?.data.sessionId, resumeAt: anchor?.data.messageUuid, mergeContext: buildRebuildSeed(chain.map((n) => n.data), { withSteps: crossEngine }) };
-    }, []);
     const onFork = (0, import_react4.useCallback)((parentId) => {
       const parent = nodesRef.current.find((n) => n.id === parentId);
       if (!parent) return;
@@ -67359,7 +67807,7 @@ ${text7}` : text7;
           seq: seqRef.current++,
           engine: activeProviderRef.current,
           // a NEW board runs on the active provider (AD1); cross-engine continuation replays (Phase 1)
-          ...forkBaseFor(parent, activeProviderRef.current),
+          ...forkBaseFor(parent, nodesRef.current, edgesRef.current, activeProviderRef.current),
           // parent's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
           onSend,
           onFork,
@@ -67370,7 +67818,7 @@ ${text7}` : text7;
       const newEdges = edgesRef.current.concat(makeEdge(parentId, childId, "fork"));
       setEdges(newEdges);
       setNodes(autoLayout(nodesRef.current.map((n) => ({ ...n, selected: false })).concat(child), newEdges));
-    }, [onSend, onStop, forkBaseFor]);
+    }, [onSend, onStop]);
     const onCompact = (0, import_react4.useCallback)((boardId) => {
       const board = nodesRef.current.find((n) => n.id === boardId);
       if (!board || board.data.status !== "done" || !board.data.sessionId) return;
@@ -67493,13 +67941,7 @@ ${text7}` : text7;
       const curEdges = edgesRef.current;
       const leaves = mergeLeaves(selectedIds, curEdges);
       if (leaves.length < 2) return;
-      const merge2 = computeMerge(leaves, curEdges, byId);
-      const base = pickForkBase(merge2, byId, curEdges, activeProviderRef.current);
-      const injected = base ? {
-        shared: merge2.shared.filter((id2) => !base.covered.has(id2)),
-        branches: merge2.branches.map((br2) => ({ leaf: br2.leaf, nodes: br2.nodes.filter((id2) => !base.covered.has(id2)) })).filter((br2) => br2.nodes.length)
-      } : merge2;
-      const mergeContext = buildPrompt(injected, byId, { withSteps: true });
+      const { merge: merge2, base, parentSessionId: mergeParentSession, mergeContext } = mergeBaseFor(leaves, byId, curEdges, activeProviderRef.current);
       const crossEngine = MULTI_PROVIDER && mergeUnion(merge2).some((id2) => boardEngine(byId[id2]?.data ?? {}) !== activeProviderRef.current);
       const targetWindow = crossEngine ? modelWindowFor(activeProviderRef.current, configRef.current?.model ?? "") : void 0;
       const fit = mergeFit(mergeContext, base, leaves, byId, targetWindow);
@@ -67530,10 +67972,10 @@ ${text7}` : text7;
           status: "idle",
           merged: true,
           engine: activeProviderRef.current,
-          // the merge runs on the active provider (AD1) — pickForkBase chose a base of THIS engine
+          // the merge runs on the active provider (AD1) — mergeBaseFor chose a base of THIS engine
           // base set → onSend does resume+fork from the heaviest compatible node's session AND prepends
-          // mergeContext (zero onSend change). pickForkBase only returns forkable nodes, so this is defined.
-          parentSessionId: base ? forkableSession(byId[base.baseId].data) : void 0,
+          // mergeContext (zero onSend change). mergeBaseFor only returns a forkable node's session, else undefined.
+          parentSessionId: mergeParentSession,
           mergeContext,
           seq: seqRef.current++,
           onSend,
@@ -67564,12 +68006,12 @@ ${text7}` : text7;
       const expanded = expandCollapsedGraph(nodesRef.current, id2);
       if (!expanded.changed) return;
       const newEdges = syncHiddenEdges(expanded.nodes, edgesRef.current);
-      const laid = autoLayout(expanded.nodes, newEdges);
+      const laid = relayoutAnchored(expanded.nodes, newEdges, dirRef.current, id2);
       nodesRef.current = laid;
       edgesRef.current = newEdges;
       setEdges(newEdges);
       setNodes(laid);
-    }, [autoLayout]);
+    }, []);
     const collapseState = (0, import_react4.useMemo)(
       () => ({ expand: expandCollapsed, collapse: collapseHistory, collapsible: collapsibleIds }),
       [expandCollapsed, collapseHistory, collapsibleIds]
@@ -67655,7 +68097,7 @@ ${text7}` : text7;
           seq: seqRef.current++,
           engine: activeProviderRef.current,
           // a NEW board runs on the active provider (AD1); cross-engine continuation replays (Phase 1)
-          ...forkBaseFor(leaf, activeProviderRef.current),
+          ...forkBaseFor(leaf, nodesRef.current, edgesRef.current, activeProviderRef.current),
           // leaf's same-engine session, or a rebuilt base (lineage-dirty / cross-engine)
           onSend,
           onFork,
@@ -67672,7 +68114,7 @@ ${text7}` : text7;
       focusedIdRef.current = childId;
       setFocusedId(childId);
       onSend(childId, prompt, leafId);
-    }, [onSend, sendFollowup, autoLayout, forkBaseFor]);
+    }, [onSend, sendFollowup, autoLayout]);
     const enterFocus = (0, import_react4.useCallback)((id2) => {
       const inst = rfRef.current;
       const n = nodesRef.current.find((x2) => x2.id === id2);
@@ -67798,6 +68240,109 @@ ${text7}` : text7;
       revealReqRef.current = { id: id2, focus: false };
       tryReveal();
     }, [tryReveal]);
+    const searchHits = (0, import_react4.useMemo)(
+      () => searchOpen && searchQuery.trim() ? rankResults(nodesRef.current, searchQuery) : [],
+      // `nodes` (state) is the change signal; nodesRef.current is the same array, read for freshness.
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      [searchOpen, searchQuery, nodes]
+    );
+    const searchTerms = (0, import_react4.useMemo)(() => parseQuery(searchQuery).terms, [searchQuery]);
+    const searchActiveOn = searchOpen && searchQuery.trim().length > 0;
+    const matchedIds = (0, import_react4.useMemo)(() => new Set(searchHits.map((h) => h.id)), [searchHits]);
+    const searchCtxValue = (0, import_react4.useMemo)(
+      () => ({ active: searchActiveOn, matched: matchedIds }),
+      [searchActiveOn, matchedIds]
+    );
+    const minimapColor = (0, import_react4.useCallback)(
+      (n) => searchActiveOn && matchedIds.has(n.id) ? "#d97757" : minimapNodeColor(n),
+      [searchActiveOn, matchedIds]
+    );
+    (0, import_react4.useEffect)(() => {
+      setSearchActive((i) => i >= searchHits.length ? 0 : i);
+    }, [searchHits.length]);
+    const openSearch = (0, import_react4.useCallback)(() => {
+      setSearchOpen(true);
+      requestAnimationFrame(() => {
+        const el = searchInputRef.current;
+        if (el) {
+          el.focus();
+          el.select();
+        }
+      });
+    }, []);
+    const closeSearch = (0, import_react4.useCallback)(() => {
+      setSearchOpen(false);
+      setSearchQuery("");
+      setSearchActive(0);
+      searchLocatedRef.current = null;
+    }, []);
+    const onSearchChange = (0, import_react4.useCallback)((v2) => {
+      setSearchQuery(v2);
+      setSearchActive(0);
+      searchLocatedRef.current = null;
+    }, []);
+    const revealHit = (0, import_react4.useCallback)((targetId, focus) => {
+      const node2 = nodesRef.current.find((n) => n.id === targetId);
+      if (node2 && !node2.hidden) {
+        revealReqRef.current = { id: targetId, focus };
+        tryReveal();
+        return;
+      }
+      const rep = nodesRef.current.find((n) => (n.data.collapsedGraph?.hiddenIds ?? []).includes(targetId));
+      if (rep) {
+        expandCollapsed(rep.id);
+        revealReqRef.current = { id: targetId, focus };
+        return;
+      }
+      revealReqRef.current = { id: targetId, focus };
+      tryReveal();
+    }, [tryReveal, expandCollapsed]);
+    const locateHit = (0, import_react4.useCallback)((i) => {
+      const hit = searchHits[i];
+      if (!hit) return;
+      setSearchActive(i);
+      searchLocatedRef.current = hit.id;
+      revealHit(hit.id, false);
+    }, [searchHits, revealHit]);
+    const openHit = (0, import_react4.useCallback)((i) => {
+      const hit = searchHits[i];
+      if (!hit) return;
+      setSearchActive(i);
+      revealHit(hit.id, true);
+    }, [searchHits, revealHit]);
+    const enterHit = (0, import_react4.useCallback)(() => {
+      const hit = searchHits[searchActive];
+      if (!hit) return;
+      if (searchLocatedRef.current === hit.id) openHit(searchActive);
+      else locateHit(searchActive);
+    }, [searchHits, searchActive, locateHit, openHit]);
+    const navHit = (0, import_react4.useCallback)((delta) => {
+      if (!searchHits.length) return;
+      locateHit((searchActive + delta + searchHits.length) % searchHits.length);
+    }, [searchHits, searchActive, locateHit]);
+    const clickHit = (0, import_react4.useCallback)((i) => {
+      const hit = searchHits[i];
+      if (!hit) return;
+      if (searchActive === i && searchLocatedRef.current === hit.id) openHit(i);
+      else locateHit(i);
+    }, [searchHits, searchActive, locateHit, openHit]);
+    (0, import_react4.useEffect)(() => {
+      searchOpenRef.current = searchOpen;
+    }, [searchOpen]);
+    (0, import_react4.useEffect)(() => {
+      const onKey = (e) => {
+        if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === "f" || e.key === "F")) {
+          e.preventDefault();
+          if (searchOpenRef.current) closeSearch();
+          else openSearch();
+        } else if (e.key === "Escape" && searchOpenRef.current) {
+          e.preventDefault();
+          closeSearch();
+        }
+      };
+      window.addEventListener("keydown", onKey);
+      return () => window.removeEventListener("keydown", onKey);
+    }, [openSearch, closeSearch]);
     (0, import_react4.useEffect)(() => {
       if (!hydratedRef.current) return;
       const pending = nodes.some((n) => boardNeedsAttention(n.data));
@@ -67944,11 +68489,7 @@ ${text7}` : text7;
         setSlashCommands([]);
         setActiveProviderState(id2);
         activeProviderRef.current = id2;
-        const restamped = nodesRef.current.map((n) => {
-          const d = n.data;
-          const fresh = !d.prompt && d.status === "idle" && !d.compact && !d.collapsedGraph && !d.sessionId;
-          return fresh && boardEngine(d) !== id2 ? { ...n, data: { ...d, engine: id2 } } : n;
-        });
+        const restamped = restampActiveProvider(nodesRef.current, edgesRef.current, id2);
         setNodes(restamped);
         nodesRef.current = restamped;
       }
@@ -67993,6 +68534,7 @@ ${text7}` : text7;
             setActiveProviderState(m.activeProvider);
             activeProviderRef.current = m.activeProvider;
             setProviderCaps(m.capabilities);
+            providerCapsRef.current = m.capabilities;
             break;
           case "account":
             setAccounts((prev) => ({ ...prev, [m.provider]: { account: m.account, usage: m.usage, busy: m.busy } }));
@@ -68557,7 +69099,7 @@ A: ${byId2[id2]?.data.answer ?? ""}`).join("\n\n");
       () => ({ activeProvider, setActive: onSetActiveProvider }),
       [activeProvider, onSetActiveProvider]
     );
-    return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(ProviderCtx.Provider, { value: providerSwitchState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(CapabilitiesCtx.Provider, { value: providerCaps, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(DirCtx.Provider, { value: dir, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(DetailIdsCtx.Provider, { value: detailIds, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(MergeCtxHL.Provider, { value: mergeCtxIds, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SignpostCtx.Provider, { value: signpostLabels, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(RevealCtx.Provider, { value: revealedId, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(FuseTargetCtx.Provider, { value: fuseTarget, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(CollapseCtx.Provider, { value: collapseState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(AttachCtx.Provider, { value: attachState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(ImageCtx.Provider, { value: imageState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(DraftCtx.Provider, { value: draftState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(AutofillCtx.Provider, { value: autofillState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
+    return /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(ProviderCtx.Provider, { value: providerSwitchState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(CapabilitiesCtx.Provider, { value: providerCaps, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(DirCtx.Provider, { value: dir, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(DetailIdsCtx.Provider, { value: detailIds, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(MergeCtxHL.Provider, { value: mergeCtxIds, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SignpostCtx.Provider, { value: signpostLabels, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(RevealCtx.Provider, { value: revealedId, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(FuseTargetCtx.Provider, { value: fuseTarget, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(CollapseCtx.Provider, { value: collapseState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(SearchCtx.Provider, { value: searchCtxValue, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(AttachCtx.Provider, { value: attachState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(ImageCtx.Provider, { value: imageState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(DraftCtx.Provider, { value: draftState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(AutofillCtx.Provider, { value: autofillState, children: /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)(
       "div",
       {
         style: { width: "100vw", height: "100vh" },
@@ -68604,7 +69146,7 @@ A: ${byId2[id2]?.data.answer ?? ""}`).join("\n\n");
                     position: "bottom-left",
                     pannable: true,
                     zoomable: true,
-                    nodeColor: minimapNodeColor,
+                    nodeColor: minimapColor,
                     nodeStrokeColor: "transparent",
                     nodeBorderRadius: 3,
                     maskColor: "rgba(20,19,18,.62)"
@@ -68618,6 +69160,24 @@ A: ${byId2[id2]?.data.answer ?? ""}`).join("\n\n");
             " + scroll to zoom"
           ] }),
           config && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(PermModeHint, { mode: config.permissionMode }),
+          /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
+            SearchBox,
+            {
+              open: searchOpen,
+              query: searchQuery,
+              terms: searchTerms,
+              hits: searchHits,
+              activeIndex: searchActive,
+              inputRef: searchInputRef,
+              onOpen: openSearch,
+              onClose: closeSearch,
+              onChange: onSearchChange,
+              onArrow: navHit,
+              onEnter: enterHit,
+              onPick: clickHit,
+              onOpenHit: openHit
+            }
+          ),
           /* @__PURE__ */ (0, import_jsx_runtime3.jsxs)("div", { className: "toolbar toolbar--top", children: [
             /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(ProviderQuickSwitch, { activeProvider, onSetActive: onSetActiveProvider }),
             config && /* @__PURE__ */ (0, import_jsx_runtime3.jsx)(
@@ -68865,7 +69425,7 @@ A: ${byId2[id2]?.data.answer ?? ""}`).join("\n\n");
           ] })
         ]
       }
-    ) }) }) }) }) }) }) }) }) }) }) }) }) });
+    ) }) }) }) }) }) }) }) }) }) }) }) }) }) });
   }
   var ErrorBoundary = class extends import_react4.default.Component {
     constructor() {

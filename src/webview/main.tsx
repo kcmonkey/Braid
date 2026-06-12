@@ -3631,12 +3631,18 @@ function App() {
     const expanded = expandCollapsedGraph(nodesRef.current, id);
     if (!expanded.changed) return;
     const newEdges = syncHiddenEdges(expanded.nodes, edgesRef.current);
-    const laid = autoLayout(expanded.nodes, newEdges);
+    // Anchor on the collapsed representative (the clicked node), NOT autoLayout's selection-derived anchor.
+    // expandCollapsedGraph un-hides the folded ancestors with their STALE positions (frozen when collapsed +
+    // accumulated relayout translations). With no board selected, autoLayout would fall back to the bbox
+    // top-left over all VISIBLE nodes — which now includes those stale-positioned un-hidden nodes — computing
+    // an anchor nowhere near the rep on screen and flinging the whole graph off-canvas. Pinning the rep id
+    // keeps it exactly where it sits while the revealed history reflows around it.
+    const laid = relayoutAnchored(expanded.nodes, newEdges, dirRef.current, id);
     nodesRef.current = laid;
     edgesRef.current = newEdges;
     setEdges(newEdges);
     setNodes(laid);
-  }, [autoLayout]);
+  }, []);
 
   const collapseState = useMemo(
     () => ({ expand: expandCollapsed, collapse: collapseHistory, collapsible: collapsibleIds }),
