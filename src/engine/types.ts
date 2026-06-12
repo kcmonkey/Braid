@@ -209,7 +209,11 @@ export interface EngineCapabilities {
   models: ModelOption[];
 }
 
+export interface DigestResult { summary: string; miniSummary?: string; tags?: string[] }
 export interface SummarizeRequest { cwd: string; prompt: string; answer: string }
+// Visual graph collapse: synthesize a digest for several folded Q/A rounds. `text` is already the
+// concatenated transcript, so adapters must not wrap it as a fake single Q/A round.
+export interface CollapseDigestRequest { cwd: string; text: string }
 // Branch-Signposts: synthesize a one-line label for a whole branch segment. `text` = the segment's
 // concatenated Q/A (built webview-side). Returns `{ text }`; empty on SDK-unavailable / failure (never throws).
 export interface BranchSummarizeRequest { cwd: string; text: string }
@@ -228,7 +232,8 @@ export interface Engine {
   runTurn(req: TurnRequest, sink: EventSink, pre: PreToolInterceptor, ctl: TurnControl): Promise<void>;
   compact: CompactCap;
   // `tags` = raw digest-tag tokens the cheap model proposed (validated webview-side against TAG_VOCAB).
-  summarize(req: SummarizeRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }>;
+  summarize(req: SummarizeRequest): Promise<DigestResult>;
+  collapseDigest(req: CollapseDigestRequest): Promise<DigestResult>;
   // Branch-Signposts: one-line synthesis of a whole branch segment for the floating signpost label. Empty
   // `text` on SDK-unavailable / failure (never throws — branch labels never block). (multi-provider seam)
   branchSummary(req: BranchSummarizeRequest): Promise<{ text: string }>;

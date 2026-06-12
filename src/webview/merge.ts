@@ -48,8 +48,9 @@ export const MAX_CONCURRENT_BRANCH_SUMMARIES = 2;
 // when the folded-history summarizer prompt or the digest-key field set (collapseDigestKey) changes in a
 // way that should retroactively re-run on already-summarized collapsed nodes: it is folded into the key,
 // so a bump makes every collapsed representative's stored key mismatch → needsCollapseDigest re-requests.
-//   v1: initial folded-history card + mini + tags (reuses the per-round summarizer over combined Q/A).
-export const COLLAPSE_DIGEST_VERSION = 1;
+//   v1: initial folded-history card + mini + tags (reused the per-round summarizer over combined Q/A).
+//   v2: dedicated collapseDigest engine prompt; prevents summarizing/translating the summarizer prompt itself.
+export const COLLAPSE_DIGEST_VERSION = 2;
 
 // One tool invocation within a turn: the tool_use (id/name/input) plus its paired tool_result.
 // `result` is captured truncated (see TOOL_RESULT_CAP) and persisted with the board (M4 gap2).

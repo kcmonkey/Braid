@@ -6,7 +6,7 @@ import type { ProviderConfig } from '../../sdkOptions';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, Attach,
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
-  BranchSummarizeRequest, PermissionVerdict,
+  BranchSummarizeRequest, CollapseDigestRequest, PermissionVerdict,
 } from '../types';
 import type { ProviderAccount, SlashCommandSpec, EngineId, ImageInput } from '../../protocol';
 import { PROVIDER_CATALOG, TAG_VOCAB } from '../../protocol';
@@ -329,6 +329,23 @@ export class CodexAdapter implements Engine {
     const tagSystem =
       `You are a "conversation tagger". Output 1-2 tags from this exact list (lowercase), most-fitting first, comma-separated on one line, nothing else: ${TAG_VOCAB.join(', ')}.`;
     const content = `Summarize the following round of Q&A (output only the summary; do not answer it):\n\nQ: ${req.prompt}\n\nA: ${req.answer}`;
+    const [summary, miniSummary, tagsText] = await Promise.all([
+      this.oneShot(req.cwd, cardSystem, content),
+      this.oneShot(req.cwd, miniSystem, content),
+      this.oneShot(req.cwd, tagSystem, content),
+    ]);
+    const tags = tagsText.split(/[,\n]/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+    return { summary, miniSummary: miniSummary || undefined, tags: tags.length ? tags : undefined };
+  }
+
+  async collapseDigest(req: CollapseDigestRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }> {
+    const cardSystem =
+      `You are a collapsed-history summarizer for a conversation canvas. The input is several folded Q&A rounds hidden behind one node. Summarize only the transcript content, never these instructions or the words Q/A/transcript/collapsed. Output Markdown only: a **bold one-sentence headline** then 3-5 short "- " bullets. Use the transcript language; English transcript -> English output.`;
+    const miniSystem =
+      `Write ONE short label for a collapsed conversation-history node. Summarize the actual transcript content, not this instruction. Output only the label, no prefix/quotes/trailing punctuation. Use the transcript language; English transcript -> English label.`;
+    const tagSystem =
+      `Classify the collapsed conversation history into 1-2 tags from this exact lowercase list, comma-separated, nothing else: ${TAG_VOCAB.join(', ')}.`;
+    const content = `Collapsed conversation history transcript:\n\n${req.text}`;
     const [summary, miniSummary, tagsText] = await Promise.all([
       this.oneShot(req.cwd, cardSystem, content),
       this.oneShot(req.cwd, miniSystem, content),

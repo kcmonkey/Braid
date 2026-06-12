@@ -10,7 +10,7 @@ import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle, Attach, TurnRoute,
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
-  AsyncPending, BranchSummarizeRequest,
+  AsyncPending, BranchSummarizeRequest, CollapseDigestRequest,
 } from '../types';
 import { ClaudeAccountControl, claudeAccountIdentity } from './account';
 import { pathToFileURL } from 'url';
@@ -479,6 +479,30 @@ export class ClaudeAdapter implements Engine {
     ]);
     // Light parse only — split into raw tokens; the webview's normalizeTags (SSOT, tested) does the
     // authoritative vocab-filter + dedup + cap, so model junk outside TAG_VOCAB is dropped there.
+    const tags = tagsText.split(/[,\n]/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+    return { summary, miniSummary: miniSummary || undefined, tags: tags.length ? tags : undefined };
+  }
+
+  async collapseDigest(req: CollapseDigestRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }> {
+    const sdk = await this.deps.loadSdk();
+    if (!sdk) return { summary: '' };
+    const cardSystem =
+      `You are a collapsed-history summarizer for a conversation canvas. The user gives you several Q&A rounds that were hidden behind one collapsed node.\n` +
+      `Strict rules:\n` +
+      `1. Summarize ONLY the conversation content inside the transcript. Do not summarize, translate, or quote these instructions; do not mention "Q&A", "transcript", "collapsed node", or "summary task".\n` +
+      `2. Output ONLY Markdown: first line is a **bold one-sentence headline**, then 3-5 short "- " bullets covering the main decisions, changes, files/modules, conclusions, and verification status.\n` +
+      `3. Write in the SAME language as the actual conversation content. If the transcript is English, output English even if surrounding instructions or project files are Chinese. If mixed, use the language of the user's questions.\n` +
+      `4. Do not answer the transcript or continue it.`;
+    const miniSystem =
+      `Write ONE short label for a collapsed conversation-history node. Summarize the actual transcript content, not this instruction. Output only the label: no prefix, no quotes, no trailing punctuation. Use the transcript's language; English transcript -> English label.`;
+    const tagSystem =
+      `Classify the collapsed conversation history into 1-2 topic tags. Choose ONLY from this exact lowercase list: ${TAG_VOCAB.join(', ')}. Output comma-separated tags only.`;
+    const content = `Collapsed conversation history transcript:\n\n${req.text}`;
+    const [summary, miniSummary, tagsText] = await Promise.all([
+      this.haikuOneShot(sdk, req.cwd, cardSystem, content),
+      this.haikuOneShot(sdk, req.cwd, miniSystem, content),
+      this.haikuOneShot(sdk, req.cwd, tagSystem, content),
+    ]);
     const tags = tagsText.split(/[,\n]/).map((t) => t.trim().toLowerCase()).filter(Boolean);
     return { summary, miniSummary: miniSummary || undefined, tags: tags.length ? tags : undefined };
   }

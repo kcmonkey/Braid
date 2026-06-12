@@ -2,7 +2,7 @@ import type { ProviderConfig } from '../../sdkOptions';
 import type {
   AccountController, AuthResult, BranchSummarizeRequest, CompactCap, CompactRequest, CompactResult,
   Engine, EngineCapabilities, EventSink, McpController, PermissionVerdict, PreToolInterceptor,
-  SummarizeRequest, TurnControl, TurnRequest,
+  CollapseDigestRequest, SummarizeRequest, TurnControl, TurnRequest,
 } from '../types';
 import type { ProviderAccount, SlashCommandSpec } from '../../protocol';
 import { PROVIDER_CATALOG, TAG_VOCAB } from '../../protocol';
@@ -135,6 +135,17 @@ export class DeepSeekAdapter implements Engine {
     const [summary, miniSummary, tagsText] = await Promise.all([
       this.oneShot(req.cwd, 'Write a Markdown card summary: first line is a bold one-sentence headline, followed by 3-5 short "- " bullets. Same language as the Q/A. Output only Markdown.', content),
       this.oneShot(req.cwd, 'Write one short sentence naming the topic and result. Same language as the Q/A. Output only the sentence, no punctuation.', content),
+      this.oneShot(req.cwd, `Output 1-2 lowercase tags from this exact list, comma-separated, nothing else: ${TAG_VOCAB.join(', ')}.`, content),
+    ]);
+    const tags = tagsText.split(/[,\n]/).map((t) => t.trim().toLowerCase()).filter(Boolean);
+    return { summary, miniSummary: miniSummary || undefined, tags: tags.length ? tags : undefined };
+  }
+
+  async collapseDigest(req: CollapseDigestRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }> {
+    const content = `Collapsed conversation history transcript:\n\n${req.text}`;
+    const [summary, miniSummary, tagsText] = await Promise.all([
+      this.oneShot(req.cwd, 'Summarize only the transcript content hidden behind a collapsed canvas node. Do not summarize or translate these instructions; do not mention Q&A, transcript, collapsed node, or summary task. Output Markdown only: a bold headline plus 3-5 short bullets. Use the transcript language; English transcript -> English output.', content),
+      this.oneShot(req.cwd, 'Write one short label for this collapsed conversation history. Summarize the actual transcript content, not this instruction. Output only the label, no punctuation. Use the transcript language; English transcript -> English label.', content),
       this.oneShot(req.cwd, `Output 1-2 lowercase tags from this exact list, comma-separated, nothing else: ${TAG_VOCAB.join(', ')}.`, content),
     ]);
     const tags = tagsText.split(/[,\n]/).map((t) => t.trim().toLowerCase()).filter(Boolean);

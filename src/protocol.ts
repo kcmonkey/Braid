@@ -221,8 +221,8 @@ export type WebviewMessage =
   // Visual graph collapse: synthesize a folded-history digest (card + mini + tags) for a collapsed
   // representative node. `text` = the combined Q/A of the folded boards (hidden ancestors + the
   // representative), built webview-side from collapseDigestText; `boardId` = the collapsed node to store
-  // the result on (under collapsedGraph). The host runs the engine's existing summarizer and replies with
-  // `collapseDigested`. Orthogonal to `summarize` (one round) / `branchSummarize` (a one-line branch label).
+  // the result on (under collapsedGraph). The host runs the engine's collapse-specific digest prompt and
+  // replies with `collapseDigested`. Orthogonal to `summarize` (one round) / `branchSummarize` (one label).
   | { type: 'collapseDigest'; boardId: string; text: string; engine?: EngineId }
   // M9 compact: run native /compact on `resume` (a done board's sessionId), forking so the original
   // session is untouched. `boardId` = the new compact node to settle when done.

@@ -1720,7 +1720,9 @@ function ChatView({
     if (rr.top > wr.bottom - 120) region.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }, [branchAnim?.tick]);
 
-  // interrupt = send now » (cut the streaming turn); plain Enter / ↑ = queue after it (or send when idle).
+  // interrupt = send now » (cut the streaming turn, steer in place). plain Enter / ↑ (interrupt=false) routes
+  // in focusSend: queue as a CHILD board while streaming, add a round while waiting, fork while done, plain
+  // send when idle.
   const submit = (interrupt = false) => {
     const p = draft.trim();
     if (!p) return;
@@ -1814,7 +1816,7 @@ function ChatView({
           <textarea
             ref={taRef}
             className="composer__input"
-            placeholder={leafCompactIdle ? 'Continue on the compacted context (opens a new board)…' : leafStatus === 'streaming' ? 'Follow up while generating: Enter to queue · » to send now…' : leafStatus === 'waiting' ? 'Background work running — Enter to add a round to this board…' : 'Continue…  (/ commands · @ files)'}
+            placeholder={leafCompactIdle ? 'Continue on the compacted context (opens a new board)…' : leafStatus === 'streaming' ? 'Follow up while generating: Enter to queue as a child board · » to send now…' : leafStatus === 'waiting' ? 'Background work running — Enter to add a round to this board…' : 'Continue…  (/ commands · @ files)'}
             rows={1}
             value={draft}
             onChange={af.onChange}
@@ -1830,22 +1832,28 @@ function ChatView({
               <AttachBar boardId={leafId} />
               <ImageBar boardId={leafId} />
             </div>
-            {/* M11 mid-stream follow-up: while streaming, the composer stays usable — Enter / ⊕ queues the follow-up
-                (runs after the current turn), » interrupts to steer now, ■ stops. Idle → plain send.
+            {/* Follow up while a board generates: Enter / ⑂ queues the message as a new pending CHILD board
+                (runs after the current answer — the same-board queue was replaced by this visible node), »
+                interrupts to steer the current answer in place, ■ stops. Idle → plain send.
                 Actions stay grouped in composer__right so they sit together (not scattered by space-between). */}
             <div className="composer__right">
               {leafStatus === 'streaming' ? (
-                <>
-                  {leafQueued ? (
-                    <button className="iconbtn iconbtn--send" title="Queue after this message (Enter)" onClick={() => submit(false)} disabled={!draft.trim()}>⊕</button>
-                  ) : draft.trim() && (
-                    <>
-                      <button className="iconbtn iconbtn--send" title="Queue: send after the current answer finishes (Enter)" onClick={() => submit(false)}>⊕</button>
-                      <button className="iconbtn iconbtn--now" title="Send now: interrupt the current answer and ask immediately" onClick={() => submit(true)}>»</button>
-                    </>
-                  )}
-                  {!leafQueued && <button className="iconbtn iconbtn--stop" title="Stop generating" onClick={() => onStop(leafId)}>■</button>}
-                </>
+                leafQueued ? (
+                  // A queued child not yet started shares the parent's live turn → it can't be stopped or
+                  // interrupted; offer only the queue-as-child action so further follow-ups chain as their
+                  // own pending child boards.
+                  <button className="iconbtn iconbtn--send" title="Queue as a new child board (runs after this one)" onClick={() => submit(false)} disabled={!draft.trim()}>⑂</button>
+                ) : (
+                  <>
+                    {draft.trim() && (
+                      <>
+                        <button className="iconbtn iconbtn--send" title="Queue as a new child board that runs after the current answer (Enter)" onClick={() => submit(false)}>⑂</button>
+                        <button className="iconbtn iconbtn--now" title="Send now: interrupt the current answer and ask immediately" onClick={() => submit(true)}>»</button>
+                      </>
+                    )}
+                    <button className="iconbtn iconbtn--stop" title="Stop generating" onClick={() => onStop(leafId)}>■</button>
+                  </>
+                )
               ) : leafStatus === 'waiting' ? (
                 // 异步续接 AD8: send adds a round to THIS board (focusSend pushes into the held session);
                 // ■ ends the wait (stopWaiting) and finalizes the board.
@@ -3480,9 +3488,41 @@ function App() {
       onSend(leafId, prompt);
       return;
     }
-    // Streaming OR waiting (异步续接 AD8): the session is held open → the follow-up becomes a new round in
-    // THIS board (sendFollowup pushes into the live query), not a fork.
-    if (leaf.data.status === 'streaming' || leaf.data.status === 'waiting') {
+    // Streaming: '»' Send-now (interrupt) steers the CURRENT answer in place (same board); a plain queue now
+    // spawns a pending CHILD board (the focus-mode equivalent of the canvas '+') that runs after the current
+    // answer. The old same-board queue was removed in favor of that visible child node. (decisions.md queued child)
+    if (leaf.data.status === 'streaming') {
+      if (interrupt) { sendFollowup(leafId, prompt, true); return; }
+      const childId = `b${idRef.current++}`;
+      const child: BoardNodeT = {
+        id: childId, type: 'board', selected: true, // select it → on exit it + its lineage render detail
+        position: leaf.position, // placeholder; layoutGraph assigns the real spot
+        data: {
+          prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
+          engine: boardEngine(leaf.data),      // the queued child runs inside the parent's session → same engine
+          parentSessionId: leaf.data.sessionId, // the `session` event back-fills this if it isn't ready yet
+          queueParentId: leafId,
+          onSend, onFork, onStop, onCompact,
+        },
+      };
+      const newEdges = edgesRef.current.concat(makeEdge(leafId, childId, 'fork'));
+      const newNodes = autoLayout(nodesRef.current.map((n): BoardNodeT => ({ ...n, selected: false })).concat(child), newEdges);
+      setEdges(newEdges);
+      setNodes(newNodes);
+      // Sync refs synchronously so onSend (reads queueParentId/session from nodesRef.current) sees the new
+      // child this tick, before the [nodes,edges] syncing effect runs next render. (resume-loss lesson)
+      edgesRef.current = newEdges;
+      nodesRef.current = newNodes;
+      focusedIdRef.current = childId;
+      setFocusedId(childId);
+      // fromId=leafId: the streaming leaf's composer pending images/attachment travel with the queued child's
+      // first turn (and clear from the leaf). onSend's queueParentId branch posts the routed followup.
+      onSend(childId, prompt, leafId);
+      return;
+    }
+    // Waiting (异步续接 AD8): the held-open session takes the follow-up as a new round in THIS board
+    // (sendFollowup pushes into the live query), not a child/fork.
+    if (leaf.data.status === 'waiting') {
       sendFollowup(leafId, prompt, !!interrupt);
       return;
     }
