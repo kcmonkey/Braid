@@ -3,7 +3,11 @@
 // streaming lifecycle (handshake / thread attach / settle) stays in the adapter wrapper. The neutral events
 // drive the SAME EventSink Claude uses, and Codex tool items are mapped onto the existing tool-card model
 // (commandExecution→Bash, mcpToolCall→mcp__server__tool, reasoning→thinking marks) so the webview renders
-// them unchanged. (knowledge.md "Codex app-server v2 JSON-RPC"; plans/M-Codex Phase 3)
+// them unchanged. Codex's harness does file ops via SHELL COMMANDS (cat/rg/ls/Get-Content…), not first-class
+// Read/Grep tools like Claude — so commandExecution carries an extra `action`/`target` from classifyCommand()
+// (read/search/list/run) the webview turns into clean 📖 Read / 🔎 Search / 📂 List cards (the raw command
+// stays visible on expand); unclassifiable commands stay a generic ⌘ Command card. (knowledge.md "Codex
+// app-server v2 JSON-RPC"; plans/M-Codex Phase 3)
 import type { ThinkMark } from '../../webview/merge';
 import { TOOL_RESULT_CAP } from '../../webview/merge';
 import type { ToolUseEvent, ToolResultEvent } from '../types';
@@ -86,12 +90,102 @@ function webSearchResult(item: any): string {
   return 'Completed web search.';
 }
 
+// ---- command classification (Codex tool-card polish) ----
+// Conservative: only confidently read-only commands get a semantic action; anything compound/redirected/
+// unknown stays 'run' (the generic ⌘ Command card shows the raw command, never mislabeled). Pure + tested.
+export type CmdAction = 'read' | 'search' | 'list' | 'run';
+
+const READ_PROGS = new Set(['cat', 'bat', 'head', 'tail', 'nl', 'type', 'more', 'less', 'get-content', 'gc']);
+const SEARCH_PROGS = new Set(['rg', 'grep', 'egrep', 'fgrep', 'ag', 'ack', 'findstr', 'select-string', 'sls']);
+const LIST_PROGS = new Set(['ls', 'dir', 'll', 'la', 'tree', 'get-childitem', 'gci']);
+
+function stripQuotes(s: string): string {
+  if (s.length >= 2) {
+    const a = s[0], b = s[s.length - 1];
+    if ((a === '"' && b === '"') || (a === "'" && b === "'") || (a === '`' && b === '`')) return s.slice(1, -1);
+  }
+  return s;
+}
+
+/** Peel a `bash -lc "…"` / `powershell -Command '…'` / `cmd /c "…"` wrapper to the inner command, if any. */
+function unwrapShell(raw: string): string {
+  const m = /^(?:[\w./\\-]*\b(?:bash|sh|zsh|dash))\s+-[a-z]*c\s+(.+)$/i.exec(raw)
+    || /^(?:[\w./\\-]*\b(?:pwsh|powershell)(?:\.exe)?)\s+-(?:c|command)\s+(.+)$/i.exec(raw)
+    || /^(?:[\w./\\-]*\bcmd(?:\.exe)?)\s+\/c\s+(.+)$/i.exec(raw);
+  return m ? stripQuotes(m[1].trim()) : raw;
+}
+
+/** Split a command line into tokens, unwrapping simple single/double/back quotes (enough for classification). */
+function tokenize(cmd: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|'([^']*)'|`([^`]*)`|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(cmd))) out.push(m[1] ?? m[2] ?? m[3] ?? m[4] ?? '');
+  return out;
+}
+
+function baseName(prog: string): string {
+  const p = prog.replace(/\\/g, '/');
+  const i = p.lastIndexOf('/');
+  return (i >= 0 ? p.slice(i + 1) : p).replace(/\.exe$/i, '');
+}
+
+/** Path-ish target of a read/list command: prefer a token that looks like a path (has a separator or a file
+ * extension), else the last non-numeric non-flag token (skips PowerShell `-Encoding utf8`-style flag values). */
+function pickTarget(args: string[]): string | undefined {
+  const nonFlags = args.filter((a) => !a.startsWith('-'));
+  const pathy = nonFlags.find((a) => /[\\/]/.test(a) || /\.\w{1,6}$/.test(a));
+  if (pathy) return pathy;
+  const named = nonFlags.filter((a) => !/^\d+$/.test(a));
+  return named.length ? named[named.length - 1] : undefined;
+}
+
+/** Classify a Codex shell command into a semantic action (+target) for nicer tool cards. CONSERVATIVE —
+ * compound/redirected commands, in-place edits, and unknown programs all fall back to 'run'. Pure + tested. */
+export function classifyCommand(raw: string): { action: CmdAction; target?: string } {
+  const cmd = unwrapShell((raw ?? '').trim()).trim();
+  if (!cmd) return { action: 'run' };
+  // Pipes / redirects / chaining / substitution → too ambiguous to label; show the raw command.
+  if (/[|;><`&]|\$\(/.test(cmd)) return { action: 'run' };
+  const tokens = tokenize(cmd);
+  if (!tokens.length) return { action: 'run' };
+  const prog = baseName(tokens[0]).toLowerCase();
+  const args = tokens.slice(1);
+  if (SEARCH_PROGS.has(prog)) {
+    const target = args.find((a) => !a.startsWith('-') && !a.startsWith('/')); // pattern = first non-flag token
+    return target ? { action: 'search', target } : { action: 'search' };
+  }
+  if (prog === 'sed') {
+    // sed reads only in the `sed -n …p file` print form; `-i` is an in-place EDIT → generic command card.
+    if (args.some((a) => a.startsWith('-i'))) return { action: 'run' };
+    if (!args.includes('-n')) return { action: 'run' };
+    const t = pickTarget(args);
+    return t ? { action: 'read', target: t } : { action: 'read' };
+  }
+  if (READ_PROGS.has(prog)) {
+    const t = pickTarget(args);
+    return t ? { action: 'read', target: t } : { action: 'read' };
+  }
+  if (LIST_PROGS.has(prog)) {
+    const t = pickTarget(args);
+    return t ? { action: 'list', target: t } : { action: 'list' };
+  }
+  return { action: 'run' };
+}
+
 /** Map a Codex `ThreadItem` (item/started or item/completed) to a tool name + input for the webview cards. */
 function toolNameInput(item: any): { name: string; input: Record<string, unknown> } | null {
   switch (item?.type) {
-    case 'commandExecution':
-      // → the existing Bash card (toolSummary reads `command`), output shown from the toolResult.
-      return { name: 'Bash', input: { command: item.command ?? '', cwd: item.cwd } };
+    case 'commandExecution': {
+      // → the existing Bash card (output shown from the toolResult). `action`/`target` from classifyCommand
+      // let the webview render read-only commands as 📖 Read / 🔎 Search / 📂 List instead of a raw shell line.
+      const raw = item.command;
+      const command = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.join(' ') : raw == null ? '' : String(raw);
+      const { action, target } = classifyCommand(command);
+      const input: Record<string, unknown> = { command, cwd: item.cwd, action };
+      if (target) input.target = target;
+      return { name: 'Bash', input };
+    }
     case 'fileChange': {
       const first = Array.isArray(item.changes) ? item.changes[0] : undefined;
       return { name: 'FileChange', input: { file_path: first?.path ?? '', changes: item.changes } };

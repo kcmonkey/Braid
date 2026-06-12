@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { reduceCodexNotification, buildCodexTurnDone, initCodexParseState, type CodexEvent } from './reduce';
+import { reduceCodexNotification, buildCodexTurnDone, initCodexParseState, classifyCommand, type CodexEvent } from './reduce';
 
 // Drive a sequence of (method, params) notifications through the reducer, collecting neutral events.
 // Fixtures mirror real shapes captured by probe-codex.mjs (knowledge.md "Codex app-server v2 JSON-RPC").
@@ -45,6 +45,38 @@ describe('reduceCodexNotification — agent message streaming', () => {
   });
 });
 
+describe('classifyCommand — read-only command → semantic action/target', () => {
+  it('read programs map to read with the file target (incl. PowerShell -Path and bash -lc wrappers)', () => {
+    expect(classifyCommand('cat package.json')).toEqual({ action: 'read', target: 'package.json' });
+    expect(classifyCommand('Get-Content -Path src/foo.ts')).toEqual({ action: 'read', target: 'src/foo.ts' });
+    expect(classifyCommand('head -n 20 file.txt')).toEqual({ action: 'read', target: 'file.txt' }); // skips the -n VALUE (20)
+    expect(classifyCommand('Get-Content package.json -Encoding utf8')).toEqual({ action: 'read', target: 'package.json' }); // path-ish wins over flag value
+    expect(classifyCommand('bash -lc "cat src/main.tsx"')).toEqual({ action: 'read', target: 'src/main.tsx' }); // shell wrapper peeled
+    expect(classifyCommand("powershell.exe -Command 'Get-Content README.md'")).toEqual({ action: 'read', target: 'README.md' });
+  });
+
+  it('search programs map to search with the first non-flag token as the pattern', () => {
+    expect(classifyCommand('rg "useState" src')).toEqual({ action: 'search', target: 'useState' });
+    expect(classifyCommand('grep -n pattern file')).toEqual({ action: 'search', target: 'pattern' });
+    expect(classifyCommand('findstr /s "text" *.ts')).toEqual({ action: 'search', target: 'text' }); // /s flag skipped
+  });
+
+  it('list programs map to list (with a dir target when present)', () => {
+    expect(classifyCommand('ls')).toEqual({ action: 'list' });
+    expect(classifyCommand('Get-ChildItem src')).toEqual({ action: 'list', target: 'src' });
+  });
+
+  it('compound / write / unknown commands fall back to run (never mislabeled)', () => {
+    expect(classifyCommand('echo hi')).toEqual({ action: 'run' });
+    expect(classifyCommand('npm run build')).toEqual({ action: 'run' });
+    expect(classifyCommand('cat a | grep b')).toEqual({ action: 'run' });       // pipe → ambiguous
+    expect(classifyCommand('cat foo > bar')).toEqual({ action: 'run' });        // redirect → not a pure read
+    expect(classifyCommand('sed -i "s/a/b/" file')).toEqual({ action: 'run' }); // in-place edit, not a read
+    expect(classifyCommand('sed -n "1,20p" file.ts')).toEqual({ action: 'read', target: 'file.ts' }); // print form IS a read
+    expect(classifyCommand('')).toEqual({ action: 'run' });
+  });
+});
+
 describe('reduceCodexNotification — tools', () => {
   it('commandExecution → Bash toolUse (with textOffset/seq) + toolResult (failed → isError)', () => {
     const { events } = run([
@@ -54,9 +86,18 @@ describe('reduceCodexNotification — tools', () => {
       ['item/completed', { item: { type: 'commandExecution', id: 'call_1', status: 'failed', aggregatedOutput: 'boom', exitCode: -1 } }],
     ]);
     const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
-    expect(tu.ev).toMatchObject({ id: 'call_1', name: 'Bash', input: { command: 'echo hi', cwd: '/w' }, textOffset: 'Running.'.length, seq: 0 });
+    expect(tu.ev).toMatchObject({ id: 'call_1', name: 'Bash', input: { command: 'echo hi', cwd: '/w', action: 'run' }, textOffset: 'Running.'.length, seq: 0 });
     const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
     expect(tr.ev).toEqual({ toolUseId: 'call_1', content: 'boom', isError: true });
+  });
+
+  it('commandExecution that READS a file → Bash step carrying action:read + target (webview shows a 📖 Read card)', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'commandExecution', id: 'c2', command: 'cat package.json', cwd: '/w', status: 'inProgress' } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev.input).toEqual({ command: 'cat package.json', cwd: '/w', action: 'read', target: 'package.json' });
   });
 
   it('mcpToolCall → mcp__server__tool name', () => {

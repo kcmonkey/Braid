@@ -1163,6 +1163,13 @@ body {
   white-space: pre-wrap; word-break: break-word;
 }
 .tool__pending { font-size: 11px; color: var(--muted-2); }
+/* Raw shell command shown above the output on a Codex semantic command card (read/search/list), so the
+   real command stays inspectable even when the header reads "📖 Read package.json". */
+.tool__cmd {
+  margin: 0 0 6px; padding: 4px 8px; border-left: 2px solid var(--border-sub); background: var(--bg-deep);
+  border-radius: 4px; font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; color: var(--muted);
+  white-space: pre-wrap; word-break: break-word;
+}
 .tool__diff { white-space: pre; }
 .diffrow { display: flex; }
 .diffrow__sign { flex: none; width: 14px; color: var(--muted-2); user-select: none; }

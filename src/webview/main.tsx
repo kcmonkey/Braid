@@ -129,6 +129,24 @@ function toolSummary(step: ToolStep): string {
   }
 }
 
+// Codex runs file ops as SHELL COMMANDS (cat/rg/ls/Get-Content…) rather than first-class Read/Grep tools,
+// so its commandExecution step carries a semantic `action`/`target` (from the adapter's classifyCommand).
+// Turn read-only commands into clean 📖 Read / 🔎 Search / 📂 List cards (path/pattern as the title; the raw
+// command stays visible on expand). Claude's Bash tool has no `action` → null here → renders unchanged.
+// 'run' (or anything unclassified) becomes a generic ⌘ Command card. (Codex tool-card polish)
+const CMD_LABEL: Record<string, string> = { read: '📖 Read', search: '🔎 Search', list: '📂 List', run: '⌘ Command' };
+function cmdView(step: ToolStep): { label: string; summary: string; file: string; command: string } | null {
+  if (step.name !== 'Bash') return null;
+  const action = typeof step.input.action === 'string' ? (step.input.action as string) : '';
+  if (!action || !(action in CMD_LABEL)) return null;
+  const command = typeof step.input.command === 'string' ? (step.input.command as string) : '';
+  const target = typeof step.input.target === 'string' ? (step.input.target as string) : '';
+  if (action === 'read') return { label: CMD_LABEL.read, summary: target || command, file: target, command };
+  if (action === 'search') return { label: CMD_LABEL.search, summary: target || command, file: '', command };
+  if (action === 'list') return { label: CMD_LABEL.list, summary: target || command, file: '', command };
+  return { label: CMD_LABEL.run, summary: command, file: '', command }; // 'run' — generic command card
+}
+
 // Edit/Write render as a real line diff (old_string→new_string; Write = all-additions). (gap2 phase 3)
 function ToolDiff({ step }: { step: ToolStep }) {
   const i = step.input;
@@ -154,14 +172,20 @@ function ToolDiff({ step }: { step: ToolStep }) {
 // Exception: Edit defaults to EXPANDED so the code change (diff) is visible at a glance; all other
 // tools stay collapsed by default. (user request)
 function ToolCard({ step }: { step: ToolStep }) {
+  const cmd = cmdView(step); // Codex semantic command card (📖/🔎/📂/⌘); null for Claude tools → unchanged
   const [open, setOpen] = useState(step.name === 'Edit');
   const isDiff = step.name === 'Edit' || step.name === 'Write';
-  const file = FILE_TOOLS.has(step.name) ? stepFile(step) : '';
+  const name = cmd ? cmd.label : step.name;
+  const summary = cmd ? cmd.summary : toolSummary(step);
+  const file = cmd ? cmd.file : (FILE_TOOLS.has(step.name) ? stepFile(step) : '');
+  // For semantic command cards whose header hides the raw command (read/search/list show the path/pattern),
+  // surface the real command at the top of the body so it stays honest/inspectable. (user: "展开仍看真实命令")
+  const showCmd = cmd != null && cmd.command !== '' && cmd.summary !== cmd.command;
   return (
     <div className={`tool ${step.isError ? 'tool--err' : ''}`}>
       <div className="tool__head" onClick={() => setOpen((o) => !o)}>
         <span className="tool__chev">{open ? '▾' : '▸'}</span>
-        <span className="tool__name">{step.name}</span>
+        <span className="tool__name">{name}</span>
         {file ? (
           // Clickable file path → open it in a VS Code editor (like the official extension). Stop
           // propagation so the click opens the file instead of toggling the card. (icon-only affordance)
@@ -171,12 +195,13 @@ function ToolCard({ step }: { step: ToolStep }) {
             onClick={(e) => { e.stopPropagation(); post({ type: 'openFile', path: file }); }}
           >{file}</span>
         ) : (
-          <span className="tool__sum" title={toolSummary(step)}>{toolSummary(step)}</span>
+          <span className="tool__sum" title={summary}>{summary}</span>
         )}
         {step.isError && <span className="tool__badge">err</span>}
       </div>
       {open && (
         <div className="tool__body">
+          {showCmd && cmd && <div className="tool__cmd" title={cmd.command}>$ {cmd.command}</div>}
           {isDiff ? (
             <ToolDiff step={step} />
           ) : step.result != null ? (
