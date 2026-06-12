@@ -1,0 +1,21 @@
+codex binary: C:\Users\asus\.vscode\extensions\openai.chatgpt-26.609.30741-win32-x64\bin\windows-x86_64\codex.exe
+-- account: {"type":"chatgpt","email":"kcmonkey1992@gmail.com","planType":"plus"}
+
+========== Build a 3-turn spine thread ==========
+threadId = 019ebbcf-a1cc-7b82-8653-ef5488ca8695
+LIVE turn/started ids:  T0(A)= 019ebbcf-a234-7871-8e5b-bbd44fdf8111  T1(B)= 019ebbd0-9271-7d12-9385-61471682bcf7  T2(C)= 019ebbd1-82d7-7343-b42f-20edd71d384e
+
+========== Q1. thread/read includeTurns — do PERSISTED turn ids match the LIVE ids? ==========
+read.turns[].id = ["019ebbcf-a234-7871-8e5b-bbd44fdf8111","019ebbd0-9271-7d12-9385-61471682bcf7","019ebbd1-82d7-7343-b42f-20edd71d384e"]
+   match T0/T1/T2 in persisted ids?  {"T0":true,"T1":true,"T2":true}
+
+========== Q2. thread/fork — does the FORKED thread preserve those turn ids? (the forkAt assumption) ==========
+forked.id = 019ebbd2-7308-75e3-a9da-e6958318c009  forkedFromId = 019ebbcf-a1cc-7b82-8653-ef5488ca8695
+forked.turns[].id = ["019ebbcf-a234-7871-8e5b-bbd44fdf8111","019ebbd0-9271-7d12-9385-61471682bcf7","019ebbd1-82d7-7343-b42f-20edd71d384e"]
+>>> forkAt findIndex(t => t.id === T1)  =>  idx = 1   (drop would be 1)
+=== ids preserved: forkAt rollback would work. Bug is elsewhere — keep digging.
+
+========== Q3. simulate forkAt mid-point rollback to T1, then read back the branch ==========
+after rollback, branch.turns[].id = ["019ebbcf-a234-7871-8e5b-bbd44fdf8111","019ebbd0-9271-7d12-9385-61471682bcf7"]  (expect only [T0,T1])
+
+DONE. Output also in D:\BoardCanvasExt\probe-codex-fork-out.txt
