@@ -46,10 +46,10 @@ private:
     {
         FToolMenuOwnerScoped OwnerScoped(this);
         UToolMenu* Menu = UToolMenus::Get()->ExtendMenu(TEXT("LevelEditor.MainMenu.Tools"));
-        FToolMenuSection& Section = Menu->FindOrAddSection(TEXT("Braid"));
+        FToolMenuSection& Section = Menu->FindOrAddSection(FName(TEXT("Braid")));
 
         Section.AddMenuEntry(
-            TEXT("OpenBraidUnrealPoc"),
+            FName(TEXT("OpenBraidUnrealPoc")),
             LOCTEXT("OpenMenuLabel", "Braid Canvas PoC"),
             LOCTEXT("OpenMenuTooltip", "Open the Braid React/React Flow canvas in an Unreal editor tab."),
             FSlateIcon(),

@@ -12,3 +12,6 @@ CLAUDE.md
 probe-codex.mjs
 probe-codex-out.txt
 tmp-codex-schema/
+
+# Local installer smoke-test output
+tmp-unreal-install-test-*/

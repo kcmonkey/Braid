@@ -15,6 +15,7 @@ public class BraidUnrealPoc : ModuleRules
         {
             "CoreUObject",
             "Engine",
+            "LevelEditor",
             "Projects",
             "Slate",
             "SlateCore",
