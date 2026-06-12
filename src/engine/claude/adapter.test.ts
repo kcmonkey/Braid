@@ -55,7 +55,7 @@ function harness(opts: { loadSdk?: () => Promise<any>; config?: ProviderConfig; 
   return { adapter, fake, captured };
 }
 
-const noopPre: PreToolInterceptor = { onPreToolUse: async () => ({ proceed: true }), onPermissionRequest: async () => ({ allow: true }), onUserInput: async () => ({ answers: {}, canceled: true }) };
+const noopPre: PreToolInterceptor = { onPreToolUse: async () => ({ proceed: true }), onPermissionRequest: async () => ({ allow: true }), onUserInput: async () => ({ answers: {}, canceled: true }), onElicit: async () => ({ action: 'decline' }) };
 const req = (attach: Attach, extra: Partial<TurnRequest> = {}): TurnRequest => ({ boardId: 'b1', attach, prompt: 'hi', cwd: '/w', ...extra });
 const init = { type: 'system', subtype: 'init', session_id: 's1', model: 'claude-opus-4-8' };
 
@@ -453,6 +453,7 @@ describe('ClaudeAdapter — PreToolUse hook wiring', () => {
       onPreToolUse: async (...args): Promise<PreToolDecision> => { lastPreArgs = args; return preReply; },
       onPermissionRequest: async () => ({ allow: true }),
       onUserInput: async (_b, _ti, ask) => { lastUserInputAsk = ask; return userInputAnswer; },
+      onElicit: async () => ({ action: 'decline' }),
     };
   }
   let preReply: PreToolDecision = { proceed: true };
@@ -510,6 +511,7 @@ describe('ClaudeAdapter — canUseTool (permission) wiring', () => {
       onPreToolUse: async () => ({ proceed: true }),
       onPermissionRequest: async (_b, _ti, ask): Promise<PermissionVerdict> => { lastAsk = ask; return verdict; },
       onUserInput: async () => ({ answers: {}, canceled: true }),
+      onElicit: async () => ({ action: 'decline' }),
     };
   }
   async function getCanUse() {

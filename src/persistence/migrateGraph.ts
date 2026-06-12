@@ -3,7 +3,7 @@
 // the persistence boundary (host readGraphFor) AND defensively in the webview restore gate. Idempotent + chained,
 // so a failed write-back is harmless (re-migrate next load). The migration tolerates the legacy/dirty shape on
 // INPUT; the live board model stays clean. (plans/Send-Time-Materialization decisions.md D0)
-import { GRAPH_VERSION, isFreshBoard } from '../webview/merge';
+import { GRAPH_VERSION, isFreshBoard, stripFreshNativeBase } from '../webview/merge';
 import type { SerializedGraph, SNode, SBoardData } from '../webview/merge';
 
 /** Cheap structural sanity check, used before a destructive write-back. */
@@ -32,16 +32,11 @@ function nodeV1toV2(n: SNode): SNode {
 }
 
 /** v2 → v3 (strip fresh native base). A fresh board no longer persists a provider-native send base — send-time
- * materialization recomputes it from the graph (D2). Strip `parentSessionId`/`resumeAt` from every fresh board,
- * plus a non-merge fresh board's dead `mergeContext` replay seed (a merge board keeps `mergeContext` as a
- * display-only preview, D6). Per-field guards keep it idempotent. */
+ * materialization recomputes it from the graph (D2). Delegates to the SSOT `stripFreshNativeBase` (shared with
+ * serializeGraph), which is idempotent and keeps a merge board's `mergeContext` display preview (D6). */
 function nodeV2toV3(n: SNode): SNode {
-  const d = n.data;
-  if (!isFreshBoard(d)) return n;
-  const dropSeed = !d.merged; // a fork board's mergeContext is a dead replay seed; a merge board keeps it (preview, D6)
-  if (d.parentSessionId == null && d.resumeAt == null && !(dropSeed && d.mergeContext != null)) return n;
-  const { parentSessionId, resumeAt, mergeContext, ...rest } = d;
-  return { ...n, data: dropSeed ? rest : { ...rest, ...(mergeContext != null ? { mergeContext } : {}) } };
+  const d = stripFreshNativeBase(n.data);
+  return d === n.data ? n : { ...n, data: d };
 }
 
 /** Bring `g` to GRAPH_VERSION. No-op when already current/newer or structurally invalid (idempotent). Chained:

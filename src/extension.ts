@@ -13,7 +13,7 @@ import { FileGraphStore, resolveGraphFallback } from './persistence/graphStore';
 import type { Canvas } from './persistence/graphStore';
 import { toCapabilitiesView } from './engine/capabilities';
 import { PROVIDER_CATALOG } from './protocol';
-import type { EngineId, ProviderCapabilitiesView, ProviderAccount, UserInputAsk, UserInputAnswer } from './protocol';
+import type { EngineId, ProviderCapabilitiesView, ProviderAccount, UserInputAsk, UserInputAnswer, ElicitOutcome } from './protocol';
 import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry, resolveClaudeBinaryFromEntry } from './runtime/sdk-provision';
 import { resolveCodexBinary } from './runtime/codex-bin';
 import { ensureSdkInstalled } from './runtime/sdk-download';

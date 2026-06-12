@@ -1547,6 +1547,19 @@ export function isFreshBoard(d: SBoardData): boolean {
   return !d.prompt && d.status === 'idle' && !d.compact && !d.collapsedGraph && !d.sessionId;
 }
 
+/** STM invariant (D1/D2): a fresh board persists NO provider-native send base — it is recomputed from the graph
+ * at send (materializeSendPlan). Strip `parentSessionId`/`resumeAt` (and a fork board's dead `mergeContext`
+ * replay seed) from a fresh board's data; a merge board keeps `mergeContext` as a display preview (D6). Returns
+ * the SAME object when nothing changed. SSOT shared by serializeGraph (persistence boundary) and migrateGraph's
+ * v2→v3 step, so the invariant holds by construction regardless of in-memory residue. */
+export function stripFreshNativeBase(d: SBoardData): SBoardData {
+  if (!isFreshBoard(d)) return d;
+  const dropSeed = !d.merged;
+  if (d.parentSessionId == null && d.resumeAt == null && !(dropSeed && d.mergeContext != null)) return d;
+  const { parentSessionId, resumeAt, mergeContext, ...rest } = d;
+  return dropSeed ? rest : { ...rest, ...(mergeContext != null ? { mergeContext } : {}) };
+}
+
 /**
  * Pick the session to native-fork the merged board from: the HEAVIEST engine-compatible node in the selected
  * boards' lineage union (max `contextTokens`), filtered to the turn engine (can't fork a foreign session) +
@@ -1700,49 +1713,31 @@ export function mergeBaseFor(
 }
 
 /**
- * Re-stamp every FRESH (never-run, idle) board's engine to the newly-active provider `id`, AND re-home its
- * continuation base for that engine. A fresh board's `engine` is only a creation-time default and it owns no
- * session of its own, so flipping it is safe — it makes the per-board engine badge truthful and routes its
- * first turn to `id` (onSend reads the board's stamped engine). Already-run boards (own sessionId / prompt /
- * compact / collapsed) keep their IMMUTABLE engine — their conversation lives on it. (M-MultiEngine AD1)
+ * Re-stamp every FRESH (never-run, idle) board's engine to the newly-active provider `id`, and clear any
+ * residual native send base. A fresh board's `engine` is a creation-time default and it owns no session, so
+ * flipping it is safe — it makes the badge truthful and routes its first turn to `id` (onSend reads the
+ * board's stamped engine). Already-run boards (own sessionId / prompt / compact / collapsed) keep their
+ * IMMUTABLE engine. (M-MultiEngine AD1)
  *
- * CRITICAL — re-home the base: a fork/merge child carries `parentSessionId`/`resumeAt`, NATIVE session pointers
- * owned by the OLD engine. Flipping `engine` WITHOUT re-homing makes the new engine try to resume/fork a session
- * it has no rollout for → "no rollout found for thread id …" (the cross-engine switch bug). So each re-stamped
- * board's base is recomputed for `id`: a merge child via mergeBaseFor over its merge parents; a fork child via
- * forkBaseFor (→ a same-engine native anchor, or `parentSessionId` cleared + a text-replay `mergeContext` seed so
- * the new engine continues from the prior conversation as text); a bare root → base cleared. Pure → unit-tested.
+ * STM P3 (replaces the old re-home mutation): a fresh board NO LONGER carries a native send base — it is
+ * recomputed from the graph at send (materializeSendPlan, D2). So a switch only flips `engine` and clears any
+ * residual `parentSessionId`/`resumeAt` (a fork board also drops its dead `mergeContext` replay seed; a merge
+ * board keeps `mergeContext` as a DISPLAY preview, D6). This makes the cross-engine "no rollout found" bug
+ * structurally impossible (the send path never reads a stored foreign pointer). Pure → unit-tested.
  */
-export function restampActiveProvider(nodes: BoardNodeT[], edges: Edge[], id: EngineId): BoardNodeT[] {
-  const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
+export function restampActiveProvider(nodes: BoardNodeT[], _edges: Edge[], id: EngineId): BoardNodeT[] {
   let changed = false;
   const next = nodes.map((n) => {
     const d = n.data;
-    const fresh = !d.prompt && d.status === 'idle' && !d.compact && !d.collapsedGraph && !d.sessionId;
-    if (!fresh) return n;
-    const mergeParents = edges.filter((e) => e.target === n.id && edgeKind(e) === 'merge').map((e) => e.source);
-    const forkParent = edges.find((e) => e.target === n.id && isLineageEdge(e))?.source;
-    const hasGraphBase = (d.merged && mergeParents.length >= 2) || !!forkParent;
-    if (boardEngine(d) === id && !hasGraphBase) return n;
-    // Always emit ALL THREE base keys (undefined to CLEAR a now-foreign pointer) so a spread overwrites the
-    // board's stale base rather than leaving half of it behind.
-    let base: { parentSessionId?: string; resumeAt?: string; mergeContext?: string };
-    if (d.merged && mergeParents.length >= 2) {
-      const m = mergeBaseFor(mergeParents, byId, edges, id);
-      base = { parentSessionId: m.parentSessionId, resumeAt: undefined, mergeContext: m.mergeContext };
-    } else {
-      const parent = forkParent ? byId[forkParent] : undefined;
-      const r = parent ? forkBaseFor(parent, nodes, edges, id) : {};
-      base = { parentSessionId: r.parentSessionId, resumeAt: r.resumeAt, mergeContext: r.mergeContext };
-    }
-    const same =
-      boardEngine(d) === id &&
-      d.parentSessionId === base.parentSessionId &&
-      d.resumeAt === base.resumeAt &&
-      d.mergeContext === base.mergeContext;
-    if (same) return n;
+    if (!isFreshBoard(d)) return n;
+    const dropSeed = !d.merged; // a fork board's mergeContext is a dead replay seed; a merge board keeps it (preview, D6)
+    const needsEngine = boardEngine(d) !== id;
+    const hasResidualBase = d.parentSessionId != null || d.resumeAt != null || (dropSeed && d.mergeContext != null);
+    if (!needsEngine && !hasResidualBase) return n;
     changed = true;
-    return { ...n, data: { ...d, engine: id, ...base } };
+    const { parentSessionId, resumeAt, mergeContext, ...rest } = d;
+    const data = dropSeed ? { ...rest, engine: id } : { ...rest, engine: id, ...(mergeContext != null ? { mergeContext } : {}) };
+    return { ...n, data };
   });
   return changed ? next : nodes;
 }
@@ -1852,7 +1847,8 @@ export function serializeGraph(nodes: BoardNodeT[], edges: Edge[], idCounter: nu
       // Async continuation (AD6): a board held open for async work can't still be waiting in a fresh session →
       // persist it as 'done' + a marker that its background/scheduled work was abandoned at reload.
       if (data.status === 'waiting') { data.status = 'done'; data.asyncAbandoned = true; }
-      return { id: n.id, position: n.position, data, hidden: n.hidden || undefined };
+      // STM invariant: a fresh board never persists a native send base (recomputed at send). (D1/D2)
+      return { id: n.id, position: n.position, data: stripFreshNativeBase(data), hidden: n.hidden || undefined };
     }),
     edges: edges.map((e) => ({
       id: e.id, source: e.source, target: e.target,

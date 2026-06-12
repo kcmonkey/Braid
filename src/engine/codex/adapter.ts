@@ -204,6 +204,21 @@ export class CodexAdapter implements Engine {
         if (requested.fileSystem) granted.fileSystem = requested.fileSystem;
         return { permissions: granted, scope: verdict.always ? 'session' : 'turn' };
       }
+      if (method === 'mcpServer/elicitation/request') {
+        // url mode only (capability-layer P4): synthesize an Elicitation card → neutral onElicit (consent →
+        // host opens the URL) → reply with the user's action. form mode (schema-driven fields) is deferred —
+        // we return a VALID decline rather than an invalid {}. (D5: rare; safe default otherwise)
+        if (params?.mode === 'url' && typeof params?.url === 'string' && params.url) {
+          const itemId: string = typeof params?.elicitationId === 'string' && params.elicitationId ? params.elicitationId : 'elicit';
+          const message: string = typeof params?.message === 'string' && params.message ? params.message : 'Open the link to continue.';
+          const serverName: string | undefined = typeof params?.serverName === 'string' ? params.serverName : undefined;
+          sink.toolUse(req.boardId, state.turnIndex, { id: itemId, name: 'Elicitation', input: { url: params.url, message, serverName, mode: 'url' }, textOffset: state.answer.length, seq: state.evSeq++ });
+          const outcome = await pre.onElicit(req.boardId, state.turnIndex, { toolUseId: itemId, mode: 'url', message, url: params.url, serverName }, ctl.abort.signal);
+          sink.toolResult(req.boardId, state.turnIndex, { toolUseId: itemId, content: outcome.action === 'accept' ? `Opened ${params.url}` : `Elicitation ${outcome.action}`, isError: false });
+          return { action: outcome.action, content: null, _meta: null };
+        }
+        return { action: 'decline', content: null, _meta: null };
+      }
       if (method === 'item/tool/requestUserInput') {
         // Native AskUserQuestion. Map Codex's questions onto the neutral UserInputQuestion shape, render the
         // existing AskUserCard via a synthesized toolUse, block on the user's STRUCTURED answer, then reply in

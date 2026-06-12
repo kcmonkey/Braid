@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import type { Edge } from '@xyflow/react';
 import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
-  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, forkableSession, isFreshBoard, materializeSendPlan, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
+  ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, forkableSession, isFreshBoard, stripFreshNativeBase, materializeSendPlan, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
   planCollapseSelection, collapseSelection, expandCollapsedGraph, syncHiddenEdges,
   planAutoCollapseAfterDone, applyCollapsePlans,
@@ -1817,79 +1817,101 @@ describe('forkBaseFor — engine-aware fork base', () => {
   });
 });
 
-describe('restampActiveProvider — re-stamp + re-home fresh boards on a provider switch', () => {
-  it('cross-engine switch bug: a fresh Claude fork child re-homed to Codex drops the Claude session', () => {
-    // Repro of "no rollout found for thread id …": fork a Claude board → fresh child carries the parent's
-    // Claude session; switch active provider to Codex → the child must NOT keep that foreign session id.
+describe('restampActiveProvider — re-stamp engine + clear native base on a provider switch (STM P3)', () => {
+  it('cross-engine switch: a fresh Claude fork child re-stamps to Codex and DROPS the native base (recomputed at send)', () => {
+    // The old "no rollout found" bug: a fresh child carried the parent's Claude session; switching to Codex
+    // must not keep that foreign pointer. STM: restamp clears it; materializeSendPlan recomputes at send.
     const P = node('P', 1, { engine: 'claude', sessionId: 'claude-sess-7c53', prompt: 'q-P', answer: 'a-P' });
     const C = node('C', 2, { engine: 'claude', prompt: '', answer: '', status: 'idle', parentSessionId: 'claude-sess-7c53' });
-    const edges = [forkEdge('P', 'C')];
-    const out = restampActiveProvider([P, C], edges, 'codex');
+    const out = restampActiveProvider([P, C], [forkEdge('P', 'C')], 'codex');
     const c = out.find((n) => n.id === 'C')!.data;
     expect(c.engine).toBe('codex');
-    expect(c.parentSessionId).toBeUndefined();   // the Claude session is NOT passed to Codex (the fix)
-    expect(c.mergeContext).toBeDefined();         // Codex instead continues from the replayed transcript
-    expect(c.mergeContext).toContain('q-P');
+    expect(c.parentSessionId).toBeUndefined();
+    expect(c.mergeContext).toBeUndefined(); // no stored seed — the limb is replayed at send, not here
   });
 
   it('leaves already-run boards (own session / prompt) untouched — immutable engine', () => {
-    const P = node('P', 1, { engine: 'claude', sessionId: 'sp' }); // default prompt q-P, status done
+    const P = node('P', 1, { engine: 'claude', sessionId: 'sp' });
     const out = restampActiveProvider([P], [], 'codex');
     expect(out.find((n) => n.id === 'P')).toBe(P); // same reference: not re-stamped
   });
 
-  it('no-op for a board already on the target engine', () => {
-    const C = node('C', 1, { engine: 'codex', prompt: '', answer: '', status: 'idle', parentSessionId: 'sx' });
+  it('true no-op: a fresh board already on the target engine with no residual base is returned unchanged', () => {
+    const C = node('C', 1, { engine: 'codex', prompt: '', answer: '', status: 'idle' });
     const out = restampActiveProvider([C], [], 'codex');
-    expect(out.find((n) => n.id === 'C')).toBe(C); // boardEngine === id → unchanged
+    expect(out.find((n) => n.id === 'C')).toBe(C);
   });
 
-  it('heals an already-Codex fresh fork child that still points at a Claude parent session', () => {
-    const P = node('P', 1, { engine: 'claude', sessionId: 'claude-sess-stale', prompt: 'q-P', answer: 'a-P' });
-    const C = node('C', 2, { engine: 'codex', prompt: '', answer: '', status: 'idle', parentSessionId: 'claude-sess-stale' });
-    const edges = [forkEdge('P', 'C')];
-    const out = restampActiveProvider([P, C], edges, 'codex');
-    const c = out.find((n) => n.id === 'C')!.data;
-    expect(c.engine).toBe('codex');
+  it('clears a residual native base even when the board is already on the target engine', () => {
+    const C = node('C', 1, { engine: 'codex', prompt: '', answer: '', status: 'idle', parentSessionId: 'sx', resumeAt: 'u' });
+    const c = restampActiveProvider([C], [], 'codex').find((n) => n.id === 'C')!.data;
     expect(c.parentSessionId).toBeUndefined();
-    expect(c.mergeContext).toContain('q-P');
+    expect(c.resumeAt).toBeUndefined();
   });
 
-  it('a bare fresh root just flips engine (no base to re-home)', () => {
+  it('heals an already-Codex fresh fork child that still carries a stale Claude parent session', () => {
+    const C = node('C', 2, { engine: 'codex', prompt: '', answer: '', status: 'idle', parentSessionId: 'claude-sess-stale' });
+    const out = restampActiveProvider([C], [], 'codex');
+    expect(out.find((n) => n.id === 'C')!.data.parentSessionId).toBeUndefined();
+  });
+
+  it('a bare fresh root just flips engine (no base)', () => {
     const R = node('R', 1, { engine: 'claude', prompt: '', answer: '', status: 'idle' });
-    const out = restampActiveProvider([R], [], 'codex');
-    const r = out.find((n) => n.id === 'R')!.data;
+    const r = restampActiveProvider([R], [], 'codex').find((n) => n.id === 'R')!.data;
     expect(r.engine).toBe('codex');
     expect(r.parentSessionId).toBeUndefined();
     expect(r.mergeContext).toBeUndefined();
   });
 
-  it('re-homes a fresh merge board: cross-engine switch clears the foreign base, keeps a full text seed', () => {
-    const A = node('A', 1, { engine: 'claude', sessionId: 'sa', prompt: 'q-A', answer: 'a-A' });
-    const B = node('B', 2, { engine: 'claude', sessionId: 'sb', prompt: 'q-B', answer: 'a-B' });
-    const M = node('M', 3, { engine: 'claude', merged: true, prompt: '', answer: '', status: 'idle', parentSessionId: 'sa', mergeContext: 'stale' });
-    const edges = [mergeEdge('A', 'M'), mergeEdge('B', 'M')];
-    const out = restampActiveProvider([A, B, M], edges, 'codex');
-    const m = out.find((n) => n.id === 'M')!.data;
+  it('a fresh MERGE board re-stamps engine + clears the native base but KEEPS its mergeContext display preview', () => {
+    const M = node('M', 3, { engine: 'claude', merged: true, prompt: '', answer: '', status: 'idle', parentSessionId: 'sa', mergeContext: 'preview' });
+    const m = restampActiveProvider([M], [], 'codex').find((n) => n.id === 'M')!.data;
     expect(m.engine).toBe('codex');
-    expect(m.parentSessionId).toBeUndefined();    // no Codex source → no native base (not 'sa')
-    expect(m.mergeContext).not.toBe('stale');      // recomputed for Codex
-    expect(m.mergeContext).toContain('q-A');
-    expect(m.mergeContext).toContain('q-B');
+    expect(m.parentSessionId).toBeUndefined();   // native base cleared
+    expect(m.mergeContext).toBe('preview');       // display preview kept (the send seed is recomputed at dispatch, D6)
   });
 
-  it('heals an already-Codex fresh merge board that still carries a Claude native base', () => {
-    const A = node('A', 1, { engine: 'claude', sessionId: 'sa', prompt: 'q-A', answer: 'a-A' });
-    const B = node('B', 2, { engine: 'claude', sessionId: 'sb', prompt: 'q-B', answer: 'a-B' });
-    const M = node('M', 3, { engine: 'codex', merged: true, prompt: '', answer: '', status: 'idle', parentSessionId: 'sa', mergeContext: 'stale' });
-    const edges = [mergeEdge('A', 'M'), mergeEdge('B', 'M')];
-    const out = restampActiveProvider([A, B, M], edges, 'codex');
-    const m = out.find((n) => n.id === 'M')!.data;
-    expect(m.engine).toBe('codex');
-    expect(m.parentSessionId).toBeUndefined();
-    expect(m.mergeContext).not.toBe('stale');
-    expect(m.mergeContext).toContain('q-A');
-    expect(m.mergeContext).toContain('q-B');
+  it('switch loop Claude→Codex→Claude leaves a fresh fork child on claude with NO accumulated native base', () => {
+    const P = node('P', 1, { engine: 'claude', sessionId: 'sp', prompt: 'q-P', answer: 'a-P' });
+    const C = node('C', 2, { engine: 'claude', prompt: '', answer: '', status: 'idle', parentSessionId: 'sp' });
+    const edges = [forkEdge('P', 'C')];
+    let out = restampActiveProvider([P, C], edges, 'codex');
+    out = restampActiveProvider(out, edges, 'claude');
+    const c = out.find((n) => n.id === 'C')!.data;
+    expect(c.engine).toBe('claude');
+    expect(c.parentSessionId).toBeUndefined();
+    expect(c.resumeAt).toBeUndefined();
+    expect(c.mergeContext).toBeUndefined();
+  });
+});
+
+describe('stripFreshNativeBase / serializeGraph invariant (STM P3)', () => {
+  it('strips parentSessionId / resumeAt (and a fork board mergeContext seed) from a fresh board', () => {
+    const d = node('C', 1, { prompt: '', answer: '', status: 'idle', parentSessionId: 'sp', resumeAt: 'u', mergeContext: 'seed' }).data;
+    const out = stripFreshNativeBase(d);
+    expect(out.parentSessionId).toBeUndefined();
+    expect(out.resumeAt).toBeUndefined();
+    expect(out.mergeContext).toBeUndefined();
+  });
+
+  it('keeps mergeContext on a fresh MERGE board (display preview) but strips the native base', () => {
+    const d = node('M', 1, { merged: true, prompt: '', answer: '', status: 'idle', parentSessionId: 'sa', mergeContext: 'preview' }).data;
+    const out = stripFreshNativeBase(d);
+    expect(out.parentSessionId).toBeUndefined();
+    expect(out.mergeContext).toBe('preview');
+  });
+
+  it('leaves a ran board untouched (same object ref)', () => {
+    const d = node('P', 1, { prompt: 'q', status: 'done', sessionId: 'sp', parentSessionId: 'spp' }).data;
+    expect(stripFreshNativeBase(d)).toBe(d);
+  });
+
+  it('serializeGraph never persists a native base on a fresh board', () => {
+    const C = node('C', 1, { prompt: '', answer: '', status: 'idle', parentSessionId: 'sp', resumeAt: 'u' });
+    const g = serializeGraph([C], [], 1, 1);
+    const c = g.nodes.find((n) => n.id === 'C')!.data;
+    expect(c.parentSessionId).toBeUndefined();
+    expect(c.resumeAt).toBeUndefined();
   });
 });
 

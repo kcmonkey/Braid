@@ -3248,7 +3248,6 @@ function App() {
           prompt, answer: '', thinking: '', thinks: [], thoughtMs: undefined, status: 'streaming', steps: [],
           contextTokens: undefined, contextWindow: undefined, autoCompacted: undefined,
           summary: undefined, miniSummary: undefined, tags: undefined,
-          parentSessionId: node.data.parentSessionId ?? queueParent.data.sessionId,
           queueParentId: queueParent.id,
           queueStarted: false,
         };
@@ -3269,9 +3268,10 @@ function App() {
         if (pendingImages.length) clearImages(fromId);
         return;
       }
-      const parentSessionId = queueParent?.data.sessionId ?? node.data.parentSessionId;
+      // STM P2: the queue parent already settled → just clear the queue flags; the fall-through send recomputes
+      // the base from the graph (materializeSendPlan reads the parent's FINAL session via the fork edge).
       const newNodes = nodesRef.current.map((n) => (n.id === boardId
-        ? { ...n, data: { ...n.data, queueParentId: undefined, queueStarted: undefined, ...(parentSessionId ? { parentSessionId } : {}) } }
+        ? { ...n, data: { ...n.data, queueParentId: undefined, queueStarted: undefined } }
         : n));
       setNodes(newNodes);
       nodesRef.current = newNodes;
@@ -3406,7 +3406,8 @@ function App() {
         data: {
           prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
           engine: boardEngine(parent.data),
-          parentSessionId: parent.data.sessionId,
+          // STM P2: no native base cached — the queued child dispatches through the parent's LIVE session
+          // (followup uses queueParent.sessionId at dispatch); a deferred dispatch recomputes from the graph.
           queueParentId: parentId,
           onSend, onFork, onStop, onCompact,
         },
@@ -3735,7 +3736,7 @@ function App() {
         data: {
           prompt: '', answer: '', status: 'idle', seq: seqRef.current++,
           engine: boardEngine(leaf.data),      // the queued child runs inside the parent's session → same engine
-          parentSessionId: leaf.data.sessionId, // the `session` event back-fills this if it isn't ready yet
+          // STM P2: no native base cached — dispatch uses the parent's LIVE session, or recomputes from the graph.
           queueParentId: leafId,
           onSend, onFork, onStop, onCompact,
         },
@@ -4353,12 +4354,8 @@ function App() {
   const queueFinishFields = useCallback((boardId: string): Partial<BoardData> => {
     const d = nodesRef.current.find((n) => n.id === boardId)?.data;
     if (!d?.queueParentId) return {};
-    const parentSessionId = d.parentSessionId ?? nodesRef.current.find((n) => n.id === d.queueParentId)?.data.sessionId;
-    return {
-      queueParentId: undefined,
-      queueStarted: undefined,
-      ...(parentSessionId ? { parentSessionId } : {}),
-    };
+    // STM P2: just clear the queue flags; the queued child no longer caches the parent's session.
+    return { queueParentId: undefined, queueStarted: undefined };
   }, []);
 
   // host → webview
@@ -4424,13 +4421,9 @@ function App() {
         }
         // session is board-level (same session across a board's turns) → no turnIndex routing.
         case 'session':
-          setNodes((ns) => ns.map((n) => {
-            if (n.id === m.boardId) return { ...n, data: { ...n.data, sessionId: m.sessionId } };
-            if (n.data.queueParentId === m.boardId && !n.data.parentSessionId) {
-              return { ...n, data: { ...n.data, parentSessionId: m.sessionId } };
-            }
-            return n;
-          }));
+          // STM P2: only the board's OWN sessionId is set here; queued children no longer cache the parent's
+          // session (dispatch reads it live / a deferred dispatch recomputes from the graph).
+          setNodes((ns) => ns.map((n) => (n.id === m.boardId ? { ...n, data: { ...n.data, sessionId: m.sessionId } } : n)));
           break;
         // M11: route streamed content to the right round (turnIndex) of a multi-turn board; single-turn
         // boards (no turns[]) patch the top level as before. status/sessionId/context are board-level.

@@ -287,3 +287,69 @@ describe('CodexAdapter permissions/requestApproval (profile grant)', () => {
     expect(h.getResponse()).toEqual({ permissions: {}, scope: 'turn' });
   });
 });
+
+// MCP elicitation (capability-layer P4, url mode): mcpServer/elicitation/request synthesizes an Elicitation
+// card, routes through neutral onElicit (consent → host opens URL), and replies with {action}. form mode is
+// deferred → a VALID decline (not invalid {}).
+describe('CodexAdapter mcpServer/elicitation/request (url mode)', () => {
+  function harness(reqParams: any, onElicit: (ask: any) => Promise<any>) {
+    let response: any;
+    const toolUses: any[] = [];
+    const a = new CodexAdapter({ resolveBinary: () => undefined, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {}, dispose: () => {},
+      request: async (method: string, _params: any) => {
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') return { thread: { id: 'T' } };
+        if (method === 'turn/start') {
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          response = await handlers.onServerRequest('mcpServer/elicitation/request', 11, reqParams);
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+    const sink: any = {
+      session: () => {}, model: () => {}, update: () => {}, thinking: () => {},
+      toolUse: (_b: string, _ti: number, ev: any) => toolUses.push(ev), toolResult: () => {},
+      rateLimit: () => {}, commands: () => {}, waiting: () => {}, task: () => {},
+      error: (_b: string, _ti: number | undefined, m: string) => { throw new Error(m); }, done: () => {},
+    };
+    const pre: any = {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async () => ({ allow: true }),
+      onUserInput: async () => ({ answers: {}, canceled: true }),
+      onElicit: (_b: string, _ti: number, ask: any) => onElicit(ask),
+    };
+    const ctl: any = { abort: new AbortController(), onLive: () => {} };
+    return { run: () => a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'hi', cwd: 'D:\\work' }, sink, pre, ctl), getResponse: () => response, toolUses };
+  }
+
+  it('accept → synthesizes the Elicitation card + replies action:accept', async () => {
+    let seen: any;
+    const h = harness(
+      { mode: 'url', url: 'https://auth.example/x', message: 'Authorize Foo', serverName: 'foo', elicitationId: 'el-1' },
+      async (ask) => { seen = ask; return { action: 'accept' }; },
+    );
+    await h.run();
+    expect(seen).toMatchObject({ toolUseId: 'el-1', mode: 'url', url: 'https://auth.example/x', serverName: 'foo' });
+    expect(h.toolUses.find((e) => e.name === 'Elicitation')?.input).toMatchObject({ url: 'https://auth.example/x', mode: 'url' });
+    expect(h.getResponse()).toEqual({ action: 'accept', content: null, _meta: null });
+  });
+
+  it('decline → replies action:decline', async () => {
+    const h = harness(
+      { mode: 'url', url: 'https://auth.example/x', message: 'Authorize Foo', elicitationId: 'el-2' },
+      async () => ({ action: 'decline' }),
+    );
+    await h.run();
+    expect(h.getResponse()).toEqual({ action: 'decline', content: null, _meta: null });
+  });
+
+  it('form mode (deferred) → a valid decline, never an invalid {}', async () => {
+    const h = harness({ mode: 'form', message: 'fill', requestedSchema: {} }, async () => ({ action: 'accept' }));
+    await h.run();
+    expect(h.getResponse()).toEqual({ action: 'decline', content: null, _meta: null });
+  });
+});
