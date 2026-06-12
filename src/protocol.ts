@@ -238,9 +238,9 @@ export type WebviewMessage =
   | { type: 'setConfig'; patch: Partial<BraidConfig> }
   // M7 gap3: ask the host for the active/last-focused file editor's selection (or whole file).
   | { type: 'getEditorContext' }
-  // Open a file referenced by a tool card (Read/Edit/Write/NotebookEdit) in a VS Code editor.
-  // `path` is taken verbatim from the tool's file_path input; the host resolves relative paths
-  // against the workspace root (the cwd used to spawn queries). `line` = 1-based caret line if known.
+  // Open a local path referenced by a tool card or rendered Markdown link. Files open in the host editor;
+  // directories are revealed/opened by the host. Relative paths resolve against the workspace root
+  // (the cwd used to spawn queries). `line` = 1-based caret line if known.
   | { type: 'openFile'; path: string; line?: number }
   // Composer autofill: pull this provider's slash-command list (host fetches via the active engine's
   // listSlashCommands, caches per cwd, replies with `slashCommands`). Sent once on mount.

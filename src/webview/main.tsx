@@ -7,7 +7,7 @@ import {
   type ReactFlowInstance, type Viewport,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github-dark.css';
@@ -25,6 +25,7 @@ import {
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
 import { relayoutAnchored, type LayoutDir } from './layout';
+import { markdownUrlTransform, parseLocalPathLink } from './localLinks';
 import type {
   HostMessage, WebviewMessage, McpServerInfo, BoardTag, SlashCommandSpec,
   EngineId, ProviderAccount, ProviderUsage, RateLimitSnapshot, ProviderCapabilitiesView,
@@ -60,10 +61,36 @@ function minimapNodeColor(n: Node): string {
 
 // Assistant output is Markdown; render it with GFM + highlight.js (class-based, CSP-safe).
 // memo'd because streaming re-renders the node on every delta — only re-parse when text changes.
+const markdownComponents: Components = {
+  a({ node: _node, href, children, ...props }) {
+    const local = parseLocalPathLink(href);
+    if (!local) return <a {...props} href={href}>{children}</a>;
+    return (
+      <a
+        {...props}
+        href={href}
+        title={`Open local path: ${local.path}`}
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          post({ type: 'openFile', path: local.path, line: local.line });
+        }}
+      >
+        {children}
+      </a>
+    );
+  },
+};
+
 const Markdown = React.memo(function Markdown({ text }: { text: string }) {
   return (
     <div className="md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeHighlight]}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeHighlight]}
+        components={markdownComponents}
+        urlTransform={markdownUrlTransform}
+      >
         {text}
       </ReactMarkdown>
     </div>
