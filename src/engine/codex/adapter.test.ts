@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { CodexAdapter, approvalAndSandbox, turnPermissionOverrides } from './adapter';
+import { CodexAdapter, approvalAndSandbox, codexCollaborationMode, turnPermissionOverrides } from './adapter';
 import { DEFAULT_PROVIDER_CONFIG } from '../../sdkOptions';
 
 // Fake transport: records requests; thread/fork returns the given turns. Lets us unit-test the
@@ -115,6 +115,19 @@ describe('turnPermissionOverrides', () => {
   });
 });
 
+describe('codexCollaborationMode', () => {
+  it('maps Braid permissionMode=plan to official Codex collaboration mode', () => {
+    expect(codexCollaborationMode({ ...DEFAULT_PROVIDER_CONFIG, permissionMode: 'plan', model: 'gpt-5.5', effort: 'max' })).toEqual({
+      mode: 'plan',
+      settings: { model: 'gpt-5.5', reasoning_effort: 'xhigh', developer_instructions: null },
+    });
+  });
+
+  it('omits collaboration mode outside plan mode', () => {
+    expect(codexCollaborationMode({ ...DEFAULT_PROVIDER_CONFIG, permissionMode: 'default' })).toBeUndefined();
+  });
+});
+
 describe('CodexAdapter.runTurn permission reload', () => {
   it('uses the latest permission mode for a queued follow-up turn', async () => {
     let permissionMode = 'default';
@@ -183,6 +196,86 @@ describe('CodexAdapter.runTurn permission reload', () => {
     expect(turnStarts[0].params.sandboxPolicy.type).toBe('workspaceWrite');
     expect(turnStarts[1].params.approvalPolicy).toBe('never');
     expect(turnStarts[1].params.sandboxPolicy).toEqual({ type: 'dangerFullAccess' });
+  });
+});
+
+describe('CodexAdapter.runTurn Codex Plan collaboration mode', () => {
+  function sink() {
+    return {
+      session: () => {}, model: () => {}, update: () => {}, thinking: () => {},
+      toolUse: () => {}, toolResult: () => {}, rateLimit: () => {}, commands: () => {}, waiting: () => {}, task: () => {},
+      error: (_boardId: string, _turnIndex: number | undefined, message: string) => { throw new Error(message); },
+      done: () => {},
+    };
+  }
+
+  function pre() {
+    return {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async () => ({ allow: true }),
+      onUserInput: async () => ({ answers: {}, canceled: true }),
+      onElicit: async () => ({ action: 'decline' }),
+    };
+  }
+
+  it('passes collaborationMode=plan to turn/start when permissionMode is plan', async () => {
+    const calls: { method: string; params: any }[] = [];
+    const a = new CodexAdapter({
+      resolveBinary: () => undefined,
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG, permissionMode: 'plan', model: 'gpt-5.5', effort: 'high' }),
+    });
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {}, dispose: () => {},
+      request: async (method: string, params: any) => {
+        calls.push({ method, params });
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') return { thread: { id: 'T' } };
+        if (method === 'turn/start') {
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+
+    await a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'plan', cwd: 'D:\\work' }, sink() as any, pre() as any, { abort: new AbortController(), onLive: () => {} } as any);
+
+    const turn = calls.find((c) => c.method === 'turn/start');
+    expect(turn?.params).toMatchObject({
+      approvalPolicy: 'on-request',
+      sandboxPolicy: { type: 'readOnly', networkAccess: false },
+      collaborationMode: { mode: 'plan', settings: { model: 'gpt-5.5', reasoning_effort: 'high', developer_instructions: null } },
+    });
+  });
+
+  it('retries without collaborationMode if the installed app-server rejects the experimental field', async () => {
+    const turnStarts: any[] = [];
+    const a = new CodexAdapter({
+      resolveBinary: () => undefined,
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG, permissionMode: 'plan' }),
+    });
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {}, dispose: () => {},
+      request: async (method: string, params: any) => {
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') return { thread: { id: 'T' } };
+        if (method === 'turn/start') {
+          turnStarts.push(params);
+          if (params.collaborationMode) throw new Error('unknown field collaborationMode');
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+
+    await a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'plan', cwd: 'D:\\work' }, sink() as any, pre() as any, { abort: new AbortController(), onLive: () => {} } as any);
+
+    expect(turnStarts).toHaveLength(2);
+    expect(turnStarts[0].collaborationMode).toMatchObject({ mode: 'plan' });
+    expect(turnStarts[1].collaborationMode).toBeUndefined();
   });
 });
 

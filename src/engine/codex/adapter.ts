@@ -63,6 +63,21 @@ export function turnPermissionOverrides(permissionMode: string, cwd: string): { 
   return { approvalPolicy, sandboxPolicy: sandboxPolicy(sandbox, cwd) };
 }
 
+/** Official Codex "Plan" is a collaboration mode, not just read-only sandboxing. Braid's existing
+ * permissionMode='plan' already means "plan before edits"; for Codex, also pass the app-server's hidden
+ * collaborationMode turn override so native plan-only tools such as request_user_input become available. */
+export function codexCollaborationMode(cfg: ProviderConfig): Record<string, unknown> | undefined {
+  if (cfg.permissionMode !== 'plan') return undefined;
+  return {
+    mode: 'plan',
+    settings: {
+      model: cfg.model || '',
+      reasoning_effort: codexEffort(cfg.effort) ?? null,
+      developer_instructions: null,
+    },
+  };
+}
+
 /** Codex ReasoningEffort set — map our effort, dropping 'max' (Codex tops out at xhigh) and unknowns. */
 function codexEffort(effort: string): string | undefined {
   const set = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
@@ -152,6 +167,11 @@ function asQuestions(v: unknown): UserInputQuestion[] {
 function isDynamicToolsUnsupported(e: any): boolean {
   const msg = String(e?.message ?? e ?? '').toLowerCase();
   return msg.includes('dynamictools') || msg.includes('dynamic_tools') || msg.includes('experimental');
+}
+
+function isCollaborationModeUnsupported(e: any): boolean {
+  const msg = String(e?.message ?? e ?? '').toLowerCase();
+  return msg.includes('collaborationmode') || msg.includes('collaboration_mode');
 }
 
 function isMissingRollout(e: any): boolean {
@@ -465,6 +485,17 @@ export class CodexAdapter implements Engine {
       // input carries the prompt + any pasted/dropped images (written to temp files as Codex localImages).
       let built = buildUserInput(turnPrompt, req.images);
       allTemps.push(...built.temps);
+      const startTurn = async (params: Record<string, unknown>): Promise<any> => {
+        try {
+          return await rpc!.request('turn/start', params);
+        } catch (e: any) {
+          if (!params.collaborationMode || !isCollaborationModeUnsupported(e)) throw e;
+          const retry = { ...params };
+          delete retry.collaborationMode;
+          console.warn('[Braid] codex collaborationMode unavailable; retrying turn without native Plan mode:', e?.message ?? e);
+          return rpc!.request('turn/start', retry);
+        }
+      };
       for (;;) {
         if (ctl.abort.signal.aborted) break;
         settled = false;
@@ -473,8 +504,10 @@ export class CodexAdapter implements Engine {
         const effort = codexEffort(turnCfg.effort);
         if (effort) turnParams.effort = effort;
         if (turnCfg.model) turnParams.model = turnCfg.model;
+        const collaborationMode = codexCollaborationMode(turnCfg);
+        if (collaborationMode) turnParams.collaborationMode = collaborationMode;
         const turnEnd = new Promise<void>((res) => { resolveTurnEnd = res; });
-        const started = await rpc.request('turn/start', turnParams).catch((e: any) => {
+        const started = await startTurn(turnParams).catch((e: any) => {
           if (settled) return null;
           if (ctl.abort.signal.aborted) { settle(false); return null; }
           sink.error(req.boardId, state.turnIndex, `Codex turn failed: ${e?.message ?? e}`);
