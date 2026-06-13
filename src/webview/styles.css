@@ -539,8 +539,6 @@ body {
 .btn:disabled:hover { background: var(--bg-deep); }
 .btn.collapse { color: #b7b4ff; border-color: #5b58a6; background: #25243a; }
 .btn.collapse:hover:not(:disabled) { background: #302f4a; color: var(--text); }
-.btn.archive { color: var(--muted); border-color: #58534d; background: #252423; }
-.btn.archive:hover:not(:disabled) { background: var(--bg-deep); border-color: var(--border); color: var(--text); }
 /* Graphical "+" pinned on a board's output handle to spawn a child conversation. Sibling of
    .board (outside its overflow:hidden), positioned against the React Flow node wrapper. */
 .board__add {
@@ -670,6 +668,8 @@ body {
   background: none; border: none; border-radius: 6px; padding: 7px 10px;
 }
 .ctxmenu__item:hover { background: var(--accent-2); color: #fff; }
+.ctxmenu__item:disabled { opacity: .45; cursor: default; color: var(--muted); }
+.ctxmenu__item:disabled:hover { background: none; color: var(--muted); }
 
 /* ---- Composer autofill menu (/ commands + @ files) ----
    Portal-rendered with position:fixed (set inline from the textarea rect), so it escapes the card's

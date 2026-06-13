@@ -3586,28 +3586,9 @@ function App() {
     () => selectedIds.filter((id) => !!byId[id]?.data.archived).length,
     [selectedIds, byId],
   );
-  const selectedActiveCount = selectedIds.length - selectedArchivedCount;
+  // Archive/restore live in the right-click context menu now (scope computed there); only this flag
+  // is still needed in the selection bar — to gate collapse/merge when archived boards are selected.
   const selectionHasArchived = selectedArchivedCount > 0;
-  const selectedActiveIds = useMemo(
-    () => selectedIds.filter((id) => byId[id] && !byId[id].data.archived),
-    [selectedIds, byId],
-  );
-  const selectedArchiveScopeIds = useMemo(
-    () => archiveScopeIds(nodes, edges, selectedActiveIds),
-    [nodes, edges, selectedActiveIds],
-  );
-  const selectedArchiveScopeBusyIds = useMemo(
-    () => selectedArchiveScopeIds.filter((id) => {
-      const s = byId[id]?.data.status;
-      return s === 'streaming' || s === 'waiting';
-    }),
-    [selectedArchiveScopeIds, byId],
-  );
-  const archiveScopeBusy = selectedArchiveScopeBusyIds.length > 0;
-  const selectedArchiveNewCount = useMemo(
-    () => selectedArchiveScopeIds.filter((id) => !byId[id]?.data.archived).length,
-    [selectedArchiveScopeIds, byId],
-  );
   // Ancestors of every selected board — their context is folded into a merge, so highlight them too.
   // Boundary-aware (M9) so the highlight matches what doMerge/computeMerge actually collect: a compact
   // node stops the walk (its summary replaces everything above), so those ancestors aren't highlighted.
@@ -5235,8 +5216,8 @@ function App() {
     hintNoteTimerRef.current = setTimeout(() => setHintNote(''), 3000);
   }, []);
 
-  const archiveSelected = useCallback(() => {
-    const selected = new Set(selectedIds);
+  const archiveSelected = useCallback((seedIds?: string[]) => {
+    const selected = new Set(seedIds ?? selectedIds);
     const ids = nodesRef.current
       .filter((n) => selected.has(n.id) && !n.data.archived)
       .map((n) => n.id);
@@ -5257,8 +5238,8 @@ function App() {
     showHint(`Archived ${archived.archivedIds.length} related board${archived.archivedIds.length === 1 ? '' : 's'}.`);
   }, [selectedIds, showHint]);
 
-  const restoreSelectedArchived = useCallback(() => {
-    const selected = new Set(selectedIds);
+  const restoreSelectedArchived = useCallback((seedIds?: string[]) => {
+    const selected = new Set(seedIds ?? selectedIds);
     const ids = nodesRef.current.filter((n) => selected.has(n.id) && n.data.archived).map((n) => n.id);
     if (!ids.length) return;
     const restored = restoreArchivedBoards(nodesRef.current, edgesRef.current, ids, showArchivedRef.current);
@@ -5273,10 +5254,11 @@ function App() {
     showHint(`Restored ${restored.restoredIds.length} related board${restored.restoredIds.length === 1 ? '' : 's'}.`);
   }, [selectedIds, showHint]);
 
-  // New conversation via canvas gestures (not just the toolbar button):
-  //  - double-click empty canvas → create immediately
-  //  - right-click empty canvas → a context menu offering "+ New conversation"
-  const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+  // Canvas context menu (right-click):
+  //  - empty pane → "+ New conversation"
+  //  - a board → Archive / Restore its whole related graph (boardId set)
+  // Plus: double-click empty canvas → create a new conversation immediately.
+  const [menu, setMenu] = useState<{ x: number; y: number; boardId?: string } | null>(null);
   // Right button does double duty: DRAG = pan the view, CLICK = context menu. We pan manually
   // over the whole canvas because React Flow tags every *draggable* node with `nopan`, so its
   // built-in d3-zoom refuses a right-drag that *starts on a board* (it bypasses that only for the
@@ -5304,13 +5286,22 @@ function App() {
     rp.lastY = e.clientY;
   }, []);
   // Wrapper-driven (NOT ReactFlow's onPaneContextMenu, which is swallowed under right-button pan).
-  // A right-drag that panned suppresses the menu (any target); a right-CLICK on the empty pane opens
-  // it. Non-pane clicks (boards/ChatView/toolbar) fall through to native behavior untouched.
+  // A right-drag that panned suppresses the menu (any target). A right-CLICK on a board opens the
+  // board menu (Archive / Restore); on the empty pane opens "+ New conversation". Form fields / links
+  // keep their native menu, and other surfaces (ChatView/toolbar/panels) fall through untouched.
   const onPaneContextMenu = useCallback((e: React.MouseEvent) => {
     const rp = rightPan.current;
     rightPan.current = null;
     if (rp?.moved) { e.preventDefault(); return; } // ended a right-drag pan → no menu
-    if (!(e.target as HTMLElement)?.classList?.contains('react-flow__pane')) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('textarea, input, select, a, button')) return; // keep native menu (paste / open link)
+    const nodeEl = target?.closest('.react-flow__node') as HTMLElement | null;
+    if (nodeEl?.dataset.id) {
+      e.preventDefault();
+      setMenu({ x: e.clientX, y: e.clientY, boardId: nodeEl.dataset.id });
+      return;
+    }
+    if (!target?.classList?.contains('react-flow__pane')) return;
     e.preventDefault();
     setMenu({ x: e.clientX, y: e.clientY });
   }, []);
@@ -5319,6 +5310,47 @@ function App() {
     if (!(e.target as HTMLElement)?.classList?.contains('react-flow__pane')) return;
     newConversation();
   }, [newConversation]);
+
+  // Context-menu entries derived from what was right-clicked. Empty pane → "+ New conversation".
+  // A board → Archive / Restore its whole related graph (the same scope + running-board guard the
+  // old selection-bar buttons used). Acts on the multi-selection when the board is part of it, else
+  // just that board. Both archive helpers re-expand to the related scope, so seeding one id is enough.
+  type MenuItem = { key: string; label: string; disabled?: boolean; title?: string; onClick: () => void };
+  const menuItems = useMemo<MenuItem[]>(() => {
+    if (!menu) return [];
+    if (!menu.boardId) {
+      return [{ key: 'new', label: '+ New conversation', onClick: () => { newConversation(); setMenu(null); } }];
+    }
+    const boardId = menu.boardId;
+    const targetIds = selectedIds.includes(boardId) ? selectedIds : [boardId];
+    const scope = archiveScopeIds(nodes, edges, targetIds);
+    if (!scope.length) return [];
+    const activeInScope = scope.filter((id) => !byId[id]?.data.archived);
+    const archivedInScope = scope.filter((id) => byId[id]?.data.archived);
+    const busy = scope.filter((id) => { const s = byId[id]?.data.status; return s === 'streaming' || s === 'waiting'; });
+    const plural = scope.length === 1 ? '' : 's';
+    const items: MenuItem[] = [];
+    if (activeInScope.length) {
+      items.push({
+        key: 'archive',
+        label: `Archive ${scope.length} related board${plural}`,
+        disabled: busy.length > 0,
+        title: busy.length
+          ? `${busy.length} board${busy.length === 1 ? ' is' : 's are'} still running in this graph`
+          : 'Hide this graph; restore it later',
+        onClick: () => { archiveSelected(targetIds); setMenu(null); },
+      });
+    }
+    if (archivedInScope.length) {
+      items.push({
+        key: 'restore',
+        label: `Restore ${scope.length} related board${plural}`,
+        title: 'Bring this archived graph back onto the canvas',
+        onClick: () => { restoreSelectedArchived(targetIds); setMenu(null); },
+      });
+    }
+    return items;
+  }, [menu, selectedIds, nodes, edges, byId, newConversation, archiveSelected, restoreSelectedArchived]);
 
   const attachState = useMemo<AttachState>(
     () => ({ get: (id) => attachByBoard[id] ?? { attachment: null, note: '' }, request: requestAttach, clear: clearAttach }),
@@ -5541,7 +5573,7 @@ function App() {
         <NoticePanel notices={notices} ongoing={ongoing} onOpen={openNotice} onClose={() => setNoticePanelOpen(false)} />
       )}
 
-      {menu && (
+      {menu && menuItems.length > 0 && (
         <>
           <div
             className="ctxmenu__backdrop"
@@ -5549,9 +5581,17 @@ function App() {
             onContextMenu={(e) => { e.preventDefault(); setMenu(null); }}
           />
           <div className="ctxmenu" style={{ left: menu.x, top: menu.y }}>
-            <button className="ctxmenu__item" onClick={() => { newConversation(); setMenu(null); }}>
-              + New conversation
-            </button>
+            {menuItems.map((it) => (
+              <button
+                key={it.key}
+                className="ctxmenu__item"
+                disabled={it.disabled}
+                title={it.title}
+                onClick={it.onClick}
+              >
+                {it.label}
+              </button>
+            ))}
           </div>
         </>
       )}
@@ -5579,61 +5619,39 @@ function App() {
         />
       )}
 
-      {selectedIds.length >= 1 && (
+      {selectedIds.length >= 2 && (
         <div className="mergebar">
           <span className="mergebar__count">
-            {selectedIds.length} board{selectedIds.length === 1 ? '' : 's'} selected
+            {selectedIds.length} boards selected
             {selectedArchivedCount > 0 && ` (${selectedArchivedCount} archived)`}
-            {selectedArchiveNewCount > selectedActiveCount && ` (${selectedArchiveNewCount} related boards will archive)`}
-            {selectedIds.length >= 2 && !selectionHasArchived && mLeaves.length < selectedIds.length &&
+            {!selectionHasArchived && mLeaves.length < selectedIds.length &&
               ` (${selectedIds.length - mLeaves.length} are ancestors, folded into the context automatically)`}
           </span>
-          {selectedActiveCount > 0 && (
-            <button
-              className="btn archive"
-              onClick={archiveSelected}
-              disabled={archiveScopeBusy}
-              title={archiveScopeBusy ? 'Let every running board in this related graph finish before archiving' : `Archive related graph (${selectedArchiveNewCount} boards)`}
-            >
-              Archive
-            </button>
-          )}
-          {selectedArchivedCount > 0 && (
-            <button className="btn archive" onClick={restoreSelectedArchived} title="Restore selected archived boards">
-              Restore
-            </button>
-          )}
-          {selectedIds.length >= 2 && (
-            <button
-              className="btn collapse"
-              onClick={collapseSelected}
-              disabled={selectionBusy || selectionHasArchived || !collapsePlans.length}
-              title={collapsePlans.length && !selectionHasArchived ? 'Collapse this ancestor span; boards between selections are included' : 'Collapse requires one visible ancestor line with a single last board'}
-            >
-              Collapse span
-            </button>
-          )}
-          {selectedIds.length >= 2 && mLeaves.length >= 2 && !selectionBusy && !selectionHasArchived && (
+          <button
+            className="btn collapse"
+            onClick={collapseSelected}
+            disabled={selectionBusy || selectionHasArchived || !collapsePlans.length}
+            title={collapsePlans.length && !selectionHasArchived ? 'Collapse this ancestor span; boards between selections are included' : 'Collapse requires one visible ancestor line with a single last board'}
+          >
+            Collapse span
+          </button>
+          {mLeaves.length >= 2 && !selectionBusy && !selectionHasArchived && (
             <button className="btn merge" onClick={doMerge}>Merge context - new conversation</button>
           )}
-          {archiveScopeBusy && selectedActiveCount > 0 ? (
-            <span className="mergebar__count mergebar__warn">
-              This related graph has {selectedArchiveScopeBusyIds.length} running board{selectedArchiveScopeBusyIds.length === 1 ? '' : 's'}; archive is blocked.
-            </span>
-          ) : selectionBusy ? (
+          {selectionBusy ? (
             <span className="mergebar__count mergebar__warn">
               A selected board is still working. Let it finish, or Stop its wait, before graph actions.
             </span>
-          ) : selectionHasArchived && selectedIds.length >= 2 ? (
+          ) : selectionHasArchived ? (
             <span className="mergebar__count mergebar__warn">
               Restore archived boards before merge or collapse.
             </span>
-          ) : selectedIds.length >= 2 && mLeaves.length < 2 ? (
+          ) : mLeaves.length < 2 ? (
             <span className="mergebar__count mergebar__warn">
               Merge needs boards from different branches.
             </span>
           ) : null}
-          {selectedIds.length >= 2 && !collapsePlans.length && !selectionBusy && !selectionHasArchived && (
+          {!collapsePlans.length && !selectionBusy && !selectionHasArchived && (
             <span className="mergebar__count mergebar__warn">
               Collapse needs one ancestor line with a single last board.
             </span>
