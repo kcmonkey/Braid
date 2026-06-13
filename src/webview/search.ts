@@ -42,6 +42,7 @@ export interface BoardMatch {
   weight: number;
   termsMatched: number;      // # distinct free terms found (constant under token-AND, kept for OR-future + clarity)
   snippetSource: string;     // text of the best matched segment, to snippet from
+  snippetSources: Array<{ field: SearchField; text: string }>;
 }
 
 export interface Snippet {
@@ -65,6 +66,7 @@ export interface SearchHit {
   field: SearchField;
   termsMatched: number;
   snippet: Snippet;
+  snippets: Array<{ field: SearchField; snippet: Snippet }>;
   prompt: string;            // result-row title (the board's question)
   kind: BoardKind;
   engine: string;
@@ -74,6 +76,17 @@ export interface SearchHit {
 }
 
 const FILTER_KEYS = new Set(['tag', 'engine', 'status', 'is']);
+
+const DISPLAY_ORDER: Record<SearchField, number> = {
+  prompt: 0,
+  answer: 1,
+  summary: 2,
+  tags: 3,
+  steps: 4,
+  branchSummary: 5,
+  compactSummary: 6,
+  mergeContext: 7,
+};
 
 // Split a raw query into free terms + `field:value` filters. Unknown `field:` prefixes are kept as
 // LITERAL terms (strict & predictable — no silent reinterpretation). Everything lowercased.
@@ -115,17 +128,18 @@ function stepText(s: ToolStep): string {
   return parts.join(' ');
 }
 
-// Weighted searchable segments for a board. `prompt`/`answer` always exist (authoritative); `turns[]`
-// adds each fused round's Q/A so a multi-round board matches text in a non-first round; summaries/tags/
-// steps add weight but never replace the full Q/A (digests are lossy / may be stale). Empty fields skipped.
+// Weighted searchable segments for a board. Single-turn boards use top-level prompt/answer; multi-turn
+// boards use turns[] for each round's Q/A so follow-up questions stay prompt hits instead of being
+// misread from the flattened answer. Summaries/tags/steps are weaker hints. Empty fields skipped.
 export function boardSearchText(d: BoardData): SearchSegment[] {
   const segs: SearchSegment[] = [];
   const push = (text: string | undefined, field: SearchField) => {
     if (text && text.trim()) segs.push({ text, field, weight: WEIGHT[field] });
   };
+  const turns = d.turns ?? [];
   push(d.prompt, 'prompt');
-  push(d.answer, 'answer');
-  for (const t of d.turns ?? []) {
+  if (turns.length === 0) push(d.answer, 'answer');
+  for (const t of turns) {
     push(t.prompt, 'prompt');
     push(t.answer, 'answer');
     for (const s of t.steps ?? []) push(stepText(s), 'steps');
@@ -151,6 +165,30 @@ function bestByWeight(segs: SearchSegment[]): SearchSegment | undefined {
   return best;
 }
 
+function segmentMatchesAnyTerm(s: SearchSegment, terms: string[]): boolean {
+  const low = s.text.toLowerCase();
+  return terms.some((t) => low.includes(t));
+}
+
+function orderedSnippetSources(segs: SearchSegment[], fallback?: SearchSegment): Array<{ field: SearchField; text: string }> {
+  const ranked = segs
+    .map((s, i) => ({ s, i }))
+    .sort((a, b) =>
+      DISPLAY_ORDER[a.s.field] - DISPLAY_ORDER[b.s.field] ||
+      b.s.weight - a.s.weight ||
+      a.i - b.i,
+    );
+  const seen = new Set<SearchField>();
+  const out: Array<{ field: SearchField; text: string }> = [];
+  for (const { s } of ranked) {
+    if (seen.has(s.field)) continue;
+    seen.add(s.field);
+    out.push({ field: s.field, text: s.text });
+  }
+  if (!out.length && fallback) out.push({ field: fallback.field, text: fallback.text });
+  return out;
+}
+
 // Does this board satisfy the query? Returns the best matched segment (for ranking + snippet), or null.
 // Filters are AND across keys and AND within a key's values; free terms are token-AND substring.
 export function matchBoard(q: SearchQuery, d: BoardData): BoardMatch | null {
@@ -165,7 +203,14 @@ export function matchBoard(q: SearchQuery, d: BoardData): BoardMatch | null {
   if (q.terms.length === 0) {
     if (!hasAnyFilter(q)) return null;               // a truly empty query matches nothing
     const best = bestByWeight(segs);
-    return { field: best?.field ?? 'prompt', weight: best?.weight ?? 0, termsMatched: 0, snippetSource: best?.text ?? d.prompt ?? '' };
+    const snippetSource = best?.text ?? d.prompt ?? '';
+    return {
+      field: best?.field ?? 'prompt',
+      weight: best?.weight ?? 0,
+      termsMatched: 0,
+      snippetSource,
+      snippetSources: best ? [{ field: best.field, text: best.text }] : [{ field: 'prompt', text: snippetSource }],
+    };
   }
 
   const combined = segs.map((s) => s.text).join('\n').toLowerCase();
@@ -173,14 +218,17 @@ export function matchBoard(q: SearchQuery, d: BoardData): BoardMatch | null {
 
   // Best matched segment = highest-weight segment that contains ANY term (ties → first / highest weight).
   let best: SearchSegment | undefined;
-  for (const s of segs) {
-    const low = s.text.toLowerCase();
-    if (!q.terms.some((t) => low.includes(t))) continue;
-    if (!best || s.weight > best.weight) best = s;
-  }
+  const matched = segs.filter((s) => segmentMatchesAnyTerm(s, q.terms));
+  for (const s of matched) if (!best || s.weight > best.weight) best = s;
   const termsMatched = q.terms.filter((t) => combined.includes(t)).length;
   const chosen = best ?? bestByWeight(segs);
-  return { field: chosen?.field ?? 'prompt', weight: chosen?.weight ?? 0, termsMatched, snippetSource: chosen?.text ?? d.prompt ?? '' };
+  return {
+    field: chosen?.field ?? 'prompt',
+    weight: chosen?.weight ?? 0,
+    termsMatched,
+    snippetSource: chosen?.text ?? d.prompt ?? '',
+    snippetSources: orderedSnippetSources(matched, chosen),
+  };
 }
 
 // Parse → match every board → rank. Deterministic: best-segment weight, then # terms matched, then
@@ -192,12 +240,15 @@ export function rankResults(nodes: BoardNodeT[], raw: string): SearchHit[] {
   for (const n of nodes) {
     const m = matchBoard(q, n.data);
     if (!m) continue;
+    const snippets = (m.snippetSources.length ? m.snippetSources : [{ field: m.field, text: m.snippetSource }])
+      .map((s) => ({ field: s.field, snippet: extractSnippet(s.text, q.terms) }));
     hits.push({
       id: n.id,
       score: m.weight,
       field: m.field,
       termsMatched: m.termsMatched,
-      snippet: extractSnippet(m.snippetSource, q.terms),
+      snippet: snippets[0]?.snippet ?? extractSnippet(m.snippetSource, q.terms),
+      snippets,
       prompt: n.data.prompt ?? '',
       kind: boardKind(n.data),
       engine: boardEngine(n.data),

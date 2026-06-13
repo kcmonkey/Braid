@@ -13,11 +13,12 @@ import { FileGraphStore, resolveGraphFallback } from './persistence/graphStore';
 import type { Canvas } from './persistence/graphStore';
 import { toCapabilitiesView } from './engine/capabilities';
 import { PROVIDER_CATALOG } from './protocol';
-import type { EngineId, ProviderCapabilitiesView, ProviderAccount, UserInputAsk, UserInputAnswer, ElicitOutcome } from './protocol';
+import type { EngineId, ProviderCapabilitiesView, ProviderAccount, UserInputAsk, UserInputAnswer, ElicitOutcome, ModelOption } from './protocol';
 import { sdkInstallDir, loadManifest, isProvisioned, readCurrentVersion, resolveSdkEntry, resolveClaudeBinaryFromEntry } from './runtime/sdk-provision';
 import { resolveCodexBinary } from './runtime/codex-bin';
 import { ensureSdkInstalled } from './runtime/sdk-download';
 import type { EventSink, PreToolInterceptor, PreToolDecision, PermissionVerdict, TurnRequest, Attach, TurnHandle, McpController, AccountController, CompactResult } from './engine/types';
+import { withModelFallback } from './engine/modelCatalog';
 
 // ---- Multi-canvas model (M5) ----
 // Each Canvas = its own editor-area webview panel + its own persisted graph. The Activity Bar tree lists
@@ -240,6 +241,7 @@ const acctKey = (canvasId: string, provider: EngineId) => `${canvasId}::${provid
 // cwd is fixed = workspaceFolders[0]. Live commands_changed refreshes replace the current canvas provider's
 // entry (see makeSink.commands).
 const slashCommandsCache = new Map<EngineId, SlashCommandSpec[]>();
+const modelOptionsCache = new Map<EngineId, ModelOption[]>();
 
 // Where a runtime-provisioned SDK lives (globalStorage/sdk). Set in activate() once we have the
 // extension context; read lazily by the engine's SDK loader. Undefined until activate → dev/F5 falls
@@ -312,6 +314,7 @@ const ACCOUNT_POLL_TRIES = 4;         // account/usage poll attempts (plan-limit
 const ACCOUNT_POLL_INTERVAL_MS = 2000; // ms between account usage polls
 const FOLLOWUP_GRACE_MS = 1000;       // M11: keep a streaming-input query open this long after a turn
                                       // settles (queue empty) so an in-flight `followup` isn't dropped
+const ABORT_INTERRUPT_GRACE_MS = 500; // Stop: try graceful interrupt briefly, then fire the hard abort.
 
 let treeProvider: CanvasTreeProvider;
 
@@ -349,6 +352,7 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.workspace.onDidChangeConfiguration((e) => {
       if (!e.affectsConfiguration('braid')) return;
       for (const id of panels.keys()) retireLiveRunsForCanvas(id);
+      modelOptionsCache.clear();
       void pushConfig();
     }),
   );
@@ -699,10 +703,19 @@ async function handleMessage(msg: WebviewMessage, context: vscode.ExtensionConte
       // over the already-open stdin pipe → the engine emits a `result` right away → the adapter settles the
       // board to 'done' (partial kept). Firing only the AbortController instead waits for the subprocess
       // stream to actually close before the for-await loop ends/settles — the couple-second lag the user
-      // sees. Interrupt first (for the immediate settle), then abort to release the subprocess + maps.
+      // sees. Interrupt first (for the immediate settle), but never let a stuck interrupt block hard abort.
       const h = liveQueries.get(k);
-      if (h) { try { await h.interrupt(); } catch { /* fall through to hard abort */ } }
+      if (h) {
+        const graceful = h.interrupt().catch((e: any) => console.error('[Braid] interrupt failed:', e?.message ?? e));
+        await Promise.race([
+          graceful,
+          new Promise<void>((resolve) => setTimeout(resolve, ABORT_INTERRUPT_GRACE_MS)),
+        ]);
+      }
       aborters.get(k)?.abort();
+      // Hard-stop fallback: if the engine/control request is wedged, closing the live input stream gives the
+      // adapter another path to unwind instead of leaving the board visibly stuck after Stop.
+      if (h) void h.dispose().catch((e: any) => console.error('[Braid] abort dispose failed:', e?.message ?? e));
       aborters.delete(k);
       break;
     }
@@ -1084,7 +1097,7 @@ function restoreRolledBackFiles(canvasId: string, boardIds: string[]) {
 }
 
 // The provider-NEUTRAL canvas keys (kept as flat `braid.*` settings, outside the provider hierarchy).
-const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'autoCollapseEnabled', 'autoCollapseLinearThreshold', 'autoCollapseBranchThreshold', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin', 'warmSessionEnabled', 'warmSessionIdleCapMin', 'warmSessionMax'];
+const CANVAS_KEYS: (keyof CanvasConfig)[] = ['autoCompactEnabled', 'autoCompactThreshold', 'autoCollapseEnabled', 'autoCollapseThreshold', 'autoCollapseLeeway', 'expandAncestorsOnSelect', 'asyncContinuationEnabled', 'asyncContinuationIdleCapMin', 'warmSessionEnabled', 'warmSessionIdleCapMin', 'warmSessionMax'];
 
 /** Read the legacy flat `braid.*` provider keys (pre-multi-provider). Fallbacks reproduce the OLD package.json
  * per-key defaults (effort 'xhigh', thinking 'adaptive', …) so an unconfigured install migrates to identical
@@ -1125,8 +1138,11 @@ function readSettings(canvasId?: string): BraidSettings {
     autoCompactEnabled: c.get<boolean>('autoCompactEnabled', DEFAULT_CANVAS_CONFIG.autoCompactEnabled),
     autoCompactThreshold: c.get<number>('autoCompactThreshold', DEFAULT_CANVAS_CONFIG.autoCompactThreshold),
     autoCollapseEnabled: c.get<boolean>('autoCollapseEnabled', DEFAULT_CANVAS_CONFIG.autoCollapseEnabled),
-    autoCollapseLinearThreshold: c.get<number>('autoCollapseLinearThreshold', DEFAULT_CANVAS_CONFIG.autoCollapseLinearThreshold),
-    autoCollapseBranchThreshold: c.get<number>('autoCollapseBranchThreshold', DEFAULT_CANVAS_CONFIG.autoCollapseBranchThreshold),
+    autoCollapseThreshold: c.get<number>(
+      'autoCollapseThreshold',
+      c.get<number>('autoCollapseLinearThreshold', DEFAULT_CANVAS_CONFIG.autoCollapseThreshold),
+    ),
+    autoCollapseLeeway: c.get<number>('autoCollapseLeeway', DEFAULT_CANVAS_CONFIG.autoCollapseLeeway),
     expandAncestorsOnSelect: c.get<boolean>('expandAncestorsOnSelect', DEFAULT_CANVAS_CONFIG.expandAncestorsOnSelect),
     asyncContinuationEnabled: c.get<boolean>('asyncContinuationEnabled', DEFAULT_CANVAS_CONFIG.asyncContinuationEnabled),
     asyncContinuationIdleCapMin: c.get<number>('asyncContinuationIdleCapMin', DEFAULT_CANVAS_CONFIG.asyncContinuationIdleCapMin),
@@ -1151,13 +1167,34 @@ function readConfigView(canvasId?: string): BraidConfig {
   return { ...(s.providers[s.activeProvider] ?? DEFAULT_PROVIDER_CONFIG), ...s.canvas };
 }
 
-/** Capability views for every *implemented* (registered) provider — drives the webview's provider spine +
- * capability gating. Unbuilt catalog providers have no engine, so they're absent (UI shows them disabled). */
-async function readCapabilities(): Promise<Partial<Record<EngineId, ProviderCapabilitiesView>>> {
+/** Cached live model list for the active provider, merged with fallback metadata and the configured model. */
+async function providerModelOptions(provider: EngineId, cwd: string, currentModel: string | undefined): Promise<ModelOption[]> {
+  let models = modelOptionsCache.get(provider);
+  if (!models) {
+    try {
+      models = await engineHost.get(provider).listModels(cwd);
+    } catch (e: any) {
+      console.error(`[Braid] model list for '${provider}' failed:`, e?.message ?? e);
+      models = [];
+    }
+    modelOptionsCache.set(provider, models);
+  }
+  return withModelFallback(provider, models, currentModel);
+}
+
+/** Capability views for registered providers. The active provider's model list is refreshed from its engine. */
+async function readCapabilities(activeForModels?: EngineId, settings: BraidSettings = readSettings()): Promise<Partial<Record<EngineId, ProviderCapabilitiesView>>> {
   const caps: Partial<Record<EngineId, ProviderCapabilitiesView>> = {};
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
   for (const p of PROVIDER_CATALOG) {
     if (p.implemented && engineHost.has(p.id)) {
-      try { caps[p.id] = await toCapabilitiesView(engineHost.get(p.id)); }
+      try {
+        const view = await toCapabilitiesView(engineHost.get(p.id));
+        if (p.id === activeForModels) {
+          view.models = await providerModelOptions(p.id, cwd, settings.providers[p.id]?.model);
+        }
+        caps[p.id] = view;
+      }
       catch (e: any) { console.error(`[Braid] capabilities for '${p.id}' failed:`, e?.message ?? e); }
     }
   }
@@ -1171,8 +1208,9 @@ async function pushConfig(canvasId?: string) {
     return;
   }
   const config = readConfigView(canvasId);
-  const activeProvider = readSettings(canvasId).activeProvider;
-  const capabilities = await readCapabilities();
+  const settings = readSettings(canvasId);
+  const activeProvider = settings.activeProvider;
+  const capabilities = await readCapabilities(activeProvider, settings);
   const msg = { type: 'config' as const, config, activeProvider, capabilities };
   postTo(canvasId, msg);
 }
@@ -1324,6 +1362,7 @@ async function clearApiKey(context: vscode.ExtensionContext, provider: EngineId)
 /** After any key/mode change: rebroadcast config (authMethod may have flipped) + key status to every canvas. */
 async function afterApiKeyChange() {
   for (const id of panels.keys()) retireLiveRunsForCanvas(id);
+  modelOptionsCache.clear();
   await pushConfig();
   for (const id of panels.keys()) pushApiKeyStatus(id);
 }
@@ -1419,6 +1458,7 @@ async function accountAuth(canvasId: string, action: 'in' | 'out', provider: Eng
   } finally {
     accountAuthAborts.delete(key);
   }
+  modelOptionsCache.delete(provider);
   // The control session was spawned BEFORE this auth change, so its identity view is now stale. Recreate it
   // so the refresh reflects reality (sign-out → "not signed in"; sign-in → identity).
   if (accountControls.get(key) === ctrl && panels.has(canvasId)) {
@@ -1450,9 +1490,7 @@ function makeSink(canvasId: string, provider?: EngineId): EventSink {
     toolResult: (boardId, turnIndex, ev) => postTo(canvasId, { type: 'toolResult', boardId, turnIndex, toolUseId: ev.toolUseId, content: ev.content, isError: ev.isError }),
     done: (boardId, turnIndex, d) => postTo(canvasId, { type: 'done', boardId, turnIndex, sessionId: d.sessionId, messageUuid: d.messageUuid, isError: d.isError, text: d.text, thinking: d.thinking, thinks: d.thinks, contextTokens: d.contextTokens, contextWindow: d.contextWindow, autoCompacted: d.autoCompacted }),
     error: (boardId, turnIndex, message) => postTo(canvasId, { type: 'error', boardId, turnIndex, message }),
-    rateLimit: (snapshot) => {
-      if (!provider || canvasActiveProvider(canvasId) === provider) postTo(canvasId, { type: 'rateLimit', snapshot });
-    },
+    rateLimit: (snapshot) => postTo(canvasId, { type: 'rateLimit', snapshot }),
     // Live slash-command refresh (commands_changed) → update the host cache + push to this canvas. The
     // cold-start list is served by the getSlashCommands handler (Phase 2).
     commands: (commands) => {
@@ -1690,6 +1728,7 @@ async function runSend(msg: Extract<WebviewMessage, { type: 'send' }>, canvasId:
     boardId: msg.boardId,
     attach: toAttach(msg),
     prompt: msg.prompt,
+    nativeFallbackPrompt: msg.nativeFallbackPrompt,
     images: msg.images,
     turnIndex: msg.turnIndex,
     cwd,

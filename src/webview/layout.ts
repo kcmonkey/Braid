@@ -61,23 +61,40 @@ function layoutComponent(comp: BoardNodeT[], edges: Edge[], dir: LayoutDir): Map
   g.setGraph({ rankdir: dir, nodesep: 60, ranksep: 90 });
   g.setDefaultEdgeLabel(() => ({}));
   const ids = new Set(comp.map((n) => n.id));
+  const visibleIncoming = new Set<string>();
+  const layoutIds = new Set<string>(ids);
+  const virtualSize = new Map<string, { width: number; height: number }>();
   for (const n of comp) {
     const { width, height } = sizeOf(n);
     g.setNode(n.id, { width, height });
   }
   for (const e of edges) {
-    if (ids.has(e.source) && ids.has(e.target)) g.setEdge(e.source, e.target);
+    if (e.hidden || !ids.has(e.source) || !ids.has(e.target)) continue;
+    visibleIncoming.add(e.target);
+    g.setEdge(e.source, e.target);
+  }
+  for (const n of comp) {
+    const foldedCount = n.data.collapsedGraph?.hiddenIds.length ?? 0;
+    if (!foldedCount || visibleIncoming.has(n.id)) continue;
+    // A root-prefix collapse hides every real predecessor of the representative. Add a layout-only
+    // upstream rank so dagre does not pull the collapsed representative back to the graph root.
+    const virtualId = `__folded_root__:${n.id}`;
+    layoutIds.add(virtualId);
+    virtualSize.set(virtualId, { width: 1, height: 1 });
+    g.setNode(virtualId, { width: 1, height: 1 });
+    g.setEdge(virtualId, n.id);
   }
   dagre.layout(g);
 
   // dagre returns node centers; convert to top-left, then normalize so the component's min corner is (0,0).
   let minX = Infinity, minY = Infinity;
   const tl = new Map<string, { x: number; y: number }>();
-  for (const n of comp) {
-    const p = g.node(n.id);
-    const { width, height } = sizeOf(n);
+  for (const id of layoutIds) {
+    const p = g.node(id);
+    const nodeSize = virtualSize.get(id);
+    const { width, height } = nodeSize ?? sizeOf(comp.find((n) => n.id === id)!);
     const x = p.x - width / 2, y = p.y - height / 2;
-    tl.set(n.id, { x, y });
+    if (ids.has(id)) tl.set(id, { x, y });
     if (x < minX) minX = x;
     if (y < minY) minY = y;
   }

@@ -3,6 +3,7 @@ import { DeepSeekAdapter } from './adapter';
 import { unpackDeepSeekSession } from './session';
 import { DEFAULT_PROVIDER_CONFIG, type ProviderConfig } from '../../sdkOptions';
 import type { Attach, EventSink, PreToolInterceptor, TurnRequest } from '../types';
+import { PROVIDER_CATALOG } from '../../protocol';
 
 const cfg: ProviderConfig = {
   ...DEFAULT_PROVIDER_CONFIG,
@@ -122,5 +123,44 @@ describe('DeepSeekAdapter.runTurn', () => {
     await adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: () => {} });
     expect(fetched).toBe(false);
     expect(calls).toEqual([{ t: 'error', b: 'b1', ti: 0, m: expect.stringContaining('DeepSeek API key is not configured') }]);
+  });
+});
+
+describe('DeepSeekAdapter.listModels', () => {
+  it('loads models from the standalone DeepSeek /models endpoint and applies fallback metadata', async () => {
+    const urls: string[] = [];
+    const adapter = new DeepSeekAdapter({
+      readProviderConfig: () => cfg,
+      getApiKey: () => 'sk-deepseek-test',
+      fetchImpl: async (url) => {
+        urls.push(String(url));
+        return new Response(JSON.stringify({
+          data: [
+            { id: 'deepseek-v4-pro' },
+            { id: 'deepseek-v4-flash' },
+          ],
+        }), { status: 200 });
+      },
+    });
+
+    await expect(adapter.listModels('/w')).resolves.toEqual([
+      { value: '', label: 'Default model', contextWindow: 1_000_000 },
+      { value: 'deepseek-v4-pro', label: 'V4 Pro', contextWindow: 1_000_000 },
+      { value: 'deepseek-v4-flash', label: 'V4 Flash', contextWindow: 1_000_000 },
+    ]);
+    expect(urls).toEqual(['https://api.deepseek.com/models']);
+  });
+
+  it('falls back to the catalog when no API key is configured', async () => {
+    let fetched = false;
+    const adapter = new DeepSeekAdapter({
+      readProviderConfig: () => cfg,
+      getApiKey: () => undefined,
+      fetchImpl: async () => { fetched = true; return new Response('{}'); },
+    });
+
+    const models = await adapter.listModels('/w');
+    expect(fetched).toBe(false);
+    expect(models).toEqual(PROVIDER_CATALOG.find((p) => p.id === 'deepseek')!.models);
   });
 });

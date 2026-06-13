@@ -8,7 +8,7 @@ import type {
   McpController, AccountController, CompactCap, CompactRequest, CompactResult, SummarizeRequest, AuthResult,
   BranchSummarizeRequest, CollapseDigestRequest, PermissionVerdict,
 } from '../types';
-import type { ProviderAccount, SlashCommandSpec, EngineId, ImageInput, UserInputQuestion } from '../../protocol';
+import type { ProviderAccount, SlashCommandSpec, EngineId, ImageInput, UserInputQuestion, ModelOption } from '../../protocol';
 import { PROVIDER_CATALOG, TAG_VOCAB } from '../../protocol';
 import { CodexRpc } from './transport';
 import {
@@ -16,6 +16,7 @@ import {
 } from './reduce';
 import { CodexMcpControl, CodexAccountControl, codexSkillsToSlashCommands } from './control';
 import { parseAskUserQuestions, userInputReason } from '../../webview/merge';
+import { withModelFallback } from '../modelCatalog';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -28,6 +29,8 @@ export interface CodexAdapterDeps {
 }
 
 const CLIENT_INFO = { name: 'braid', title: 'Braid', version: '0.1' };
+const APP_SERVER_ARGS = ['app-server'];
+const APP_SERVER_ARGS_WITH_HOOK_TRUST = ['--dangerously-bypass-hook-trust', 'app-server'];
 const BRAID_ASK_TOOL_NAMESPACE = 'braid';
 const BRAID_ASK_TOOL_NAME = 'AskUserQuestion';
 
@@ -151,6 +154,16 @@ function isDynamicToolsUnsupported(e: any): boolean {
   return msg.includes('dynamictools') || msg.includes('dynamic_tools') || msg.includes('experimental');
 }
 
+function isMissingRollout(e: any): boolean {
+  const msg = String(e?.message ?? e ?? '').toLowerCase();
+  return msg.includes('no rollout found') && msg.includes('thread');
+}
+
+function isAppServerStartupFailure(e: any): boolean {
+  const msg = String(e?.message ?? e ?? '').toLowerCase();
+  return msg.includes('app-server exited') || msg.includes('unexpected argument') || msg.includes('unknown option') || msg.includes('found argument');
+}
+
 export class CodexAdapter implements Engine {
   readonly id = 'codex' as const;
   // No warm-session reuse: this adapter closes the thread when the queue drains and its `push` ignores the
@@ -169,15 +182,55 @@ export class CodexAdapter implements Engine {
     // thread/rollback only trims the turn LIST, not the rollout the model is fed (probe-verified, knowledge.md).
     // So the webview must NOT share one Codex thread across boards: every board forks its own, keeping each
     // thread = exactly its own ancestry. (Codex branching bug, 2026-06-12)
-    return { fork: 'native', steer: true, reasoning: true, routedFollowups: false, images: true, midpointFork: false, models: codex?.models ?? [] };
+    return { fork: 'native', steer: true, reasoning: true, routedFollowups: false, images: true, midpointFork: false, textReplayFallback: true, models: codex?.models ?? [] };
   }
 
   /** Open a connected app-server: spawn + `initialize` handshake + `initialized`. Caller disposes. */
-  private async open(cwd: string, handlers: { onNotification?: (m: string, p: any) => void; onServerRequest?: (m: string, id: any, p: any) => Promise<any> | any }): Promise<CodexRpc> {
-    const rpc = new CodexRpc({ bin: this.bin(), cwd, ...handlers });
-    await rpc.request('initialize', { clientInfo: CLIENT_INFO, capabilities: { experimentalApi: true } }, 20_000);
-    rpc.notify('initialized', {});
-    return rpc;
+  private async open(cwd: string, handlers: { onNotification?: (m: string, p: any) => void; onServerRequest?: (m: string, id: any, p: any) => Promise<any> | any; onExit?: (code: number | null) => void }): Promise<CodexRpc> {
+    const start = async (args: string[]): Promise<CodexRpc> => {
+      const rpc = new CodexRpc({ bin: this.bin(), cwd, args, ...handlers });
+      try {
+        await rpc.request('initialize', { clientInfo: CLIENT_INFO, capabilities: { experimentalApi: true } }, 20_000);
+        rpc.notify('initialized', {});
+        return rpc;
+      } catch (e) {
+        try { rpc.dispose(); } catch { /* ignore */ }
+        throw e;
+      }
+    };
+    try {
+      // Braid embeds Codex without a TUI `/hooks` review flow. Use Codex's automation flag so enabled
+      // hooks can run through app-server, and fall back for older app-server builds.
+      return await start(APP_SERVER_ARGS_WITH_HOOK_TRUST);
+    } catch (e) {
+      if (!isAppServerStartupFailure(e)) throw e;
+      console.warn('[Braid] codex app-server does not accept --dangerously-bypass-hook-trust; continuing without hook trust bypass:', (e as any)?.message ?? e);
+      return start(APP_SERVER_ARGS);
+    }
+  }
+
+  private async reportHooks(rpc: CodexRpc, cwd: string): Promise<void> {
+    try {
+      const res: { data?: any[] } = await rpc.request('hooks/list', { cwds: [cwd] }, 10_000);
+      for (const entry of Array.isArray(res?.data) ? res.data : []) {
+        for (const warning of Array.isArray(entry?.warnings) ? entry.warnings : []) {
+          console.warn('[Braid] codex hook warning:', warning);
+        }
+        for (const err of Array.isArray(entry?.errors) ? entry.errors : []) {
+          console.error('[Braid] codex hook config error:', err?.path ? `${err.path}: ${err.message ?? err}` : (err?.message ?? err));
+        }
+        const needsTrust = (Array.isArray(entry?.hooks) ? entry.hooks : [])
+          .filter((h: any) => h?.enabled !== false && (h?.trustStatus === 'untrusted' || h?.trustStatus === 'modified'));
+        if (needsTrust.length) {
+          console.warn(`[Braid] codex hook trust bypass is active for ${needsTrust.length} untrusted/modified hook(s) in ${entry?.cwd ?? cwd}.`);
+        }
+      }
+    } catch (e: any) {
+      const msg = String(e?.message ?? e ?? '').toLowerCase();
+      if (!msg.includes('unknown') && !msg.includes('method') && !msg.includes('experimentalapi')) {
+        console.warn('[Braid] codex hooks/list failed:', e?.message ?? e);
+      }
+    }
   }
 
   /** Codex API-key mode is native app-server auth, not environment injection. For work-producing paths,
@@ -225,6 +278,12 @@ export class CodexAdapter implements Engine {
       if (settled) return;
       settled = true;
       sink.done(req.boardId, state.turnIndex, buildCodexTurnDone(state, isError, Date.now()));
+    };
+    const wakeTurnEnd = () => {
+      if (!resolveTurnEnd) return;
+      const r = resolveTurnEnd;
+      resolveTurnEnd = null;
+      r();
     };
 
     // Server→client approval requests → the host's native permission UI (mirrors Claude's canUseTool path).
@@ -325,43 +384,68 @@ export class CodexAdapter implements Engine {
           case 'rateLimit': sink.rateLimit({ ...e.snapshot, provider: this.id }); break;
           case 'result':
             settle(e.isError && !interrupted);
-            if (resolveTurnEnd) { const r = resolveTurnEnd; resolveTurnEnd = null; r(); }
+            wakeTurnEnd();
             break;
         }
       }
     };
 
     let rpc: CodexRpc | null = null;
-    const onAbort = () => { try { rpc?.dispose(); } catch { /* ignore */ } };
+    const onAbort = () => {
+      interrupted = true;
+      wakeTurnEnd();
+      try { rpc?.dispose(); } catch { /* ignore */ }
+    };
+    const onExit = (code: number | null) => {
+      if (settled || interrupted || ctl.abort.signal.aborted) return;
+      const suffix = code == null ? '' : ` (exit code ${code})`;
+      sink.error(req.boardId, state.turnIndex, `Codex app-server exited before the turn completed${suffix}`);
+      settle(true);
+      wakeTurnEnd();
+    };
     try {
-      rpc = await this.open(req.cwd, { onNotification, onServerRequest });
+      rpc = await this.open(req.cwd, { onNotification, onServerRequest, onExit });
+      ctl.abort.signal.addEventListener('abort', onAbort, { once: true });
+      if (ctl.abort.signal.aborted) { onAbort(); settle(false); return; }
       await this.ensureWorkAuth(rpc);
       if (ctl.abort.signal.aborted) { settle(false); return; }
-      ctl.abort.signal.addEventListener('abort', onAbort, { once: true });
+      const liveRpc: CodexRpc = rpc;
+      await this.reportHooks(liveRpc, req.cwd);
 
       // Attach → thread. Cross-engine guard: a non-codex SessionRef is meaningless here → start fresh.
       const attach: Attach = req.attach.kind !== 'fresh' && req.attach.session.engine !== this.id ? { kind: 'fresh' } : req.attach;
       const { approvalPolicy, sandbox } = approvalAndSandbox(initialCfg.permissionMode);
       const startOpts: Record<string, unknown> = { cwd: req.cwd, approvalPolicy, sandbox };
       if (initialCfg.model) startOpts.model = initialCfg.model;
-      let thread: any;
-      if (attach.kind === 'resume') {
-        thread = (await rpc.request('thread/resume', { threadId: attach.session.raw, ...startOpts }))?.thread;
-      } else if (attach.kind === 'fork') {
-        // Whole-thread fork only — Codex has no working mid-point fork (attach.at is ignored). Correctness
-        // relies on per-board threads (midpointFork=false) keeping the source = the parent's own ancestry.
-        thread = await this.forkThread(rpc, attach.session.raw, startOpts);
-      } else {
+      const startFreshThread = async (): Promise<any> => {
         const optsWithDynamicTools = { ...startOpts, dynamicTools: [braidAskUserDynamicTool()] };
         try {
-          thread = (await rpc.request('thread/start', optsWithDynamicTools))?.thread;
+          return (await liveRpc.request('thread/start', optsWithDynamicTools))?.thread;
         } catch (e: any) {
           if (!isDynamicToolsUnsupported(e)) throw e;
           // Older app-server builds do not accept the experimental dynamicTools field. Fall back to a normal
           // thread so Codex still works; it just won't have the model-invoked AskUserQuestion dynamic tool.
           console.warn('[Braid] codex dynamicTools unavailable; continuing without active AskUserQuestion:', e?.message ?? e);
-          thread = (await rpc.request('thread/start', startOpts))?.thread;
+          return (await liveRpc.request('thread/start', startOpts))?.thread;
         }
+      };
+      let thread: any;
+      let turnPrompt = req.prompt;
+      try {
+        if (attach.kind === 'resume') {
+          thread = (await liveRpc.request('thread/resume', { threadId: attach.session.raw, ...startOpts }))?.thread;
+        } else if (attach.kind === 'fork') {
+        // Whole-thread fork only — Codex has no working mid-point fork (attach.at is ignored). Correctness
+        // relies on per-board threads (midpointFork=false) keeping the source = the parent's own ancestry.
+          thread = await this.forkThread(liveRpc, attach.session.raw, startOpts);
+        } else {
+          thread = await startFreshThread();
+        }
+      } catch (e: any) {
+        if (!isMissingRollout(e) || !req.nativeFallbackPrompt) throw e;
+        console.warn('[Braid] codex native thread missing; retrying turn with canvas text replay:', e?.message ?? e);
+        thread = await startFreshThread();
+        turnPrompt = req.nativeFallbackPrompt;
       }
       const threadId = thread?.id;
       if (!threadId) { sink.error(req.boardId, req.turnIndex, 'Codex: thread/start returned no thread id'); return; }
@@ -379,9 +463,10 @@ export class CodexAdapter implements Engine {
 
       // Turn loop: run the first turn, then drain any queued follow-ups as their own rounds. Each turn's
       // input carries the prompt + any pasted/dropped images (written to temp files as Codex localImages).
-      let built = buildUserInput(req.prompt, req.images);
+      let built = buildUserInput(turnPrompt, req.images);
       allTemps.push(...built.temps);
       for (;;) {
+        if (ctl.abort.signal.aborted) break;
         settled = false;
         const turnCfg = this.deps.readProviderConfig();
         const turnParams: Record<string, unknown> = { threadId, input: built.input, ...turnPermissionOverrides(turnCfg.permissionMode, req.cwd) };
@@ -389,7 +474,13 @@ export class CodexAdapter implements Engine {
         if (effort) turnParams.effort = effort;
         if (turnCfg.model) turnParams.model = turnCfg.model;
         const turnEnd = new Promise<void>((res) => { resolveTurnEnd = res; });
-        const started = await rpc.request('turn/start', turnParams).catch((e: any) => { sink.error(req.boardId, state.turnIndex, `Codex turn failed: ${e?.message ?? e}`); settle(true); return null; });
+        const started = await rpc.request('turn/start', turnParams).catch((e: any) => {
+          if (settled) return null;
+          if (ctl.abort.signal.aborted) { settle(false); return null; }
+          sink.error(req.boardId, state.turnIndex, `Codex turn failed: ${e?.message ?? e}`);
+          settle(true);
+          return null;
+        });
         if (!started) break;
         currentTurnId = started?.turn?.id;
         await turnEnd;
@@ -498,9 +589,9 @@ export class CodexAdapter implements Engine {
 
   async collapseDigest(req: CollapseDigestRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }> {
     const cardSystem =
-      `You are a collapsed-history summarizer for a conversation canvas. The input is several folded Q&A rounds hidden behind one node. Summarize only the transcript content, never these instructions or the words Q/A/transcript/collapsed. Output Markdown only: a **bold one-sentence headline** then 3-5 short "- " bullets. Use the transcript language; English transcript -> English output.`;
+      `You are a collapsed-history summarizer for a conversation canvas. The input is several folded Q&A rounds hidden behind one node. Summarize only the transcript content, never these instructions or the words Q/A/transcript/collapsed. Output Markdown only: a **bold branch-title-style headline** (imperative verb, sentence case, no trailing period inside the bold text, naming what the folded history accomplishes as a whole) then 3-5 short "- " bullets. Use the transcript language; English transcript -> English output.`;
     const miniSystem =
-      `Write ONE short label for a collapsed conversation-history node. Summarize the actual transcript content, not this instruction. Output only the label, no prefix/quotes/trailing punctuation. Use the transcript language; English transcript -> English label.`;
+      `You are a "branch titler" for folded conversation history. Write ONE concise git-commit-subject-style title (start with an imperative verb; ~6-9 words; sentence case; no trailing period) naming what these folded Q&A rounds accomplish as a whole, like a far-zoom branch signpost. Output only the title, no prefix/quotes. Same language as the Q&A.`;
     const tagSystem =
       `Classify the collapsed conversation history into 1-2 tags from this exact lowercase list, comma-separated, nothing else: ${TAG_VOCAB.join(', ')}.`;
     const content = `Collapsed conversation history transcript:\n\n${req.text}`;
@@ -572,6 +663,36 @@ export class CodexAdapter implements Engine {
     } catch (e: any) {
       console.error('[Braid] codex listSlashCommands failed:', e?.message ?? e);
       return [];
+    } finally {
+      try { rpc?.dispose(); } catch { /* ignore */ }
+    }
+  }
+
+  async listModels(cwd: string): Promise<ModelOption[]> {
+    let rpc: CodexRpc | null = null;
+    try {
+      rpc = await this.open(cwd, {});
+      await this.ensureWorkAuth(rpc);
+      const models: (ModelOption & { isDefault?: boolean })[] = [];
+      let cursor: string | null | undefined = undefined;
+      for (let page = 0; page < 10; page++) {
+        const res: { data?: any[]; nextCursor?: string | null } = await rpc.request('model/list', { cursor, includeHidden: false }, 10_000);
+        const data = Array.isArray(res?.data) ? res.data : [];
+        for (const m of data) {
+          if (m?.hidden === true) continue;
+          const value = typeof m?.model === 'string' && m.model ? m.model : typeof m?.id === 'string' ? m.id : '';
+          if (!value.trim()) continue;
+          const label = typeof m?.displayName === 'string' && m.displayName.trim() ? m.displayName : value;
+          models.push({ value, label, isDefault: m?.isDefault === true });
+        }
+        cursor = typeof res?.nextCursor === 'string' && res.nextCursor ? res.nextCursor : null;
+        if (!cursor) break;
+      }
+      models.sort((a, b) => Number(!!b.isDefault) - Number(!!a.isDefault));
+      return withModelFallback(this.id, models.map(({ value, label, contextWindow }) => ({ value, label, contextWindow })));
+    } catch (e: any) {
+      console.error('[Braid] codex listModels failed:', e?.message ?? e);
+      return withModelFallback(this.id, []);
     } finally {
       try { rpc?.dispose(); } catch { /* ignore */ }
     }

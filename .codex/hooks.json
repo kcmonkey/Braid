@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File .codex/hooks/auto-git-commit.ps1",
+            "commandWindows": "powershell -NoProfile -ExecutionPolicy Bypass -File .codex\\hooks\\auto-git-commit.ps1",
+            "timeout": 60,
+            "statusMessage": "Auto-committing changes"
+          }
+        ]
+      }
+    ]
+  }
+}

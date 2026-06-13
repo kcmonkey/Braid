@@ -104,6 +104,9 @@ export interface ProviderCapabilitiesView {
   // false (Codex), the webview never shares a session across boards — every continuation forks its own
   // thread, so a branch can't inherit later sibling turns. Claude = true. (Codex branching bug, 2026-06-12)
   midpointFork: boolean;
+  // Whether the adapter can recover a missing native session/rollout by retrying the turn on a fresh session
+  // with a text replay seed. When true, the webview sends that fallback seed only for native attach turns.
+  textReplayFallback: boolean;
   models: ModelOption[];
 }
 
@@ -236,7 +239,7 @@ export type WebviewMessage =
   // `engine` = the board's owning engine (M-MultiEngine AD2): the host routes the turn to THIS engine, not the
   // global active provider, so continuing/forking a board never hands its session id to a different engine.
   // Omitted ⇒ 'claude' (legacy / no-op while one engine is registered).
-  | { type: 'send'; boardId: string; prompt: string; resume?: string; fork?: boolean; resumeAt?: string; images?: ImageInput[]; turnIndex?: number; engine?: EngineId }
+  | { type: 'send'; boardId: string; prompt: string; resume?: string; fork?: boolean; resumeAt?: string; nativeFallbackPrompt?: string; images?: ImageInput[]; turnIndex?: number; engine?: EngineId }
   // M11 follow-up during generation: inject a follow-up into the board's OPEN streaming-input query (sent while the board
   // is streaming). interrupt=false → the engine queues it, running after the current turn finishes;
   // interrupt=true → the host calls q.interrupt() first, cutting the current turn (partial kept) so the
@@ -250,7 +253,7 @@ export type WebviewMessage =
   // store the result on. The host runs a single Haiku one-shot (Engine.branchSummary) and replies with
   // `branchSummary`. Orthogonal to `summarize` (which describes one round).
   | { type: 'branchSummarize'; boardId: string; text: string; engine?: EngineId }
-  // Visual graph collapse: synthesize a folded-history digest (card + mini + tags) for a collapsed
+  // Visual graph collapse: synthesize a folded-history digest (card + branch-title-style mini + tags) for a collapsed
   // representative node. `text` = the combined Q/A of the folded boards (hidden ancestors + the
   // representative), built webview-side from collapseDigestText; `boardId` = the collapsed node to store
   // the result on (under collapsedGraph). The host runs the engine's collapse-specific digest prompt and
@@ -370,7 +373,7 @@ export type HostMessage =
   // retry budget re-tries (the host ALWAYS posts this, even on empty/throw, so the flag never hangs).
   | { type: 'branchSummary'; boardId: string; text: string }
   // Visual graph collapse: the folded-history digest for a collapsed representative (reply to collapseDigest).
-  // Stored on collapsedGraph (summary / miniSummary / tags). Empty `summary` = generation produced nothing /
+  // Stored on collapsedGraph (summary / branch-title-style miniSummary / tags). Empty `summary` = generation produced nothing /
   // failed — the webview clears its in-flight flag and the bounded retry re-tries (host ALWAYS posts this).
   | { type: 'collapseDigested'; boardId: string; summary: string; miniSummary?: string; tags?: string[] }
   // M9 compact: compaction finished — the compacted (forked) session id + the /compact summary.

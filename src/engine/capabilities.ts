@@ -14,6 +14,7 @@ export async function toCapabilitiesView(engine: Engine): Promise<ProviderCapabi
     compact: engine.compact.mode !== 'none',
     images: caps.images,
     midpointFork: caps.midpointFork,
+    textReplayFallback: caps.textReplayFallback,
     models: caps.models,
   };
 }

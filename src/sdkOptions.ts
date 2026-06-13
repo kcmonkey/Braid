@@ -38,8 +38,10 @@ export interface CanvasConfig {
   // Visual-only graph decluttering: after a board completes, fold older visible boards into collapsed
   // representatives when a lineage grows too long. Webview-only; no engine context is changed.
   autoCollapseEnabled: boolean;
-  autoCollapseLinearThreshold: number;
-  autoCollapseBranchThreshold: number;
+  // Visible board budget per branch segment; the collapsed representative counts as one visible board.
+  autoCollapseThreshold: number;
+  // Extra visible boards tolerated beyond the target before auto-collapse folds back to the target.
+  autoCollapseLeeway: number;
   // Fisheye LOD (decisions.md 2026-06-09): when true, selecting a board expands it AND its whole
   // ancestor lineage to detail; when false, only the selected board itself. Webview-only display behavior.
   expandAncestorsOnSelect: boolean;
@@ -95,8 +97,8 @@ export const DEFAULT_CANVAS_CONFIG: CanvasConfig = {
   autoCompactEnabled: true,
   autoCompactThreshold: 95,
   autoCollapseEnabled: true,
-  autoCollapseLinearThreshold: 8,
-  autoCollapseBranchThreshold: 14,
+  autoCollapseThreshold: 3,
+  autoCollapseLeeway: 2,
   expandAncestorsOnSelect: false,
   asyncContinuationEnabled: true,
   asyncContinuationIdleCapMin: 30,

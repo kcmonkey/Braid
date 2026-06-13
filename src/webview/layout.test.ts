@@ -103,6 +103,44 @@ describe('layoutGraph', () => {
   });
 });
 
+describe('layoutGraph collapsed representatives', () => {
+  it('keeps a root-prefix collapsed representative off the root rank (LR)', () => {
+    const hiddenRoot = { ...node('root', 0), hidden: true };
+    const hiddenMid = { ...node('mid', 1), hidden: true };
+    const repBase = node('rep', 2);
+    const rep = { ...repBase, data: { ...repBase.data, collapsedGraph: { hiddenIds: ['root', 'mid'] } } };
+    const child = node('child', 3);
+    const edges: Edge[] = [
+      { ...makeEdge('root', 'mid', 'fork'), hidden: true },
+      { ...makeEdge('mid', 'rep', 'fork'), hidden: true },
+      makeEdge('rep', 'child', 'fork'),
+    ];
+
+    const out = layoutGraph([hiddenRoot, hiddenMid, rep, child], edges, 'LR');
+    const repPos = out.find((n) => n.id === 'rep')!.position;
+    const childPos = out.find((n) => n.id === 'child')!.position;
+    expect(repPos.x).toBeGreaterThan(0);
+    expect(childPos.x).toBeGreaterThan(repPos.x);
+  });
+
+  it('keeps a root-prefix collapsed representative off the root rank (TB)', () => {
+    const hiddenRoot = { ...node('root', 0), hidden: true };
+    const repBase = node('rep', 1);
+    const rep = { ...repBase, data: { ...repBase.data, collapsedGraph: { hiddenIds: ['root'] } } };
+    const child = node('child', 2);
+    const edges: Edge[] = [
+      { ...makeEdge('root', 'rep', 'fork'), hidden: true },
+      makeEdge('rep', 'child', 'fork'),
+    ];
+
+    const out = layoutGraph([hiddenRoot, rep, child], edges, 'TB');
+    const repPos = out.find((n) => n.id === 'rep')!.position;
+    const childPos = out.find((n) => n.id === 'child')!.position;
+    expect(repPos.y).toBeGreaterThan(0);
+    expect(childPos.y).toBeGreaterThan(repPos.y);
+  });
+});
+
 // Move a node set to a given top-left (simulates the graph having drifted off the layout origin, e.g. via
 // accumulated selected-anchor translations or a manual pan-then-persist).
 function offsetBy(nodes: BoardNodeT[], dx: number, dy: number): BoardNodeT[] {

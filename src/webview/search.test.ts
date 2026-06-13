@@ -106,6 +106,36 @@ describe('rankResults', () => {
     expect(hits[0].field).toBe('prompt');
     expect(hits[1].field).toBe('branchSummary');
   });
+  it('ranks user-question hits above answer-only hits even when the answer is newer', () => {
+    const nodes = [
+      bn('answer', { prompt: 'plain question', answer: 'needle in answer', seq: 9 }),
+      bn('prompt', { prompt: 'needle in question', answer: 'plain answer', seq: 1 }),
+    ];
+    expect(rankResults(nodes, 'needle').map((h) => h.id)).toEqual(['prompt', 'answer']);
+  });
+  it('returns prompt snippets before answer snippets when both fields match', () => {
+    const hit = rankResults([
+      bn('both', { prompt: 'user asks about canvas search', answer: 'answer also mentions canvas search' }),
+    ], 'search')[0];
+    expect(hit.snippets.map((s) => s.field).slice(0, 2)).toEqual(['prompt', 'answer']);
+    expect(hit.snippet.text).toContain('user asks');
+  });
+  it('uses matched follow-up prompts before answer snippets for multi-turn boards', () => {
+    const hit = rankResults([
+      bn('multi', {
+        prompt: 'initial question',
+        answer: '**Follow-up: later banana question**\n\nassistant banana details',
+        turns: [
+          { prompt: 'initial question', answer: 'initial answer', done: true },
+          { prompt: 'later banana question', answer: 'assistant banana details', done: true },
+        ],
+      }),
+    ], 'banana')[0];
+    expect(hit.snippets.map((s) => s.field).slice(0, 2)).toEqual(['prompt', 'answer']);
+    expect(hit.snippets[0].snippet.text).toContain('later banana question');
+    expect(hit.snippets[1].snippet.text).toContain('assistant banana details');
+    expect(hit.snippets[1].snippet.text).not.toContain('Follow-up');
+  });
   it('is deterministic: equal score/seq → id ascending', () => {
     const nodes = [bn('bbb', { prompt: 'kraken', seq: 5 }), bn('aaa', { prompt: 'kraken', seq: 5 })];
     expect(rankResults(nodes, 'kraken').map((h) => h.id)).toEqual(['aaa', 'bbb']);

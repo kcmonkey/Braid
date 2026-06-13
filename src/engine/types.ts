@@ -30,6 +30,9 @@ export interface TurnRequest {
   boardId: string;
   attach: Attach;
   prompt: string;
+  // Optional fresh-session prompt to use only if a native resume/fork attach fails because the engine no
+  // longer has the referenced session/rollout. Normal native attach paths ignore this.
+  nativeFallbackPrompt?: string;
   images?: ImageInput[];
   turnIndex?: number;        // multi-turn slot base (0 = top-level; ≥1 = post-settle follow-up via resume)
   cwd: string;
@@ -234,15 +237,20 @@ export interface EngineCapabilities {
   // thread so the parent's session is always exactly its own ancestry and a branch can never inherit sibling
   // turns. (Codex branching bug, 2026-06-12)
   midpointFork: boolean;
-  // The provider's selectable models (SSOT = PROVIDER_CATALOG). Drives the model dropdown; surfaced to the
+  // The adapter can retry a failed native attach on a fresh session using a webview-provided text replay seed.
+  // This is false for engines whose native sessions are durable enough or whose adapter does not implement it.
+  textReplayFallback: boolean;
+  // The provider's selectable models. Adapters may source this from the service/runtime; the host/webview keep
+  // PROVIDER_CATALOG as the offline fallback and context-window metadata floor. Surfaced to the
   // webview via ProviderCapabilitiesView. ('compact' support is NOT here — it's derived from `compact.mode`.)
   models: ModelOption[];
 }
 
 export interface DigestResult { summary: string; miniSummary?: string; tags?: string[] }
 export interface SummarizeRequest { cwd: string; prompt: string; answer: string }
-// Visual graph collapse: synthesize a digest for several folded Q/A rounds. `text` is already the
-// concatenated transcript, so adapters must not wrap it as a fake single Q/A round.
+// Visual graph collapse: synthesize a digest for several folded Q/A rounds. `miniSummary` should be
+// a branch-summary / far-far signpost style title. `text` is already the concatenated transcript, so
+// adapters must not wrap it as a fake single Q/A round.
 export interface CollapseDigestRequest { cwd: string; text: string }
 // Branch-Signposts: synthesize a one-line label for a whole branch segment. `text` = the segment's
 // concatenated Q/A (built webview-side). Returns `{ text }`; empty on SDK-unavailable / failure (never throws).
@@ -276,5 +284,8 @@ export interface Engine {
   // The provider's available slash commands for composer autofill (display-side specs). [] = none /
   // unsupported / SDK unavailable (never throws). Each provider supplies its own set. (multi-provider seam)
   listSlashCommands(cwd: string): Promise<SlashCommandSpec[]>;
+  // The provider/runtime's currently selectable models for the model dropdown. [] = unavailable; the host
+  // merges the result with PROVIDER_CATALOG fallback metadata so model selection remains usable offline.
+  listModels(cwd: string): Promise<ModelOption[]>;
   checkAuth(cwd: string, abort: AbortController): Promise<AuthResult>;
 }

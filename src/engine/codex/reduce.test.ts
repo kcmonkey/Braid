@@ -160,16 +160,26 @@ describe('reduceCodexNotification — P2 display item mappings (capability-layer
     expect(tr.ev.isError).toBe(true);
   });
 
-  it('collabAgentToolCall → a card named after the collab verb + receiver summary', () => {
+  it('collabAgentToolCall maps to the neutral Agent card with receiver thread metadata', () => {
     const { events } = run([
       turnStarted(),
       ['item/started', { item: { type: 'collabAgentToolCall', id: 'c1', tool: 'spawnAgent', status: 'inProgress', prompt: 'go', model: 'gpt-5.5', receiverThreadIds: ['TH9'] } }],
       ['item/completed', { item: { type: 'collabAgentToolCall', id: 'c1', tool: 'spawnAgent', status: 'completed', receiverThreadIds: ['TH9'] } }],
     ]);
     const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
-    expect(tu.ev).toMatchObject({ name: 'spawnAgent', input: { prompt: 'go', model: 'gpt-5.5', receiverThreadIds: ['TH9'] } });
+    expect(tu.ev).toMatchObject({
+      name: 'Agent',
+      input: {
+        subagent_type: 'Codex agent',
+        description: 'go',
+        prompt: 'go',
+        collab_action: 'spawnAgent',
+        model: 'gpt-5.5',
+        receiverThreadIds: ['TH9'],
+      },
+    });
     const tr = events.find((e) => e.t === 'toolResult') as Extract<CodexEvent, { t: 'toolResult' }>;
-    expect(tr.ev).toEqual({ toolUseId: 'c1', content: 'spawnAgent completed → TH9', isError: false });
+    expect(tr.ev).toEqual({ toolUseId: 'c1', content: 'spawnAgent completed -> TH9', isError: false });
   });
 
   it('imageView → a ViewImage card with the file path', () => {

@@ -45,6 +45,23 @@ describe('mapCodexUsage', () => {
   });
 
   it('missing/empty rate limits → no windows; a window without usedPercent is dropped', () => {
+    const multiBucket = mapCodexUsage({
+      rateLimits: {
+        primary: { usedPercent: 99, windowDurationMins: 300, resetsAt: 1 },
+      },
+      rateLimitsByLimitId: {
+        codex: {
+          limitId: 'codex',
+          limitName: 'Codex',
+          primary: { usedPercent: 12, windowDurationMins: 300, resetsAt: 1781193749 },
+          secondary: { usedPercent: 3, windowDurationMins: 10080, resetsAt: 1781780549 },
+        },
+      },
+    });
+    expect(multiBucket.windows).toEqual([
+      { id: 'codex:primary', label: '5h limit', utilizationPct: 12, resetsAt: new Date(1781193749000).toISOString() },
+      { id: 'codex:secondary', label: 'Weekly limit', utilizationPct: 3, resetsAt: new Date(1781780549000).toISOString() },
+    ]);
     expect(mapCodexUsage({}).windows).toEqual([]);
     expect(mapCodexUsage({ rateLimits: { primary: { windowDurationMins: 300 } } }).windows).toEqual([]);
   });

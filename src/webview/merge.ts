@@ -50,7 +50,8 @@ export const MAX_CONCURRENT_BRANCH_SUMMARIES = 2;
 // so a bump makes every collapsed representative's stored key mismatch → needsCollapseDigest re-requests.
 //   v1: initial folded-history card + mini + tags (reused the per-round summarizer over combined Q/A).
 //   v2: dedicated collapseDigest engine prompt; prevents summarizing/translating the summarizer prompt itself.
-export const COLLAPSE_DIGEST_VERSION = 2;
+//   v3: miniSummary and card headline follow branch-summary / far-far signpost title rules.
+export const COLLAPSE_DIGEST_VERSION = 3;
 
 // One tool invocation within a turn: the tool_use (id/name/input) plus its paired tool_result.
 // `result` is captured truncated (see TOOL_RESULT_CAP) and persisted with the board (M4 gap2).
@@ -297,7 +298,8 @@ export interface CollapsedGraph {
   hiddenIds: string[];
   // Digest of the FOLDED history (the hidden boards + this representative), synthesized by Haiku from
   // their combined Q/A so the collapsed card shows WHAT it hides — not a bare board count. Mirrors the
-  // per-board digest (summary / miniSummary / tags) but describes the whole folded chain. `digestKey` gates
+  // per-board digest shape, but `miniSummary` follows the branch-summary / far-far signpost title style.
+  // It describes the whole folded chain. `digestKey` gates
   // staleness: it encodes COLLAPSE_DIGEST_VERSION + the folded boards' ids/answer-lengths; needsCollapseDigest
   // re-requests on a mismatch (more history folded in, content changed, or a version bump). All display-only;
   // persisted as part of collapsedGraph via `...data`.
@@ -388,8 +390,11 @@ export interface BoardData {
   compactSession?: string;
   // Visual-only graph collapse: this visible board is the representative for a hidden selected line segment.
   // The hidden boards stay in the React Flow graph (node.hidden=true) so merge/fork/focus ancestry remains
-  // exact; expanding this board simply unhides hiddenIds and clears this marker. Not engine compaction.
+  // exact. Expanding is a temporary preview: hiddenIds are unhidden while this marker stays, then auto-returned
+  // to hidden when the preview loses focus. Not engine compaction.
   collapsedGraph?: CollapsedGraph;
+  // Transient visual preview state for collapsedGraph. Stripped on persistence; folded children persist hidden.
+  collapsePreviewExpanded?: boolean;
   // Reversible visual archive. Archived boards are hidden from the canvas by default but stay in the
   // graph/persistence so descendants still have exact ancestry and merge/fork context.
   archived?: boolean;
@@ -483,7 +488,7 @@ export function shouldAutoCompact(pct: number | null, enabled: boolean, threshol
 /**
  * One-line plain-text headline from a (possibly structured Markdown) summary: first non-empty
  * line, with leading bullet/heading markers and surrounding ** emphasis stripped. For compact
- * one-line labels (e.g. merge-preview drawer) where rendering full Markdown is not wanted.
+ * one-line labels where rendering full Markdown is not wanted.
  */
 export function summaryHeadline(s: string): string {
   const line = (s.split('\n').find((l) => l.trim()) ?? '').trim();
@@ -572,6 +577,8 @@ export interface AutoCollapsePolicy {
   enabled: boolean;
   /** Visible-board budget per branch segment; the collapsed representative counts as one visible board. */
   threshold: number;
+  /** Extra visible boards tolerated before folding back to the threshold. */
+  leeway: number;
 }
 
 function edgeKind(e: Edge): EdgeKind {
@@ -774,6 +781,8 @@ export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], select
 
 function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCollapsePolicy): CollapsePlan[] {
   const threshold = Math.max(2, Math.floor(policy.threshold || 0));
+  const leeway = Math.max(0, Math.floor(policy.leeway || 0));
+  const triggerLength = threshold + leeway;
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
   const children = visibleLineageChildren(edges, byId);
   const parents = visibleLineageParents(edges, byId);
@@ -792,10 +801,12 @@ function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCo
   const leaves = visibleDone.filter((n) => (children.get(n.id) ?? []).length === 0);
   for (const leaf of leaves) {
     const path = uniqueVisibleLineageTo(leaf.id, byId, parents);
-    if (!path || path.length <= threshold) continue;
+    if (!path || path.length <= triggerLength) continue;
     const isBranchPoint = (idx: number) => idx < path.length - 1 && (children.get(path[idx])?.length ?? 0) > 1;
 
     // Fold over-long visible runs anywhere in the graph, not just on the branch that just completed.
+    // The leeway creates hysteresis: a segment may drift above the target length for a few turns, then
+    // collapse once back to the target window instead of moving the representative on every completion.
     // A branch point ends the incoming segment and counts against its visible budget; child limbs start
     // after it so sibling branch heads stay visible and edge routing remains unambiguous.
     let segmentStart = 0;
@@ -807,7 +818,7 @@ function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCo
       const segmentEnd = barrier ? i : path.length - 1;
       if (segmentEnd >= segmentStart) {
         const segmentLength = segmentEnd - segmentStart + 1;
-        if (segmentLength > threshold) {
+        if (segmentLength > triggerLength) {
           const targetIndex = segmentEnd - threshold + 1;
           add(autoCollapsePlanFromPathSpan(path, segmentStart, targetIndex, edges, byId));
         }
@@ -877,32 +888,135 @@ export function expandCollapsedGraph(nodes: BoardNodeT[], targetId: string): { n
   const hiddenIds = target?.data.collapsedGraph?.hiddenIds ?? [];
   if (!target?.data.collapsedGraph) return { nodes, changed: false };
   const reveal = new Set(hiddenIds);
-  return {
-    changed: true,
-    nodes: nodes.map((n) => {
-      if (n.id === targetId) {
-        const { collapsedGraph, ...data } = n.data;
-        return { ...n, data };
-      }
-      return reveal.has(n.id) ? { ...n, hidden: false } : n;
-    }),
-  };
+  let changed = false;
+  const out = nodes.map((n) => {
+    if (n.id === targetId) {
+      if (n.data.collapsePreviewExpanded) return n;
+      changed = true;
+      return { ...n, data: { ...n.data, collapsePreviewExpanded: true } };
+    }
+    if (reveal.has(n.id) && n.hidden) {
+      changed = true;
+      return { ...n, hidden: false };
+    }
+    return n;
+  });
+  return { nodes: changed ? out : nodes, changed };
+}
+
+export function collapseExpandedCollapsedGraphs(
+  nodes: BoardNodeT[], targetIds?: Iterable<string>,
+): { nodes: BoardNodeT[]; changed: boolean } {
+  const targets = new Set(
+    targetIds
+      ? [...targetIds]
+      : nodes.filter((n) => n.data.collapsedGraph && n.data.collapsePreviewExpanded).map((n) => n.id),
+  );
+  if (!targets.size) return { nodes, changed: false };
+
+  const hide = new Set<string>();
+  for (const n of nodes) {
+    if (targets.has(n.id) && n.data.collapsePreviewExpanded) {
+      for (const id of n.data.collapsedGraph?.hiddenIds ?? []) hide.add(id);
+    }
+  }
+  if (!hide.size && !nodes.some((n) => targets.has(n.id) && n.data.collapsePreviewExpanded)) {
+    return { nodes, changed: false };
+  }
+
+  let changed = false;
+  const out = nodes.map((n) => {
+    if (targets.has(n.id) && n.data.collapsePreviewExpanded) {
+      const { collapsePreviewExpanded, ...data } = n.data;
+      changed = true;
+      return { ...n, data };
+    }
+    if (hide.has(n.id)) {
+      const next = { ...n, hidden: true, selected: false };
+      if (n.hidden === true && n.selected === false) return n;
+      changed = true;
+      return next;
+    }
+    return n;
+  });
+  return { nodes: changed ? out : nodes, changed };
+}
+
+export function uncollapseCollapsedGraph(nodes: BoardNodeT[], targetId: string): { nodes: BoardNodeT[]; changed: boolean } {
+  const target = nodes.find((n) => n.id === targetId);
+  const hiddenIds = target?.data.collapsedGraph?.hiddenIds ?? [];
+  if (!target?.data.collapsedGraph) return { nodes, changed: false };
+  const reveal = new Set(hiddenIds);
+  let changed = false;
+  const out = nodes.map((n) => {
+    if (n.id === targetId) {
+      const { collapsedGraph, collapsePreviewExpanded, ...data } = n.data;
+      changed = true;
+      return { ...n, data };
+    }
+    if (reveal.has(n.id) && n.hidden) {
+      changed = true;
+      return { ...n, hidden: false };
+    }
+    return n;
+  });
+  return { nodes: changed ? out : nodes, changed };
 }
 
 export function archivedBoardIds(nodes: BoardNodeT[]): string[] {
   return nodes.filter((n) => n.data.archived).map((n) => n.id);
 }
 
-function collapsedHiddenIds(nodes: BoardNodeT[]): Set<string> {
+export function archiveScopeIds(nodes: BoardNodeT[], edges: Edge[], selectedIds: Iterable<string>): string[] {
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const out = new Set<string>();
+  const stack: string[] = [];
+  for (const id of selectedIds) {
+    if (!byId.has(id) || out.has(id)) continue;
+    out.add(id);
+    stack.push(id);
+  }
+  if (!stack.length) return [];
+
+  const adjacent = new Map<string, string[]>();
+  for (const e of edges) {
+    if (isCollapseEdge(e) || !byId.has(e.source) || !byId.has(e.target)) continue;
+    const from = adjacent.get(e.source) ?? [];
+    from.push(e.target);
+    adjacent.set(e.source, from);
+    const to = adjacent.get(e.target) ?? [];
+    to.push(e.source);
+    adjacent.set(e.target, to);
+  }
+  while (stack.length) {
+    const id = stack.pop()!;
+    for (const next of adjacent.get(id) ?? []) {
+      if (out.has(next)) continue;
+      out.add(next);
+      stack.push(next);
+    }
+  }
+  return nodes.filter((n) => out.has(n.id)).map((n) => n.id);
+}
+
+function busyBoardIds(nodes: BoardNodeT[], ids: Iterable<string>): string[] {
+  const wanted = new Set(ids);
+  return nodes
+    .filter((n) => wanted.has(n.id) && (n.data.status === 'streaming' || n.data.status === 'waiting'))
+    .map((n) => n.id);
+}
+
+function collapsedHiddenIds(nodes: BoardNodeT[], includePreviewExpanded = false): Set<string> {
   const hidden = new Set<string>();
   for (const n of nodes) {
+    if (!includePreviewExpanded && n.data.collapsePreviewExpanded) continue;
     for (const id of n.data.collapsedGraph?.hiddenIds ?? []) hidden.add(id);
   }
   return hidden;
 }
 
 /** Re-derive React Flow visibility from folded-history membership and the archived flag.
- * Collapse wins over showArchived, so revealing the archive never expands collapsed-history stacks. */
+ * Collapse wins over showArchived, except while a collapsed representative is temporarily preview-expanded. */
 export function syncArchiveVisibility(nodes: BoardNodeT[], showArchived: boolean): { nodes: BoardNodeT[]; changed: boolean } {
   const folded = collapsedHiddenIds(nodes);
   let changed = false;
@@ -917,9 +1031,12 @@ export function syncArchiveVisibility(nodes: BoardNodeT[], showArchived: boolean
 }
 
 export function archiveBoards(
-  nodes: BoardNodeT[], selectedIds: Iterable<string>, showArchived = false,
-): { nodes: BoardNodeT[]; archivedIds: string[]; changed: boolean } {
-  const ids = new Set(selectedIds);
+  nodes: BoardNodeT[], edges: Edge[], selectedIds: Iterable<string>, showArchived = false,
+): { nodes: BoardNodeT[]; archivedIds: string[]; scopeIds: string[]; busyIds: string[]; changed: boolean; blocked: boolean } {
+  const scopeIds = archiveScopeIds(nodes, edges, selectedIds);
+  const busyIds = busyBoardIds(nodes, scopeIds);
+  if (busyIds.length) return { nodes, archivedIds: [], scopeIds, busyIds, changed: false, blocked: true };
+  const ids = new Set(scopeIds);
   const archivedIds: string[] = [];
   let changed = false;
   const marked = nodes.map((n) => {
@@ -929,13 +1046,14 @@ export function archiveBoards(
     return { ...n, selected: false, data: { ...n.data, archived: true } };
   });
   const synced = syncArchiveVisibility(changed ? marked : nodes, showArchived);
-  return { nodes: synced.nodes, archivedIds, changed: changed || synced.changed };
+  return { nodes: synced.nodes, archivedIds, scopeIds, busyIds: [], changed: changed || synced.changed, blocked: false };
 }
 
 export function restoreArchivedBoards(
-  nodes: BoardNodeT[], selectedIds: Iterable<string>, showArchived = false,
-): { nodes: BoardNodeT[]; restoredIds: string[]; changed: boolean } {
-  const ids = new Set(selectedIds);
+  nodes: BoardNodeT[], edges: Edge[], selectedIds: Iterable<string>, showArchived = false,
+): { nodes: BoardNodeT[]; restoredIds: string[]; scopeIds: string[]; changed: boolean } {
+  const scopeIds = archiveScopeIds(nodes, edges, selectedIds);
+  const ids = new Set(scopeIds);
   const restoredIds: string[] = [];
   let changed = false;
   const marked = nodes.map((n) => {
@@ -946,7 +1064,7 @@ export function restoreArchivedBoards(
     return { ...n, data };
   });
   const synced = syncArchiveVisibility(changed ? marked : nodes, showArchived);
-  return { nodes: synced.nodes, restoredIds, changed: changed || synced.changed };
+  return { nodes: synced.nodes, restoredIds, scopeIds, changed: changed || synced.changed };
 }
 
 export function syncHiddenEdges(nodes: BoardNodeT[], edges: Edge[]): Edge[] {
@@ -963,7 +1081,7 @@ export function syncHiddenEdges(nodes: BoardNodeT[], edges: Edge[]): Edge[] {
   });
   const edgeIds = new Set(out.map((e) => e.id));
   for (const n of nodes) {
-    if (n.hidden || !n.data.collapsedGraph) continue;
+    if (n.hidden || !n.data.collapsedGraph || n.data.collapsePreviewExpanded) continue;
     const folded = new Set(n.data.collapsedGraph.hiddenIds);
     for (const e of baseEdges) {
       if (!folded.has(e.target) || folded.has(e.source)) continue;
@@ -1127,6 +1245,28 @@ export function forkBaseFor(
   };
 }
 
+const NATIVE_FALLBACK_FRAMING = 'Below is the prior Braid conversation context recovered from the canvas. Continue from this context:';
+
+/** Text replay fallback for a native continuation whose provider-side session pointer has gone stale. Walk the
+ * same single lineage path as native fork/resume (fork/compact only; never merge/collapse proxy edges). Hidden
+ * collapsed-history boards remain in the graph, so they are naturally included. A compact boundary stops the
+ * walk and contributes its compactSummary instead of raw pre-compact history. */
+export function nativeContinuationFallbackSeed(parent: BoardNodeT, nodes: BoardNodeT[], edges: Edge[]): string {
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const path: BoardNodeT[] = [];
+  const seen = new Set<string>();
+  let cur: string | undefined = parent.id;
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    const n = byId.get(cur);
+    if (!n) break;
+    path.push(n);
+    if (n.data.compact) break;
+    cur = continuationParent(cur, edges);
+  }
+  return buildRebuildSeed(path.reverse().map((n) => n.data), { withSteps: true, framing: NATIVE_FALLBACK_FRAMING });
+}
+
 /**
  * Send-Time Materialization (D2): compute a FRESH board's send payload from the CURRENT graph at dispatch,
  * instead of a provider-native base cached at creation (which goes stale across provider switches / reloads).
@@ -1139,8 +1279,8 @@ export function forkBaseFor(
  * (decisions.md D2)
  */
 export function materializeSendPlan(
-  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[], turnEngine: EngineId, midpointFork = true,
-): { resume?: string; fork: boolean; resumeAt?: string; promptPrefix?: string } {
+  board: BoardNodeT, nodes: BoardNodeT[], edges: Edge[], turnEngine: EngineId, midpointFork = true, textReplayFallback = false,
+): { resume?: string; fork: boolean; resumeAt?: string; promptPrefix?: string; nativeFallbackPromptPrefix?: string } {
   const byId = Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>;
   const mergeParents = edges.filter((e) => e.target === board.id && (e.data?.kind as string) === 'merge').map((e) => e.source);
   // A merge product recomputes its dedup base + excerpt from whatever merge parents REMAIN (a parent deleted
@@ -1148,7 +1288,8 @@ export function materializeSendPlan(
   // 0 left → falls through to root). mergeBaseFor/computeMerge handle a single leaf. (review fix)
   if (board.data.merged && mergeParents.length >= 1) {
     const m = mergeBaseFor(mergeParents, byId, edges, turnEngine);
-    return { resume: m.parentSessionId, fork: !!m.parentSessionId, promptPrefix: m.mergeContext };
+    const nativeFallbackPromptPrefix = textReplayFallback && m.parentSessionId ? buildPrompt(m.merge, byId, { withSteps: true }) : undefined;
+    return { resume: m.parentSessionId, fork: !!m.parentSessionId, promptPrefix: m.mergeContext, ...(nativeFallbackPromptPrefix ? { nativeFallbackPromptPrefix } : {}) };
   }
   // Continuation parent = a LINEAGE edge (fork/compact) — NOT merge, and NOT a visual 'collapse' proxy edge
   // (isLineageEdge excludes both), matching forkBaseFor's own parent walk.
@@ -1156,13 +1297,14 @@ export function materializeSendPlan(
   const parent = forkParent ? byId[forkParent] : undefined;
   if (!parent) return { fork: false }; // root → fresh session
   const base = forkBaseFor(parent, nodes, edges, turnEngine);
+  const nativeFallbackPromptPrefix = textReplayFallback && base.parentSessionId ? nativeContinuationFallbackSeed(parent, nodes, edges) : undefined;
   if (base.mergeContext) {
     // cross-engine / lineage-dirty rebuild: fork the same-engine anchor (if any), replay the skipped limb as text.
-    return { resume: base.parentSessionId, fork: !!base.parentSessionId, resumeAt: base.resumeAt, promptPrefix: base.mergeContext };
+    return { resume: base.parentSessionId, fork: !!base.parentSessionId, resumeAt: base.resumeAt, promptPrefix: base.mergeContext, ...(nativeFallbackPromptPrefix ? { nativeFallbackPromptPrefix } : {}) };
   }
   // clean same-engine continuation: spine resume (append) vs branch mid-fork, gated by the engine's midpointFork.
   const mode = continuationMode(board, nodes, edges, midpointFork);
-  return { resume: base.parentSessionId, fork: mode.fork, resumeAt: mode.resumeAt };
+  return { resume: base.parentSessionId, fork: mode.fork, resumeAt: mode.resumeAt, ...(nativeFallbackPromptPrefix ? { nativeFallbackPromptPrefix } : {}) };
 }
 
 // How a queued child (created under a still-live parent) dispatches its first turn, decided by the PARENT
@@ -1428,10 +1570,11 @@ export interface RebuildSource {
   answer?: string;
   steps?: ToolStep[];
   turns?: Turn[];
+  mergeContext?: string;
   compact?: boolean;
   compactSummary?: string;
 }
-export function buildRebuildSeed(sources: RebuildSource[], opts?: { withSteps?: boolean }): string {
+export function buildRebuildSeed(sources: RebuildSource[], opts?: { withSteps?: boolean; framing?: string }): string {
   // M-MultiEngine (AD5): a CROSS-ENGINE seed carries Q/A + tool steps (the foreign branch's tool narrative the
   // new engine's session can't inherit). A same-engine Node-Delete rebuild stays Q/A-only (withSteps=false
   // default → byte-identical to before, the no-op invariant). Steps reuse formatSteps (SSOT).
@@ -1443,15 +1586,18 @@ export function buildRebuildSeed(sources: RebuildSource[], opts?: { withSteps?: 
       if (d.prompt) s += `\nQ: ${d.prompt}\nA: ${d.answer ?? ''}`; // own post-compact follow-up turn, if any (mirrors block())
       return s;
     }
+    const mergedSeed = d.mergeContext ? `[Merged branch context]\n${d.mergeContext}\n\n` : '';
     const rounds: Turn[] = d.turns && d.turns.length
       ? d.turns
       : [{ prompt: d.prompt ?? '', answer: d.answer ?? '', steps: d.steps }];
-    return rounds.map((t) => {
+    const transcript = rounds.map((t) => {
       const qa = `Q: ${t.prompt}\nA: ${t.answer}`;
       return withSteps && t.steps && t.steps.length ? `${qa}\n${formatSteps(t.steps)}` : qa;
     }).join('\n\n');
+    return `${mergedSeed}${transcript}`;
   }).join('\n\n');
-  return `Below is the prior conversation leading up to here (an intermediate step was removed). Continue from this context:\n\n${body}`;
+  const framing = opts?.framing ?? 'Below is the prior conversation leading up to here (an intermediate step was removed). Continue from this context:';
+  return `${framing}\n\n${body}`;
 }
 
 // True when the board has an AskUserQuestion the user hasn't answered yet (its step.result is still
@@ -1781,8 +1927,13 @@ export function formatSteps(steps: ToolStep[]): string {
  * Merge-LCA-Fork: with `opts.withSteps`, each non-compact node also injects its tool steps (diffs /
  * command output / errors) via formatSteps — the divergent-branch fidelity the LCA fork can't carry.
  */
+export interface BuildPromptOptions {
+  withSteps?: boolean;
+  forkBase?: { label: string };
+}
+
 export function buildPrompt(
-  merge: MergeResult, byId: Record<string, BoardNodeT>, opts?: { withSteps?: boolean },
+  merge: MergeResult, byId: Record<string, BoardNodeT>, opts?: BuildPromptOptions,
 ): string {
   const withSteps = opts?.withSteps ?? false;
   // A compact node carries a pre-compressed summary of everything above it (the ancestor walk stops
@@ -1802,7 +1953,16 @@ export function buildPrompt(
     }
     return s;
   };
-  let p = 'Below are several independent excerpts of prior discussion. Synthesize them and continue.\n';
+  let p = opts?.forkBase
+    ? [
+        '[Braid merge note]',
+        `This message is appended to a fork of the existing Braid branch "${opts.forkBase.label}". That fork already contains that branch's prior context.`,
+        'The excerpts below are additional context from other selected Braid branches, plus any shared history not already present in the fork. Treat them as cross-branch material supplied by Braid for this merge, not as turns that happened earlier in the current branch.',
+        '',
+        'Below are the additional independent excerpts of prior discussion. Synthesize them with the forked branch and continue.',
+        '',
+      ].join('\n')
+    : 'Below are several independent excerpts of prior discussion. Synthesize them and continue.\n';
   if (merge.shared.length) {
     p += '\n[Shared background] (context common to multiple branches, listed once)\n';
     merge.shared.forEach((id) => { p += block(id); });
@@ -1835,7 +1995,12 @@ export function mergeBaseFor(
           .filter((br) => br.nodes.length),
       }
     : merge;
-  const mergeContext = buildPrompt(injected, byId, { withSteps: true });
+  const forkBaseLabel = base ? firstLine(byId[base.baseId]?.data.prompt ?? '') || base.baseId : undefined;
+  const hasInjectedContext = injected.shared.length > 0 || injected.branches.some((br) => br.nodes.length > 0);
+  const mergeContext = buildPrompt(injected, byId, {
+    withSteps: true,
+    ...(base && hasInjectedContext ? { forkBase: { label: forkBaseLabel ?? base.baseId } } : {}),
+  });
   return { merge, base, parentSessionId: base ? forkableSession(byId[base.baseId]!.data) : undefined, mergeContext };
 }
 
@@ -1965,17 +2130,18 @@ function stripStepPermissions(steps: ToolStep[] | undefined): ToolStep[] | undef
 }
 
 export function serializeGraph(nodes: BoardNodeT[], edges: Edge[], idCounter: number, seqCounter: number): SerializedGraph {
+  const folded = collapsedHiddenIds(nodes, true);
   return {
     version: GRAPH_VERSION,
     nodes: nodes.map((n) => {
-      const { onSend, onFork, onStop, onCompact, summarizing, branchSummarizing, asyncPending, queueParentId, queueStarted, queuedPrompt, ...data } = n.data; // drop callbacks + transient flags (incl. live async-pending / queued-child route)
+      const { onSend, onFork, onStop, onCompact, summarizing, branchSummarizing, asyncPending, queueParentId, queueStarted, queuedPrompt, collapsePreviewExpanded, ...data } = n.data; // drop callbacks + transient flags (incl. live async-pending / queued-child route)
       data.steps = stripStepPermissions(data.steps);
       if (data.turns) data.turns = data.turns.map((t) => (t.steps ? { ...t, steps: stripStepPermissions(t.steps) } : t));
       // Async continuation (AD6): a board held open for async work can't still be waiting in a fresh session →
       // persist it as 'done' + a marker that its background/scheduled work was abandoned at reload.
       if (data.status === 'waiting') { data.status = 'done'; data.asyncAbandoned = true; }
       // STM invariant: a fresh board never persists a native send base (recomputed at send). (D1/D2)
-      return { id: n.id, position: n.position, data: stripFreshNativeBase(data), hidden: n.hidden || undefined };
+      return { id: n.id, position: n.position, data: stripFreshNativeBase(data), hidden: (folded.has(n.id) || !!n.hidden) || undefined };
     }),
     edges: edges.map((e) => ({
       id: e.id, source: e.source, target: e.target,

@@ -5,7 +5,7 @@
 // maps / UI and drives this via the neutral Engine contract. (plans/Engine-Abstraction Phase 1+2)
 import type { ProviderConfig } from '../../sdkOptions';
 import { buildSdkOptions } from '../../sdkOptions';
-import type { ImageInput, McpServerInfo, SlashCommandSpec, ProviderAccount, EngineId } from '../../protocol';
+import type { ImageInput, McpServerInfo, SlashCommandSpec, ProviderAccount, EngineId, ModelOption } from '../../protocol';
 import { TAG_VOCAB, PROVIDER_CATALOG } from '../../protocol';
 import type {
   Engine, EngineCapabilities, EventSink, PreToolInterceptor, TurnRequest, TurnControl, TurnHandle, Attach, TurnRoute,
@@ -19,6 +19,7 @@ import {
   reduceClaudeMessage, buildTurnDone, initParseState, turnView, extractText, toSlashCommandSpec,
 } from './reduce';
 import { resolveSdkEntry } from '../../runtime/sdk-provision';
+import { withModelFallback } from '../modelCatalog';
 
 const SUMMARY_MODEL = 'claude-haiku-4-5-20251001'; // M3 collapsed-summary model (cheap + fast)
 
@@ -27,6 +28,7 @@ const SUMMARY_MODEL = 'claude-haiku-4-5-20251001'; // M3 collapsed-summary model
 // setting). 30 min comfortably covers normal background tasks / minute-granularity wakeups. (AD5, 异步续接)
 const DEFAULT_IDLE_CAP_MS = 30 * 60_000;
 const DEFAULT_WARM_IDLE_MS = 10 * 60_000;
+const STOP_TASK_GRACE_MS = 500;
 // A queued follow-up is held while a background continuation is imminent (continuationImminent) so the CLI
 // can't interleave it with the auto-re-driven turn (turnIndex / route desync). But a background task that
 // LINGERS (long-running, or that never re-drives a continuation) would otherwise hold the queued follow-up —
@@ -183,7 +185,7 @@ export class ClaudeAdapter implements Engine {
     // Model list is sourced from the catalog (SSOT) — returned by reference so consumers + tests can
     // assert identity. (compact support is expressed separately via `this.compact.mode`.)
     const desc = PROVIDER_CATALOG.find((p) => p.id === this.id);
-    return { fork: 'native', steer: true, reasoning: true, routedFollowups: true, images: this.supportsImages, midpointFork: true, models: desc?.models ?? [] };
+    return { fork: 'native', steer: true, reasoning: true, routedFollowups: true, images: this.supportsImages, midpointFork: true, textReplayFallback: false, models: desc?.models ?? [] };
   }
 
   // ---- main turn (was runQuery) ----
@@ -375,6 +377,7 @@ export class ClaudeAdapter implements Engine {
     }
     let turnSettled = false;
     let interrupted = false;
+    let intentionalClose = false;
     const settle = (isError: boolean) => {
       turnSettled = true;
       sink.done(activeRoute.boardId, activeRoute.turnIndex, buildTurnDone(state, isError, Date.now()));
@@ -383,17 +386,30 @@ export class ClaudeAdapter implements Engine {
     try {
       const q = sdk.query({ prompt: input(), options });
       ctl.onLive({
-        push: (text, images, route) => { ctl.onWarmIdle?.(false); outstanding++; cancelIdle(); queue.push({ message: userMessage(text, images), route }); wakeUp(); },
-        interrupt: async () => { interrupted = true; try { await q.interrupt(); } catch (e: any) { console.error('[Braid] interrupt failed:', e?.message ?? e); } },
+        push: (text, images, route) => { intentionalClose = false; interrupted = false; ctl.onWarmIdle?.(false); outstanding++; cancelIdle(); queue.push({ message: userMessage(text, images), route }); wakeUp(); },
+        interrupt: async () => { interrupted = true; intentionalClose = true; try { await q.interrupt(); } catch (e: any) { console.error('[Braid] interrupt failed:', e?.message ?? e); } },
         // End a waiting hold (UI Stop-waiting / delete): stop in-flight background tasks, then close the
         // input so the session ends and the board finalizes. Crons are session-scoped → closing drops them.
         stopWaiting: async () => {
-          for (const t of latestPending.background) {
-            try { await (q as any).stopTask?.(t.id); } catch (e: any) { console.error('[Braid] stopTask failed:', e?.message ?? e); }
-          }
+          intentionalClose = true;
           closed = true; cancelIdle(); wakeUp();
+          await Promise.all(latestPending.background.map(async (t) => {
+            try {
+              const stopTask = (q as any).stopTask;
+              if (typeof stopTask !== 'function') return;
+              const stop = Promise.resolve(stopTask.call(q, t.id)).catch((e: any) => {
+                console.error('[Braid] stopTask failed:', e?.message ?? e);
+              });
+              await Promise.race([
+                stop,
+                new Promise<void>((resolve) => setTimeout(resolve, STOP_TASK_GRACE_MS)),
+              ]);
+            } catch (e: any) {
+              console.error('[Braid] stopTask failed:', e?.message ?? e);
+            }
+          }));
         },
-        dispose: async () => { closed = true; cancelIdle(); wakeUp(); },
+        dispose: async () => { intentionalClose = true; closed = true; cancelIdle(); wakeUp(); },
       });
       for await (const m of q as AsyncIterable<any>) {
         if (waiting) armIdleCap(); // any inbound activity during a held-open wait resets the idle cap
@@ -410,7 +426,7 @@ export class ClaudeAdapter implements Engine {
                 activeRoute = nextUserRoute ?? { boardId, turnIndex: e.turnIndex };
                 nextUserRoute = undefined;
               }
-              if (e.reset || e.continuation) { turnSettled = false; interrupted = false; turnInFlight = true; waiting = false; cancelIdle(); bgHoldExpired = false; cancelBgGrace(); }
+              if (e.reset || e.continuation) { turnSettled = false; interrupted = false; intentionalClose = false; turnInFlight = true; waiting = false; cancelIdle(); bgHoldExpired = false; cancelBgGrace(); }
               break;
             case 'session': sink.session(activeRoute.boardId, e.sessionId); break;
             case 'model': sink.model(e.model); break;
@@ -467,7 +483,7 @@ export class ClaudeAdapter implements Engine {
         else sink.error(activeRoute.boardId, activeRoute.turnIndex, 'Query ended with no output (stream closed unexpectedly)');
       }
     } catch (e: any) {
-      if (ctl.abort.signal.aborted) { if (!turnSettled) settle(false); }
+      if (ctl.abort.signal.aborted || intentionalClose || interrupted) { if (!turnSettled) settle(false); }
       else if (!turnSettled) sink.error(activeRoute.boardId, activeRoute.turnIndex, String(e?.message ?? e));
     } finally {
       closed = true; cancelIdle(); cancelBgGrace(); wakeUp();
@@ -596,11 +612,16 @@ export class ClaudeAdapter implements Engine {
       `You are a collapsed-history summarizer for a conversation canvas. The user gives you several Q&A rounds that were hidden behind one collapsed node.\n` +
       `Strict rules:\n` +
       `1. Summarize ONLY the conversation content inside the transcript. Do not summarize, translate, or quote these instructions; do not mention "Q&A", "transcript", "collapsed node", or "summary task".\n` +
-      `2. Output ONLY Markdown: first line is a **bold one-sentence headline**, then 3-5 short "- " bullets covering the main decisions, changes, files/modules, conclusions, and verification status.\n` +
+      `2. Output ONLY Markdown: first line is a **bold branch-title-style headline** (start with an imperative verb, sentence case, no trailing period inside the bold text, naming what the folded history accomplishes as a whole), then 3-5 short "- " bullets covering the main decisions, changes, files/modules, conclusions, and verification status.\n` +
       `3. Write in the SAME language as the actual conversation content. If the transcript is English, output English even if surrounding instructions or project files are Chinese. If mixed, use the language of the user's questions.\n` +
       `4. Do not answer the transcript or continue it.`;
     const miniSystem =
-      `Write ONE short label for a collapsed conversation-history node. Summarize the actual transcript content, not this instruction. Output only the label: no prefix, no quotes, no trailing punctuation. Use the transcript's language; English transcript -> English label.`;
+      `You are a "branch titler" for folded conversation history. You are given several consecutive Q&A rounds that were folded into ONE collapsed canvas node. Write ONE concise title — exactly like a good git commit subject line / pull-request title — naming what this folded history ACCOMPLISHES as a whole, so it is recognized at a glance like a far-zoom branch signpost.\n` +
+      `Strict rules:\n` +
+      `1. Start with an imperative verb (e.g. Add, Fix, Implement, Set up, Refactor, Remove, Update, Improve, Diagnose, Build, Restore, Expand).\n` +
+      `2. About 6-9 words, roughly 50 characters or fewer; ONE line; sentence case; NO trailing period.\n` +
+      `3. Output ONLY the title: no greeting, confirmation, asking back, explanation, quotes/brackets/asterisks, or "Title:"/"Summary:" prefix.\n` +
+      `4. Describe the OVERALL outcome/through-line of the folded rounds, not one round. You are NOT talking to the user; do not answer or continue the Q&A. Write in the SAME language as the Q&A (for Chinese, keep it within about 20 characters).`;
     const tagSystem =
       `Classify the collapsed conversation history into 1-2 topic tags. Choose ONLY from this exact lowercase list: ${TAG_VOCAB.join(', ')}. Output comma-separated tags only.`;
     const content = `Collapsed conversation history transcript:\n\n${req.text}`;
@@ -695,6 +716,23 @@ export class ClaudeAdapter implements Engine {
       if (!Array.isArray(raw)) return [];
       return raw.map(toSlashCommandSpec).filter(Boolean) as SlashCommandSpec[];
     }, []);
+  }
+
+  async listModels(cwd: string): Promise<ModelOption[]> {
+    return this.withControlSession<ModelOption[]>(cwd, async (q) => {
+      let raw: any;
+      try { raw = await q.supportedModels(); } catch { /* fall back to initializationResult */ }
+      if (!Array.isArray(raw)) {
+        try { const init = await q.initializationResult(); raw = init?.models; } catch { /* ignore */ }
+      }
+      if (!Array.isArray(raw)) return [];
+      return withModelFallback(this.id, raw.map((m: any): ModelOption | null => {
+        const value = typeof m?.value === 'string' ? m.value : '';
+        if (!value.trim()) return null;
+        const label = typeof m?.displayName === 'string' && m.displayName.trim() ? m.displayName : value;
+        return { value, label };
+      }).filter(Boolean) as ModelOption[]);
+    }, withModelFallback(this.id, []));
   }
 
   /** Run `fn` over a short-lived streaming-input control session (empty keep-alive input, like

@@ -4,7 +4,7 @@ import type {
   Engine, EngineCapabilities, EventSink, McpController, PermissionVerdict, PreToolInterceptor,
   CollapseDigestRequest, SummarizeRequest, TurnControl, TurnRequest,
 } from '../types';
-import type { ProviderAccount, SlashCommandSpec } from '../../protocol';
+import type { ProviderAccount, SlashCommandSpec, ModelOption } from '../../protocol';
 import { PROVIDER_CATALOG, TAG_VOCAB } from '../../protocol';
 import { DeepSeekAccountControl, DEEPSEEK_BASE_URL } from './control';
 import {
@@ -15,6 +15,7 @@ import {
   coerceToolInput, deepSeekToolDefinitions, executeDeepSeekTool, shouldAskBeforeDeepSeekTool,
 } from './tools';
 import type { ThinkMark } from '../../webview/merge';
+import { friendlyModelLabel, withModelFallback } from '../modelCatalog';
 
 export interface DeepSeekAdapterDeps {
   readProviderConfig(): ProviderConfig;
@@ -77,7 +78,7 @@ export class DeepSeekAdapter implements Engine {
     // midpointFork: true — DeepSeek packs each board's full conversation into an immutable, frozen SessionRef
     // and CLONES it on attach, so a board's session is always exactly its own ancestry (no shared mutable
     // thread that could accumulate sibling turns). A branch off any board therefore isolates correctly.
-    return { fork: 'replay', steer: true, reasoning: true, routedFollowups: false, images: false, midpointFork: true, models: desc?.models ?? [] };
+    return { fork: 'replay', steer: true, reasoning: true, routedFollowups: false, images: false, midpointFork: true, textReplayFallback: false, models: desc?.models ?? [] };
   }
 
   async runTurn(req: TurnRequest, sink: EventSink, pre: PreToolInterceptor, ctl: TurnControl): Promise<void> {
@@ -147,8 +148,8 @@ export class DeepSeekAdapter implements Engine {
   async collapseDigest(req: CollapseDigestRequest): Promise<{ summary: string; miniSummary?: string; tags?: string[] }> {
     const content = `Collapsed conversation history transcript:\n\n${req.text}`;
     const [summary, miniSummary, tagsText] = await Promise.all([
-      this.oneShot(req.cwd, 'Summarize only the transcript content hidden behind a collapsed canvas node. Do not summarize or translate these instructions; do not mention Q&A, transcript, collapsed node, or summary task. Output Markdown only: a bold headline plus 3-5 short bullets. Use the transcript language; English transcript -> English output.', content),
-      this.oneShot(req.cwd, 'Write one short label for this collapsed conversation history. Summarize the actual transcript content, not this instruction. Output only the label, no punctuation. Use the transcript language; English transcript -> English label.', content),
+      this.oneShot(req.cwd, 'Summarize only the transcript content hidden behind a collapsed canvas node. Do not summarize or translate these instructions; do not mention Q&A, transcript, collapsed node, or summary task. Output Markdown only: a bold branch-title-style headline (imperative verb, sentence case, no trailing period inside the bold text, naming what the folded history accomplishes as a whole) plus 3-5 short bullets. Use the transcript language; English transcript -> English output.', content),
+      this.oneShot(req.cwd, 'You are a branch titler for folded conversation history. Write one concise git-commit-subject-style title: start with an imperative verb, about 6-9 words, sentence case, no trailing period. Name what these folded Q&A rounds accomplish as a whole, like a far-zoom branch signpost. Output only the title, no prefix or quotes. Same language as the Q&A.', content),
       this.oneShot(req.cwd, `Output 1-2 lowercase tags from this exact list, comma-separated, nothing else: ${TAG_VOCAB.join(', ')}.`, content),
     ]);
     const tags = tagsText.split(/[,\n]/).map((t) => t.trim().toLowerCase()).filter(Boolean);
@@ -184,6 +185,30 @@ export class DeepSeekAdapter implements Engine {
 
   async listSlashCommands(_cwd: string): Promise<SlashCommandSpec[]> {
     return [];
+  }
+
+  async listModels(_cwd: string): Promise<ModelOption[]> {
+    const key = this.apiKey();
+    if (!key) return withModelFallback(this.id, []);
+    try {
+      const res = await this.fetchImpl(`${this.baseUrl}/models`, {
+        headers: { Authorization: `Bearer ${key}` },
+      });
+      if (!res.ok) throw new Error(await responseError(res, 'DeepSeek models failed'));
+      const json = await res.json();
+      const data = Array.isArray(json?.data) ? json.data : [];
+      const models = data
+        .map((m: any): ModelOption | null => {
+          const value = typeof m?.id === 'string' ? m.id : typeof m?.model === 'string' ? m.model : '';
+          if (!value.trim()) return null;
+          return { value, label: friendlyModelLabel(this.id, value) };
+        })
+        .filter(Boolean) as ModelOption[];
+      return withModelFallback(this.id, models);
+    } catch (e: any) {
+      console.error('[Braid] deepseek listModels failed:', e?.message ?? e);
+      return withModelFallback(this.id, []);
+    }
   }
 
   async checkAuth(cwd: string, abort: AbortController): Promise<AuthResult> {

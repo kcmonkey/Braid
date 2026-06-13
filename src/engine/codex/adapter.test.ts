@@ -43,6 +43,49 @@ describe('approvalAndSandbox', () => {
   });
 });
 
+describe('CodexAdapter.listModels', () => {
+  it('loads model/list pages, filters hidden models, and keeps service default first', async () => {
+    const calls: { method: string; params: any }[] = [];
+    let disposed = false;
+    const a = new CodexAdapter({
+      resolveBinary: () => undefined,
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }),
+    });
+    (a as any).open = async () => ({
+      notify: () => {},
+      dispose: () => { disposed = true; },
+      request: async (method: string, params: any) => {
+        calls.push({ method, params });
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'model/list' && !params.cursor) {
+          return {
+            data: [
+              { id: 'gpt-5.4', displayName: 'GPT-5.4' },
+              { id: 'hidden-model', displayName: 'Hidden', hidden: true },
+            ],
+            nextCursor: 'page-2',
+          };
+        }
+        if (method === 'model/list' && params.cursor === 'page-2') {
+          return { data: [{ model: 'gpt-5.6', displayName: 'GPT-5.6', isDefault: true }] };
+        }
+        return {};
+      },
+    });
+
+    await expect(a.listModels('D:\\work')).resolves.toEqual([
+      { value: '', label: 'Default model', contextWindow: 258_400 },
+      { value: 'gpt-5.6', label: 'GPT-5.6', contextWindow: 258_400 },
+      { value: 'gpt-5.4', label: 'GPT-5.4', contextWindow: 258_400 },
+    ]);
+    expect(disposed).toBe(true);
+    expect(calls.filter((c) => c.method === 'model/list').map((c) => c.params)).toEqual([
+      { cursor: undefined, includeHidden: false },
+      { cursor: 'page-2', includeHidden: false },
+    ]);
+  });
+});
+
 describe('turnPermissionOverrides', () => {
   it('maps default mode to Codex workspaceWrite sandbox policy', () => {
     expect(turnPermissionOverrides('default', 'D:\\work')).toEqual({
@@ -140,6 +183,200 @@ describe('CodexAdapter.runTurn permission reload', () => {
     expect(turnStarts[0].params.sandboxPolicy.type).toBe('workspaceWrite');
     expect(turnStarts[1].params.approvalPolicy).toBe('never');
     expect(turnStarts[1].params.sandboxPolicy).toEqual({ type: 'dangerFullAccess' });
+  });
+});
+
+describe('CodexAdapter abort', () => {
+  it('settles an aborted in-progress turn even if app-server never emits turn/completed', async () => {
+    let turnStarted = false;
+    let disposed = false;
+    const done: any[] = [];
+    const errors: string[] = [];
+    const a = new CodexAdapter({
+      resolveBinary: () => undefined,
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }),
+    });
+
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {},
+      dispose: () => { disposed = true; },
+      request: async (method: string, _params: any) => {
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') return { thread: { id: 'T' } };
+        if (method === 'turn/start') {
+          turnStarted = true;
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+
+    const sink: any = {
+      session: () => {},
+      model: () => {},
+      update: () => {},
+      thinking: () => {},
+      toolUse: () => {},
+      toolResult: () => {},
+      rateLimit: () => {},
+      commands: () => {},
+      waiting: () => {},
+      task: () => {},
+      error: (_boardId: string, _turnIndex: number | undefined, message: string) => { errors.push(message); },
+      done: (_boardId: string, _turnIndex: number, payload: any) => { done.push(payload); },
+    };
+    const pre: any = {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async () => ({ allow: true }),
+      onUserInput: async () => ({ answers: {}, canceled: true }),
+      onElicit: async () => ({ action: 'decline' }),
+    };
+    const ctl: any = { abort: new AbortController(), onLive: () => {} };
+
+    const run = a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'hi', cwd: 'D:\\work' }, sink, pre, ctl);
+    for (let i = 0; i < 20 && !turnStarted; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(turnStarted).toBe(true);
+
+    ctl.abort.abort();
+    await run;
+
+    expect(disposed).toBe(true);
+    expect(errors).toEqual([]);
+    expect(done).toHaveLength(1);
+    expect(done[0].isError).toBe(false);
+  });
+});
+
+describe('CodexAdapter app-server exit', () => {
+  it('settles with an error if app-server exits after turn/start but before turn/completed', async () => {
+    let turnStarted = false;
+    let onExit: ((code: number | null) => void) | undefined;
+    const done: any[] = [];
+    const errors: string[] = [];
+    const a = new CodexAdapter({
+      resolveBinary: () => undefined,
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }),
+    });
+
+    (a as any).open = async (_cwd: string, handlers: any) => {
+      onExit = handlers.onExit;
+      return {
+        notify: () => {},
+        dispose: () => {},
+        request: async (method: string, _params: any) => {
+          if (method === 'account/read') return { account: { type: 'chatgpt' } };
+          if (method === 'thread/start') return { thread: { id: 'T' } };
+          if (method === 'turn/start') {
+            turnStarted = true;
+            handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+            handlers.onNotification?.('item/agentMessage/delta', { delta: 'partial' });
+            return { turn: { id: 'turn-1' } };
+          }
+          return {};
+        },
+      };
+    };
+
+    const sink: any = {
+      session: () => {},
+      model: () => {},
+      update: () => {},
+      thinking: () => {},
+      toolUse: () => {},
+      toolResult: () => {},
+      rateLimit: () => {},
+      commands: () => {},
+      waiting: () => {},
+      task: () => {},
+      error: (_boardId: string, _turnIndex: number | undefined, message: string) => { errors.push(message); },
+      done: (_boardId: string, _turnIndex: number, payload: any) => { done.push(payload); },
+    };
+    const pre: any = {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async () => ({ allow: true }),
+      onUserInput: async () => ({ answers: {}, canceled: true }),
+      onElicit: async () => ({ action: 'decline' }),
+    };
+
+    const run = a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'hi', cwd: 'D:\\work' }, sink, pre, { abort: new AbortController(), onLive: () => {} } as any);
+    for (let i = 0; i < 20 && !turnStarted; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(turnStarted).toBe(true);
+    expect(onExit).toBeTypeOf('function');
+
+    onExit?.(1);
+    await run;
+
+    expect(errors).toEqual(['Codex app-server exited before the turn completed (exit code 1)']);
+    expect(done).toHaveLength(1);
+    expect(done[0]).toMatchObject({ isError: true, text: 'partial' });
+  });
+});
+
+describe('CodexAdapter missing rollout fallback', () => {
+  it('retries on a fresh thread with the provided text replay prompt', async () => {
+    const calls: { method: string; params: any }[] = [];
+    const done: any[] = [];
+    const errors: string[] = [];
+    const a = new CodexAdapter({
+      resolveBinary: () => undefined,
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }),
+    });
+
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {},
+      dispose: () => {},
+      request: async (method: string, params: any) => {
+        calls.push({ method, params });
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/fork') throw new Error('no rollout found for thread id OLD');
+        if (method === 'thread/start') return { thread: { id: 'NEW' } };
+        if (method === 'turn/start') {
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          handlers.onNotification?.('item/agentMessage/delta', { delta: 'ok' });
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+
+    const sink: any = {
+      session: () => {},
+      model: () => {},
+      update: () => {},
+      thinking: () => {},
+      toolUse: () => {},
+      toolResult: () => {},
+      rateLimit: () => {},
+      commands: () => {},
+      waiting: () => {},
+      task: () => {},
+      error: (_boardId: string, _turnIndex: number | undefined, message: string) => { errors.push(message); },
+      done: (_boardId: string, _turnIndex: number, payload: any) => { done.push(payload); },
+    };
+    const pre: any = {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async () => ({ allow: true }),
+      onUserInput: async () => ({ answers: {}, canceled: true }),
+      onElicit: async () => ({ action: 'decline' }),
+    };
+
+    await a.runTurn({
+      boardId: 'b',
+      attach: { kind: 'fork', session: { engine: 'codex', raw: 'OLD' } },
+      prompt: 'new question',
+      nativeFallbackPrompt: 'RECOVERED CONTEXT\n\nnew question',
+      cwd: 'D:\\work',
+    }, sink, pre, { abort: new AbortController(), onLive: () => {} } as any);
+
+    expect(errors).toEqual([]);
+    expect(calls.some((c) => c.method === 'thread/fork')).toBe(true);
+    expect(calls.some((c) => c.method === 'thread/start')).toBe(true);
+    const turn = calls.find((c) => c.method === 'turn/start');
+    expect(turn?.params.threadId).toBe('NEW');
+    expect(turn?.params.input[0].text).toBe('RECOVERED CONTEXT\n\nnew question');
+    expect(done[0]?.sessionId).toBe('NEW');
   });
 });
 

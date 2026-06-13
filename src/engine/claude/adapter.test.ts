@@ -31,6 +31,7 @@ function recordingSink() {
 function fakeQuery() {
   const buffer: any[] = [];
   let done = false;
+  let failure: any;
   let notify: (() => void) | null = null;
   let interruptCount = 0;
   const wake = () => { if (notify) { const n = notify; notify = null; n(); } };
@@ -38,13 +39,20 @@ function fakeQuery() {
     async *[Symbol.asyncIterator]() {
       while (true) {
         while (buffer.length) yield buffer.shift();
+        if (failure) throw failure;
         if (done) return;
         await new Promise<void>((r) => { notify = r; });
       }
     },
     interrupt: async () => { interruptCount++; },
   };
-  return { q, emit: (m: any) => { buffer.push(m); wake(); }, finish: () => { done = true; wake(); }, get interrupts() { return interruptCount; } };
+  return {
+    q,
+    emit: (m: any) => { buffer.push(m); wake(); },
+    finish: () => { done = true; wake(); },
+    fail: (e: any) => { failure = e; wake(); },
+    get interrupts() { return interruptCount; },
+  };
 }
 
 function harness(opts: { loadSdk?: () => Promise<any>; config?: ProviderConfig; getApiKey?: () => string | undefined; endpointProfile?: any; id?: any } = {}) {
@@ -58,6 +66,57 @@ function harness(opts: { loadSdk?: () => Promise<any>; config?: ProviderConfig; 
 const noopPre: PreToolInterceptor = { onPreToolUse: async () => ({ proceed: true }), onPermissionRequest: async () => ({ allow: true }), onUserInput: async () => ({ answers: {}, canceled: true }), onElicit: async () => ({ action: 'decline' }) };
 const req = (attach: Attach, extra: Partial<TurnRequest> = {}): TurnRequest => ({ boardId: 'b1', attach, prompt: 'hi', cwd: '/w', ...extra });
 const init = { type: 'system', subtype: 'init', session_id: 's1', model: 'claude-opus-4-8' };
+
+describe('ClaudeAdapter.listModels', () => {
+  const sdkWithModels = (raw: any[], captured: any = {}) => ({
+    query: (args: any) => {
+      captured.options = args.options;
+      return {
+        supportedModels: async () => raw,
+        async *[Symbol.asyncIterator]() {},
+      };
+    },
+  });
+
+  it('loads supportedModels from a short-lived control session and enriches context windows', async () => {
+    const captured: any = {};
+    const adapter = new ClaudeAdapter({
+      loadSdk: async () => sdkWithModels([
+        { value: 'claude-fable-5', displayName: 'Fable 5' },
+        { value: 'claude-haiku-4-5-20251001', displayName: 'Haiku 4.5' },
+      ], captured),
+      readProviderConfig: () => cfg,
+    });
+
+    await expect(adapter.listModels('/w')).resolves.toEqual([
+      { value: '', label: 'Default model', contextWindow: 1_000_000 },
+      { value: 'claude-fable-5', label: 'Fable 5', contextWindow: 1_000_000 },
+      { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5', contextWindow: 200_000 },
+    ]);
+    expect(captured.options).toMatchObject({ cwd: '/w', permissionMode: 'bypassPermissions', persistSession: false });
+  });
+
+  it('covers registered DeepSeek through the Claude Code harness path', async () => {
+    const adapter = new ClaudeAdapter({
+      id: 'deepseek',
+      loadSdk: async () => sdkWithModels([
+        { value: 'deepseek-v4-pro', displayName: 'DeepSeek V4 Pro' },
+        { value: 'deepseek-v4-flash', displayName: 'DeepSeek V4 Flash' },
+      ]),
+      readProviderConfig: () => ({ ...cfg, authMethod: 'apiKey' }),
+      getApiKey: () => 'sk-deepseek-test',
+      endpointProfile: { baseUrl: 'https://api.deepseek.com/anthropic', model: 'deepseek-v4-pro', fastModel: 'deepseek-v4-flash' },
+      images: false,
+      summaryModel: 'deepseek-v4-flash',
+    });
+
+    await expect(adapter.listModels('/w')).resolves.toEqual([
+      { value: '', label: 'Default model', contextWindow: 1_000_000 },
+      { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro', contextWindow: 1_000_000 },
+      { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash', contextWindow: 1_000_000 },
+    ]);
+  });
+});
 
 describe('ClaudeAdapter.runTurn — auth method → spawn env (authMethod / billing invariant)', () => {
   const runFresh = async (h: ReturnType<typeof harness>) => {
@@ -219,6 +278,32 @@ describe('ClaudeAdapter.runTurn — streaming + settle', () => {
     await p;
     const done = calls.find((c) => c.t === 'done');
     expect(done.d).toMatchObject({ isError: false, text: 'half' });
+  });
+
+  it('intentional dispose + process exit settles partial output instead of surfacing a crash', async () => {
+    const { adapter, fake } = harness();
+    const { sink, calls } = recordingSink();
+    let handle: TurnHandle | undefined;
+    const p = adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } });
+    fake.emit(init);
+    fake.emit({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'partial' } } });
+    await new Promise((r) => setTimeout(r, 5));
+    await handle!.dispose();
+    fake.fail(new Error('Claude Code process exited with code 4294967295'));
+    await p;
+    expect(calls.some((c) => c.t === 'error')).toBe(false);
+    expect(calls.find((c) => c.t === 'done').d).toMatchObject({ isError: false, text: 'partial' });
+  });
+
+  it('unexpected process exit still surfaces as an error', async () => {
+    const { adapter, fake } = harness();
+    const { sink, calls } = recordingSink();
+    const p = adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: () => {} });
+    fake.emit(init);
+    fake.fail(new Error('Claude Code process exited with code 4294967295'));
+    await p;
+    expect(calls.find((c) => c.t === 'error').m).toBe('Claude Code process exited with code 4294967295');
+    expect(calls.some((c) => c.t === 'done')).toBe(false);
   });
 
   // Regression (2026-06-11): a follow-up queued mid-turn must NOT be written to the CLI's stdin until the
@@ -567,7 +652,7 @@ describe('ClaudeAdapter — canUseTool (permission) wiring', () => {
 // models the real CLI: when our input() generator RETURNS (session closed), the fake ends its OUTPUT too.
 // ---------------------------------------------------------------------------------------------------------
 describe('ClaudeAdapter.runTurn — async continuation (hold-open gate)', () => {
-  function couplingFake() {
+  function couplingFake(opts: { stopTask?: (id: string) => Promise<void> } = {}) {
     const out: any[] = [];
     let outWake: (() => void) | null = null;
     let outDone = false;
@@ -587,7 +672,10 @@ describe('ClaudeAdapter.runTurn — async continuation (hold-open gate)', () => 
         }
       },
       interrupt: async () => {},
-      stopTask: async (id: string) => { stopTaskCalls.push(id); },
+      stopTask: async (id: string) => {
+        stopTaskCalls.push(id);
+        await opts.stopTask?.(id);
+      },
     };
     const sdk = { query: (args: any) => { promptIterable = args.prompt; capturedOptions = args.options; return q; } };
     return { sdk, emit: (m: any) => { out.push(m); wake(); }, get inputClosed() { return inputClosed; }, get options() { return capturedOptions; }, stopTaskCalls };
@@ -674,6 +762,32 @@ describe('ClaudeAdapter.runTurn — async continuation (hold-open gate)', () => 
     await new Promise((r) => setTimeout(r, 20));
     expect(resolved).toBe(true);
     expect(fake.stopTaskCalls).toEqual(['t1']);          // the in-flight background task was stopped
+    expect(fake.inputClosed).toBe(true);
+  });
+
+  it('stopWaiting() closes even when stopTask never answers', async () => {
+    const fake = couplingFake({ stopTask: async () => new Promise<void>(() => {}) });
+    const adapter = new ClaudeAdapter({ loadSdk: async () => fake.sdk, readProviderConfig: () => cfg });
+    const { sink } = recordingSink();
+    let handle: TurnHandle | undefined;
+    let resolved = false;
+    adapter.runTurn(req({ kind: 'fresh' }), sink, noopPre, { abort: new AbortController(), onLive: (h) => { handle = h; } }).then(() => { resolved = true; });
+    await tick();
+    const stop = fake.options.hooks.Stop[0].hooks[0];
+    fake.emit(init);
+    await stop(bgPending);
+    fake.emit(result());
+    await tick();
+    expect(resolved).toBe(false);
+
+    const stopped = await Promise.race([
+      handle!.stopWaiting().then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1200)),
+    ]);
+    expect(stopped).toBe(true);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(resolved).toBe(true);
+    expect(fake.stopTaskCalls).toEqual(['t1']);
     expect(fake.inputClosed).toBe(true);
   });
 

@@ -90,6 +90,35 @@ function webSearchResult(item: any): string {
   return 'Completed web search.';
 }
 
+function firstString(...xs: unknown[]): string | undefined {
+  for (const x of xs) if (typeof x === 'string' && x.trim()) return x;
+  return undefined;
+}
+
+function firstLineText(s: string): string {
+  return s.split(/\r?\n/, 1)[0].trim();
+}
+
+function collabAgentInput(item: any): Record<string, unknown> {
+  const prompt = firstString(item?.prompt) ?? '';
+  const action = firstString(item?.tool) ?? 'agent';
+  const receiverThreadIds = Array.isArray(item?.receiverThreadIds)
+    ? item.receiverThreadIds.filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0)
+    : [];
+  const input: Record<string, unknown> = {
+    subagent_type: firstString(item?.subagent_type, item?.subagentType, item?.agentType, item?.agentName, item?.name) ?? 'Codex agent',
+    description: firstString(item?.description, firstLineText(prompt), action) ?? 'Codex agent',
+    prompt,
+    collab_action: action,
+    receiverThreadIds,
+  };
+  const model = firstString(item?.model);
+  if (model) input.model = model;
+  const senderThreadId = firstString(item?.senderThreadId, item?.senderThreadID);
+  if (senderThreadId) input.senderThreadId = senderThreadId;
+  return input;
+}
+
 // ---- command classification (Codex tool-card polish) ----
 // Conservative: only confidently read-only commands get a semantic action; anything compound/redirected/
 // unknown stays 'run' (the generic ⌘ Command card shows the raw command, never mislabeled). Pure + tested.
@@ -196,15 +225,14 @@ function toolNameInput(item: any): { name: string; input: Record<string, unknown
       return { name: 'WebSearch', input: webSearchInput(item) };
     case 'plan':
       return { name: 'Plan', input: { text: item.text ?? '' } };
-    // P2 display mappings (capability-layer): no contract change — these flow through the generic tool card.
+    // P2 display mappings (capability-layer): no contract change; these flow through existing cards.
     case 'dynamicToolCall':
       return { name: typeof item.tool === 'string' && item.tool ? item.tool : 'DynamicTool',
         input: (item.arguments && typeof item.arguments === 'object' ? item.arguments : {}) as Record<string, unknown> };
     case 'collabAgentToolCall':
-      // Codex subagent op (spawnAgent/sendInput/wait/…). Flat card for now; cross-thread parentId nesting is
-      // best-effort/future (the sub-agent runs in its own thread). (plan P2)
-      return { name: typeof item.tool === 'string' && item.tool ? item.tool : 'Agent',
-        input: { prompt: item.prompt ?? '', model: item.model ?? undefined, receiverThreadIds: Array.isArray(item.receiverThreadIds) ? item.receiverThreadIds : [] } };
+      // Codex subagent ops run in receiver threads. We cannot synthesize Claude-style child parentId steps
+      // from this parent stream, but the parent card should still read as an Agent rather than a raw tool.
+      return { name: 'Agent', input: collabAgentInput(item) };
     case 'imageView':
       return { name: 'ViewImage', input: { file_path: item.path ?? '' } };
     case 'imageGeneration':
@@ -244,7 +272,7 @@ function toolResultOf(item: any): { content: string; isError: boolean } {
       return { content: cap(text), isError: item.success === false || item.status === 'failed' };
     }
     case 'collabAgentToolCall': {
-      const recv = Array.isArray(item.receiverThreadIds) && item.receiverThreadIds.length ? `→ ${item.receiverThreadIds.join(', ')}` : '';
+      const recv = Array.isArray(item.receiverThreadIds) && item.receiverThreadIds.length ? `-> ${item.receiverThreadIds.join(', ')}` : '';
       return { content: cap([item.tool, item.status, recv].filter(Boolean).join(' ')), isError: item.status === 'failed' };
     }
     case 'imageView':

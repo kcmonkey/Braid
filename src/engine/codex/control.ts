@@ -35,15 +35,29 @@ export function toCodexAccount(account: any): ProviderAccount {
 /** Map `account/rateLimits/read` → ProviderUsage windows (primary = 5h, secondary = weekly). resetsAt is
  * epoch seconds → ISO. A window with no `usedPercent` is dropped. */
 export function mapCodexUsage(res: any): ProviderUsage {
-  const snap = res?.rateLimits;
   const windows: UsageWindow[] = [];
-  const add = (w: any, id: string) => {
+  const addWindow = (w: any, id: string, prefix?: string | null) => {
     if (!w || typeof w.usedPercent !== 'number') return;
     const mins = w.windowDurationMins;
-    const label = mins === 300 ? '5h limit' : mins === 10080 ? 'Weekly limit' : typeof mins === 'number' ? `${mins}min limit` : id;
+    const base = mins === 300 ? '5h limit' : mins === 10080 ? 'Weekly limit' : typeof mins === 'number' ? `${mins}min limit` : id;
+    const label = prefix ? `${prefix} ${base}` : base;
     windows.push({ id, label, utilizationPct: w.usedPercent, resetsAt: typeof w.resetsAt === 'number' ? new Date(w.resetsAt * 1000).toISOString() : null });
   };
-  if (snap) { add(snap.primary, 'primary'); add(snap.secondary, 'secondary'); }
+  const addSnapshot = (snap: any, bucketId?: string, showPrefix = false) => {
+    if (!snap || typeof snap !== 'object') return;
+    const prefix = showPrefix ? (typeof snap.limitName === 'string' && snap.limitName ? snap.limitName : bucketId) : undefined;
+    const idPrefix = bucketId ? `${bucketId}:` : '';
+    addWindow(snap.primary, `${idPrefix}primary`, prefix);
+    addWindow(snap.secondary, `${idPrefix}secondary`, prefix);
+  };
+  const byLimit = res?.rateLimitsByLimitId && typeof res.rateLimitsByLimitId === 'object'
+    ? Object.entries(res.rateLimitsByLimitId).filter(([, snap]) => !!snap)
+    : [];
+  if (byLimit.length) {
+    for (const [bucketId, snap] of byLimit) addSnapshot(snap, bucketId, byLimit.length > 1);
+  } else {
+    addSnapshot(res?.rateLimits);
+  }
   return { windows };
 }
 

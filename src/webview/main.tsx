@@ -13,14 +13,14 @@ import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github-dark.css';
 import './styles.css';
 import {
-  type BoardData, type BoardNodeT, type MergeResult, type SerializedGraph, type ToolStep, type Status,
+  type BoardData, type BoardNodeT, type SerializedGraph, type ToolStep, type Status,
   type EditorContext, type AskUserQuestion, type Turn, type ThinkMark, type TurnViewStatus,
   GRAPH_VERSION, boardEngine, firstLine, summaryHeadline, normalizeTags, needsDigest, DIGEST_VERSION, MAX_CONCURRENT_SUMMARIES, thinkMarks, ancestorsOf, continuationChildren, descendToFork, mergeLeaves, materializeSendPlan, queuedChildDispatch, mergeBaseFor, restampActiveProvider, mergeFit, mergeUnion, modelWindowFor,
   isSignpost, branchSegment, branchSummaryKey, needsBranchSummary, clampLabel, MAX_CONCURRENT_BRANCH_SUMMARIES,
   contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, hasPendingAsk, hasPendingPermission, nextPermMode,
-  serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
-  planCollapseSelection, collapseSelection, planAutoCollapseAfterDone, applyCollapsePlans, expandCollapsedGraph, syncHiddenEdges,
-  archivedBoardIds, archiveBoards, restoreArchivedBoards, syncArchiveVisibility,
+  serializeGraph, makeEdge, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
+  planCollapseSelection, collapseSelection, planAutoCollapseAfterDone, applyCollapsePlans, expandCollapsedGraph, collapseExpandedCollapsedGraphs, uncollapseCollapsedGraph, syncHiddenEdges,
+  archivedBoardIds, archiveScopeIds, archiveBoards, restoreArchivedBoards, syncArchiveVisibility,
   needsCollapseDigest, collapseDigestKey, collapseDigestText,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
@@ -770,8 +770,20 @@ function SubagentCard({ step, steps }: { step: ToolStep; steps: ToolStep[] }) {
   const kind = typeof i.subagent_type === 'string' ? i.subagent_type : 'agent';
   const desc = typeof i.description === 'string' ? i.description : '';
   const brief = typeof i.prompt === 'string' ? i.prompt : '';
+  const action = typeof i.collab_action === 'string' ? i.collab_action : '';
+  const model = typeof i.model === 'string' ? i.model : '';
+  const receiverThreadIds = Array.isArray(i.receiverThreadIds) ? i.receiverThreadIds.filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0) : [];
+  const senderThreadId = typeof i.senderThreadId === 'string' ? i.senderThreadId : '';
+  const threadLabel = receiverThreadIds.length ? `thread ${receiverThreadIds.join(', ')}` : '';
+  const meta = [
+    action && action !== 'spawnAgent' ? action : '',
+    model,
+    threadLabel,
+    senderThreadId ? `from ${senderThreadId}` : '',
+  ].filter(Boolean);
   const pending = step.result == null;
   const childCount = steps.filter((s) => s.parentId === step.id).length;
+  const reportLabel = action ? 'Status' : 'Report';
   return (
     <div className={`tool tool--agent ${step.isError ? 'tool--err' : ''}`}>
       <div className="tool__head" onClick={() => setOpen((o) => !o)}>
@@ -779,6 +791,7 @@ function SubagentCard({ step, steps }: { step: ToolStep; steps: ToolStep[] }) {
         <span className="tool__name">🔍 {kind}</span>
         <span className="tool__sum" title={desc}>{desc}</span>
         {childCount > 0 && <span className="agent__count">{childCount} steps</span>}
+        {meta.map((m) => <span key={m} className="agent__count">{m}</span>)}
         {pending && <span className="tool__badge tool__badge--busy">Investigating…</span>}
         {step.isError && <span className="tool__badge">err</span>}
       </div>
@@ -798,7 +811,7 @@ function SubagentCard({ step, steps }: { step: ToolStep; steps: ToolStep[] }) {
               </div>
             </>
           )}
-          <div className="agent__label">Report</div>
+          <div className="agent__label">{reportLabel}</div>
           {pending ? (
             <div className="tool__pending">Investigating…</div>
           ) : (
@@ -849,7 +862,7 @@ const SignpostCtx = React.createContext<Map<string, string>>(new Map());
 
 // Visual graph collapse, provided by App so a collapsed representative can expand. Creating a collapse now
 // lives in the multi-selection action bar; BoardNode only needs the restore affordance.
-const CollapseCtx = React.createContext<{ expand: (id: string) => void }>({ expand: () => {} });
+const CollapseCtx = React.createContext<{ expand: (id: string) => void; uncollapse: (id: string) => void }>({ expand: () => {}, uncollapse: () => {} });
 
 // M7 gap3: pending editor-context attachment (the active/last-focused file's selection or whole file),
 // now keyed PER BOARD so a board's card and its ChatView composer share one chip while different boards
@@ -1239,11 +1252,12 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const needsPerm = hasPendingPermission(data);
   const isArchived = !!data.archived;
   const isCollapsedGraph = !!data.collapsedGraph;
+  const collapsePreviewOpen = !!data.collapsePreviewExpanded;
   const collapsedCount = (data.collapsedGraph?.hiddenIds.length ?? 0) + 1;
   // What the COLLAPSED card shows instead of a bare count: the folded-history gist (digest miniSummary →
   // summary headline) generated by Haiku, falling back to a plain label until the digest lands.
   const collapsedGist = data.collapsedGraph
-    ? (data.collapsedGraph.miniSummary || summaryHeadline(data.collapsedGraph.summary ?? '') || 'Collapsed history')
+    ? clampLabel(data.collapsedGraph.miniSummary || summaryHeadline(data.collapsedGraph.summary ?? '') || 'Collapsed history')
     : '';
   const targetPos = dir === 'LR' ? Position.Left : Position.Top;
   const sourcePos = dir === 'LR' ? Position.Right : Position.Bottom;
@@ -1333,9 +1347,16 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const expandCollapseBtn = isCollapsedGraph ? (
     <button
       className="board__collapse-expand nodrag nopan"
-      title="Expand collapsed history"
+      title={collapsePreviewOpen ? 'Collapse this temporary preview' : 'Preview collapsed history'}
       onClick={(e) => { e.stopPropagation(); collapseCtx.expand(id); }}
-    >Expand</button>
+    >{collapsePreviewOpen ? 'Collapse' : 'Expand'}</button>
+  ) : null;
+  const uncollapseBtn = isCollapsedGraph && collapsePreviewOpen ? (
+    <button
+      className="board__collapse-expand nodrag nopan"
+      title="Permanently remove this collapse; auto-collapse may fold it again after future completed boards"
+      onClick={(e) => { e.stopPropagation(); collapseCtx.uncollapse(id); }}
+    >Uncollapse</button>
   ) : null;
   return (
     <>
@@ -1420,7 +1441,10 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
       {isCollapsedGraph && (
         <div className="board__foldrow">
           <span className="board__foldmeta" title={`${collapsedCount} boards folded here`}>{collapsedCount} boards folded</span>
-          {expandCollapseBtn}
+          <span className="board__foldactions">
+            {expandCollapseBtn}
+            {uncollapseBtn}
+          </span>
         </div>
       )}
 
@@ -2167,18 +2191,18 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
             onChange={(e) => onChange({ autoCollapseEnabled: e.target.checked })}
           />
         </label>
-        <label className={`settings__row ${config.autoCollapseEnabled ? '' : 'settings__gated'}`} title="Maximum visible boards kept in one plain linear segment before folding its front.">
-          <span className="settings__lbl">Linear collapse length</span>
+        <label className={`settings__row ${config.autoCollapseEnabled ? '' : 'settings__gated'}`} title="Visible boards to keep per branch segment; the collapsed representative counts as one.">
+          <span className="settings__lbl">Auto-collapse length</span>
           <input
-            type="number" min={3} max={64} value={config.autoCollapseLinearThreshold} disabled={!config.autoCollapseEnabled}
-            onChange={(e) => onChange({ autoCollapseLinearThreshold: Math.max(3, Math.min(64, Math.floor(Number(e.target.value) || 8))) })}
+            type="number" min={2} max={64} value={config.autoCollapseThreshold} disabled={!config.autoCollapseEnabled}
+            onChange={(e) => onChange({ autoCollapseThreshold: Math.max(2, Math.min(64, Math.floor(Number(e.target.value) || 3))) })}
           />
         </label>
-        <label className={`settings__row ${config.autoCollapseEnabled ? '' : 'settings__gated'}`} title="Longer lineage length required before folding common history into a branch point.">
-          <span className="settings__lbl">Branch collapse length</span>
+        <label className={`settings__row ${config.autoCollapseEnabled ? '' : 'settings__gated'}`} title="Extra visible boards allowed before auto-collapse folds the segment back to the target length.">
+          <span className="settings__lbl">Auto-collapse leeway</span>
           <input
-            type="number" min={4} max={128} value={config.autoCollapseBranchThreshold} disabled={!config.autoCollapseEnabled}
-            onChange={(e) => onChange({ autoCollapseBranchThreshold: Math.max(4, Math.min(128, Math.floor(Number(e.target.value) || 14))) })}
+            type="number" min={0} max={32} value={config.autoCollapseLeeway} disabled={!config.autoCollapseEnabled}
+            onChange={(e) => onChange({ autoCollapseLeeway: Math.max(0, Math.min(32, Math.floor(Number(e.target.value) || 2))) })}
           />
         </label>
         <label className={`settings__row ${compact ? '' : 'settings__gated'}`} title="Auto-spawn a compact node when the chain's context fill crosses the threshold.">
@@ -2374,6 +2398,38 @@ type AccountSnap = { account: ProviderAccount | null; usage: ProviderUsage | nul
 // Plan-limit utilization color band (mirrors ContextBadge thresholds): <60 calm, 60–85 warn, ≥85 high.
 const usageBand = (pct: number | null | undefined): 'ok' | 'warn' | 'high' =>
   pct == null ? 'ok' : pct >= 85 ? 'high' : pct >= 60 ? 'warn' : 'ok';
+
+const usageHasDisplayData = (usage: ProviderUsage | null | undefined): boolean =>
+  !!usage && (usage.windows.length > 0 || usage.sessionCostUsd != null);
+
+function sameSignedInAccount(a: ProviderAccount | null | undefined, b: ProviderAccount | null | undefined): boolean {
+  return !!a?.signedIn && !!b?.signedIn
+    && (a.email ?? '') === (b.email ?? '')
+    && (a.plan ?? '') === (b.plan ?? '')
+    && (a.backend ?? '') === (b.backend ?? '');
+}
+
+function windowKind(w: { id: string; label: string }): RateLimitSnapshot['windowId'] {
+  const text = `${w.id} ${w.label}`.toLowerCase();
+  if (text.includes('seven_day') || text.includes('secondary') || text.includes('weekly') || text.includes('7-day')) return 'seven_day';
+  if (text.includes('five_hour') || text.includes('primary') || text.includes('5h') || text.includes('5-hour')) return 'five_hour';
+  return w.id;
+}
+
+function usageToRateLimitSnapshot(provider: EngineId, usage: ProviderUsage | null | undefined): RateLimitSnapshot | null {
+  const windows = usage?.windows ?? [];
+  const w = windows.find((it) => windowKind(it) === 'five_hour' && it.utilizationPct != null)
+    ?? windows.find((it) => it.utilizationPct != null);
+  if (!w || w.utilizationPct == null) return null;
+  const resetMs = w.resetsAt ? new Date(w.resetsAt).getTime() : NaN;
+  return {
+    status: 'allowed',
+    provider,
+    windowId: windowKind(w),
+    utilizationPct: w.utilizationPct,
+    resetsAt: Number.isFinite(resetMs) ? Math.floor(resetMs / 1000) : undefined,
+  };
+}
 
 // ISO reset timestamp → short "resets HH:MM" (or the raw string if unparseable).
 function formatReset(iso?: string | null): string {
@@ -2849,6 +2905,7 @@ const FOCUS_EXIT_ZOOM = ENTER_ZOOM - 0.2;
 // A stable ref makes StoreUpdater skip it after the first render, so our per-call options survive. (2026-06-10)
 const FIT_VIEW_OPTIONS = { maxZoom: EXIT_ZOOM };
 const FOCUS_CLOSE_MS = 220; // exit animation length; keep in sync with .chatview--closing in styles.css
+const COLLAPSE_PREVIEW_IDLE_MS = 5000; // temporary collapsed-history preview auto-returns after losing focus
 // Right-button travel (px) under which a right-press counts as a CLICK (→ context menu)
 // rather than a DRAG (→ pan). Lets the right button serve both pan and menu (policy/mechanism separation).
 const RIGHT_CLICK_SLOP = 4;
@@ -2974,26 +3031,35 @@ function SearchBox({
           ) : (
             <>
               <div className="results__hint">↑↓ cycle · Enter locates · Enter again opens</div>
-              {hits.map((h, i) => (
-                <div
-                  key={h.id}
-                  className={`res ${i === activeIndex ? 'active' : ''}`}
-                  onClick={() => onPick(i)}
-                  onDoubleClick={() => onOpenHit(i)}
-                  title="Click to locate · double-click to open"
-                >
-                  <div className="res__ico">{SEARCH_KIND_ICON[h.kind] ?? '⎇'}</div>
-                  <div className="res__main">
-                    <div className="res__q"><Mark text={h.prompt || '(no prompt yet)'} terms={terms} /></div>
-                    <div className="res__snip"><Mark text={h.snippet.text} terms={terms} /></div>
-                    <div className="res__where">{[h.kind, ...h.tags.map((t) => `#${t}`)].join(' · ')}</div>
+              {hits.map((h, i) => {
+                const snippets = h.snippets.length ? h.snippets : [{ field: h.field, snippet: h.snippet }];
+                const questionSnippet = snippets.find((s) => s.field === 'prompt');
+                const answerSnippet = snippets.find((s) => s.field === 'answer');
+                const fallbackSnippet = snippets.find((s) => s.field !== 'prompt' && s.field !== 'answer');
+                const snippetRows = answerSnippet ? [answerSnippet] : questionSnippet ? [] : fallbackSnippet ? [fallbackSnippet] : [];
+                return (
+                  <div
+                    key={h.id}
+                    className={`res ${i === activeIndex ? 'active' : ''}`}
+                    onClick={() => onPick(i)}
+                    onDoubleClick={() => onOpenHit(i)}
+                    title="Click to locate · double-click to open"
+                  >
+                    <div className="res__ico">{SEARCH_KIND_ICON[h.kind] ?? '⎇'}</div>
+                    <div className="res__main">
+                      <div className="res__q"><Mark text={questionSnippet?.snippet.text || h.prompt || '(no prompt yet)'} terms={terms} /></div>
+                      {snippetRows.map((s, j) => (
+                        <div key={`${s.field}-${j}`} className="res__snip"><Mark text={s.snippet.text} terms={terms} /></div>
+                      ))}
+                      <div className="res__where">{[h.kind, ...h.tags.map((t) => `#${t}`)].join(' · ')}</div>
+                    </div>
+                    <div className="res__meta">
+                      <span className="res__seq">#{h.seq}</span>
+                      <span className={`res__eng ${h.engine}`}>{h.engine}</span>
+                    </div>
                   </div>
-                  <div className="res__meta">
-                    <span className="res__seq">#{h.seq}</span>
-                    <span className={`res__eng ${h.engine}`}>{h.engine}</span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </>
           )}
         </div>
@@ -3026,7 +3092,6 @@ function App() {
   const [nodes, setNodes] = useState<BoardNodeT[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
   const [showArchived, setShowArchived] = useState(false);
-  const [drawer, setDrawer] = useState<{ merge: MergeResult; context: string; ids: string[]; base: { baseId: string; covered: Set<string> } | null } | null>(null);
   const [focusedId, setFocusedId] = useState<string | null>(null); // non-null → focus chat overlay; = the VIEW LEAF (deepest shown board, may have auto-descended below the entered node)
   const [focusEntryId, setFocusEntryId] = useState<string | null>(null); // the board the user actually entered/branched to → ChatView initial-scroll anchor (distinct from focusedId)
   const [focusOrigin, setFocusOrigin] = useState<{ x: number; y: number } | null>(null); // screen anchor for the zoom-into/out-of animation (the focused board's center)
@@ -3063,7 +3128,8 @@ function App() {
   // synchronously — needed to gate the shared-spine vs per-board-fork decision by `midpointFork`. (like configRef)
   const providerCapsRef = useRef(providerCaps);
   const [acctPanelOpen, setAcctPanelOpen] = useState(false);
-  const [accounts, setAccounts] = useState<Partial<Record<EngineId, { account: ProviderAccount | null; usage: ProviderUsage | null; busy?: boolean }>>>({});
+  const [accounts, setAccounts] = useState<Partial<Record<EngineId, AccountSnap>>>({});
+  const accountsRef = useRef<Partial<Record<EngineId, AccountSnap>>>({});
   // Claude API-key auth status per provider (secret-safe: presence + last-4 hint + ambient-env detection).
   const [apiKeyStatus, setApiKeyStatus] = useState<Partial<Record<EngineId, ApiKeyStatus>>>({});
   // Passive usage snapshots keyed by provider (each stamped by its adapter): the chip shows the ACTIVE
@@ -3122,6 +3188,8 @@ function App() {
   const configRef = useRef<BraidConfig | null>(null); // M11: config mirror for the message handler (read latest without re-subscribing the listener)
   const autoCompactPendingRef = useRef<string | null>(null); // M11: a board queued for self-driven auto-compact, fired once its 'done' state commits to nodesRef
   const autoCollapsePendingRef = useRef<string | null>(null); // Visual auto-collapse: queued only by a newly completed board, never by passive graph/view changes
+  const collapsePreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // auto-return temporary collapsed-history previews after focus leaves
+  const collapsePreviewTimerSigRef = useRef<string | null>(null); // which preview set the current idle timer belongs to
   const tabStateRef = useRef({ pending: false, busy: false }); // last-reported tab-icon state, so we post `attention` only when it flips
   // Pending jump-to-board request from a notification. Held in a ref so it survives until the target
   // node actually exists (a freshly re-opened panel restores its graph async — see the retry effect).
@@ -3311,17 +3379,22 @@ function App() {
     // midpointFork capability gates the shared-spine optimization (Codex forks per board). Default true
     // (unknown caps / Claude) preserves the existing spine warm-reuse. (Codex branching bug)
     const canMidpointFork = providerCapsRef.current[turnEngine]?.midpointFork !== false;
-    const plan: { resume?: string; fork: boolean; resumeAt?: string; promptPrefix?: string } =
-      node ? materializeSendPlan(node, nodesRef.current, edgesRef.current, turnEngine, canMidpointFork) : { fork: false };
+    const wantsTextReplayFallback = providerCapsRef.current[turnEngine]?.textReplayFallback === true;
+    const plan: { resume?: string; fork: boolean; resumeAt?: string; promptPrefix?: string; nativeFallbackPromptPrefix?: string } =
+      node ? materializeSendPlan(node, nodesRef.current, edgesRef.current, turnEngine, canMidpointFork, wantsTextReplayFallback) : { fork: false };
     // The node displays the user's raw question; the merge/replay excerpt + attachment are prepended for the engine only.
     patch(boardId, () => ({ prompt, answer: '', thinking: '', thinks: [], thoughtMs: undefined, status: 'streaming', steps: [], contextTokens: undefined, contextWindow: undefined, autoCompacted: undefined }));
     let sendPrompt = plan.promptPrefix
       ? `${plan.promptPrefix}\n\nBased on the merged context above, answer my new question:\n${prompt}`
       : prompt;
+    let nativeFallbackPrompt = wantsTextReplayFallback && plan.nativeFallbackPromptPrefix
+      ? `${plan.nativeFallbackPromptPrefix}\n\nBased on the recovered context above, answer my new question:\n${prompt}`
+      : undefined;
     // M7: a pending editor-context attachment is prepended as a labeled block, then consumed.
     const attached = attachByBoardRef.current[fromId]?.attachment;
     if (attached) {
       sendPrompt = `${buildEditorContextBlock(attached)}\n\n${sendPrompt}`;
+      if (nativeFallbackPrompt) nativeFallbackPrompt = `${buildEditorContextBlock(attached)}\n\n${nativeFallbackPrompt}`;
       clearAttach(fromId);
     }
     // M8: ship the composer's pending images with the turn (base64, only here); consume them after.
@@ -3329,6 +3402,7 @@ function App() {
     post({
       type: 'send', boardId, prompt: sendPrompt,
       resume: plan.resume, fork: plan.fork, resumeAt: plan.resumeAt,
+      nativeFallbackPrompt,
       // Route this turn to the board's OWN engine (AD2): a switch since creation can't re-home its session.
       engine: turnEngine,
       images: pendingImages.length ? pendingImages.map((i) => ({ mediaType: i.mediaType, data: i.data })) : undefined,
@@ -3514,6 +3588,26 @@ function App() {
   );
   const selectedActiveCount = selectedIds.length - selectedArchivedCount;
   const selectionHasArchived = selectedArchivedCount > 0;
+  const selectedActiveIds = useMemo(
+    () => selectedIds.filter((id) => byId[id] && !byId[id].data.archived),
+    [selectedIds, byId],
+  );
+  const selectedArchiveScopeIds = useMemo(
+    () => archiveScopeIds(nodes, edges, selectedActiveIds),
+    [nodes, edges, selectedActiveIds],
+  );
+  const selectedArchiveScopeBusyIds = useMemo(
+    () => selectedArchiveScopeIds.filter((id) => {
+      const s = byId[id]?.data.status;
+      return s === 'streaming' || s === 'waiting';
+    }),
+    [selectedArchiveScopeIds, byId],
+  );
+  const archiveScopeBusy = selectedArchiveScopeBusyIds.length > 0;
+  const selectedArchiveNewCount = useMemo(
+    () => selectedArchiveScopeIds.filter((id) => !byId[id]?.data.archived).length,
+    [selectedArchiveScopeIds, byId],
+  );
   // Ancestors of every selected board — their context is folded into a merge, so highlight them too.
   // Boundary-aware (M9) so the highlight matches what doMerge/computeMerge actually collect: a compact
   // node stops the walk (its summary replaces everything above), so those ancestors aren't highlighted.
@@ -3667,18 +3761,16 @@ function App() {
       data: {
         prompt: '', answer: '', status: 'idle', merged: true,
         engine: activeProviderRef.current, // the merge runs on the active provider (AD1)
-        // STM D2/D6: mergeContext is a DISPLAY preview (card + drawer) only; the send seed + native base are
-        // recomputed from the graph at send (materializeSendPlan), never a stored pointer. (decisions.md D2/D6)
+        // STM D2/D6: mergeContext is a pending send seed only; the native base is recomputed from the graph
+        // at send (materializeSendPlan), never a stored pointer. (decisions.md D2/D6)
         mergeContext, seq: seqRef.current++, onSend, onFork, onStop, onCompact,
       },
     };
     const newEdges = curEdges.concat(leaves.map((sid) => makeEdge(sid, mid, 'merge')));
     setEdges(newEdges);
     setNodes(autoLayout([...curNodes.map((n): BoardNodeT => ({ ...n, selected: false })), merged], newEdges));
-    setDrawer({ merge, context: mergeContext, ids: [...leaves], base }); // read-only preview of what got deduped
     // Zoom the canvas to the freshly created merge card and focus its composer so the user can ask their
-    // new question right away (the merge node carries the deduped context; the drawer stays up alongside as
-    // a read-only preview). The node isn't in nodesRef yet — the retry-on-[nodes] effect fires tryReveal
+    // new question right away. The node isn't in nodesRef yet — the retry-on-[nodes] effect fires tryReveal
     // once it lands (same deferred-reveal pattern as newConversation).
     revealReqRef.current = { id: mid, focus: false, composer: true };
   }, [selectedIds, byId, onSend, onFork, onStop, onCompact]);
@@ -3700,7 +3792,27 @@ function App() {
     setNodes(laid);
   }, [selectedIds]);
 
+  const collapsePreview = useCallback((ids?: Iterable<string>, anchorId?: string | null) => {
+    const idList = ids ? [...ids] : undefined;
+    const collapsed = collapseExpandedCollapsedGraphs(nodesRef.current, idList);
+    if (!collapsed.changed) return false;
+    const visible = syncArchiveVisibility(collapsed.nodes, showArchivedRef.current).nodes;
+    const newEdges = syncHiddenEdges(visible, edgesRef.current);
+    const anchor = anchorId ?? idList?.[0] ?? visible.find((n) => n.selected && !n.hidden)?.id ?? null;
+    const laid = relayoutAnchored(visible, newEdges, dirRef.current, anchor);
+    nodesRef.current = laid;
+    edgesRef.current = newEdges;
+    setEdges(newEdges);
+    setNodes(laid);
+    return true;
+  }, []);
+
   const expandCollapsed = useCallback((id: string) => {
+    const cur = nodesRef.current.find((n) => n.id === id);
+    if (cur?.data.collapsePreviewExpanded) {
+      collapsePreview([id], id);
+      return;
+    }
     const expanded = expandCollapsedGraph(nodesRef.current, id);
     if (!expanded.changed) return;
     const visible = syncArchiveVisibility(expanded.nodes, showArchivedRef.current).nodes;
@@ -3716,12 +3828,71 @@ function App() {
     edgesRef.current = newEdges;
     setEdges(newEdges);
     setNodes(laid);
+  }, [collapsePreview]);
+
+  const uncollapseCollapsed = useCallback((id: string) => {
+    const uncollapsed = uncollapseCollapsedGraph(nodesRef.current, id);
+    if (!uncollapsed.changed) return;
+    const visible = syncArchiveVisibility(uncollapsed.nodes, showArchivedRef.current).nodes;
+    const newEdges = syncHiddenEdges(visible, edgesRef.current);
+    const laid = relayoutAnchored(visible, newEdges, dirRef.current, id);
+    nodesRef.current = laid;
+    edgesRef.current = newEdges;
+    setEdges(newEdges);
+    setNodes(laid);
   }, []);
 
   const collapseState = useMemo(
-    () => ({ expand: expandCollapsed }),
-    [expandCollapsed],
+    () => ({ expand: expandCollapsed, uncollapse: uncollapseCollapsed }),
+    [expandCollapsed, uncollapseCollapsed],
   );
+
+  useEffect(() => () => {
+    if (collapsePreviewTimerRef.current) clearTimeout(collapsePreviewTimerRef.current);
+    collapsePreviewTimerSigRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    const clearTimer = () => {
+      if (collapsePreviewTimerRef.current) clearTimeout(collapsePreviewTimerRef.current);
+      collapsePreviewTimerRef.current = null;
+      collapsePreviewTimerSigRef.current = null;
+    };
+    const previews = nodes.filter((n) => n.data.collapsedGraph && n.data.collapsePreviewExpanded);
+    if (!previews.length) { clearTimer(); return; }
+    const previewSig = previews.map((n) => n.id).sort().join('|');
+
+    const active = new Set(selectedIds);
+    if (focusedId) {
+      active.add(focusedId);
+      if (focusEntryId) active.add(focusEntryId);
+    }
+    const hasFocusedPreview = previews.some((n) => {
+      const ids = new Set([n.id, ...(n.data.collapsedGraph?.hiddenIds ?? [])]);
+      for (const id of active) if (ids.has(id)) return true;
+      return false;
+    });
+    if (hasFocusedPreview) { clearTimer(); return; }
+    if (collapsePreviewTimerRef.current && collapsePreviewTimerSigRef.current === previewSig) return;
+    clearTimer();
+
+    collapsePreviewTimerSigRef.current = previewSig;
+    collapsePreviewTimerRef.current = setTimeout(() => {
+      collapsePreviewTimerRef.current = null;
+      collapsePreviewTimerSigRef.current = null;
+      const open = nodesRef.current.filter((n) => n.data.collapsedGraph && n.data.collapsePreviewExpanded);
+      if (!open.length) return;
+      const selected = new Set(nodesRef.current.filter((n) => n.selected && !n.hidden).map((n) => n.id));
+      const fid = focusedIdRef.current;
+      if (fid) selected.add(fid);
+      const stillFocused = open.some((n) => {
+        const ids = new Set([n.id, ...(n.data.collapsedGraph?.hiddenIds ?? [])]);
+        for (const id of selected) if (ids.has(id)) return true;
+        return false;
+      });
+      if (!stillFocused) collapsePreview(open.map((n) => n.id), open[0]?.id ?? null);
+    }, COLLAPSE_PREVIEW_IDLE_MS);
+  }, [nodes, selectedIds, focusedId, focusEntryId, collapsePreview]);
 
   const setArchiveVisibility = useCallback((show: boolean, anchorId?: string | null) => {
     showArchivedRef.current = show;
@@ -4204,8 +4375,8 @@ function App() {
     const curEdges = edgesRef.current;
     const plans = planAutoCollapseAfterDone(curNodes, curEdges, id, {
       enabled: cfg.autoCollapseEnabled,
-      linearThreshold: cfg.autoCollapseLinearThreshold,
-      branchThreshold: cfg.autoCollapseBranchThreshold,
+      threshold: cfg.autoCollapseThreshold,
+      leeway: cfg.autoCollapseLeeway,
     });
     if (!plans.length) return;
     const collapsed = applyCollapsePlans(curNodes, plans);
@@ -4367,11 +4538,17 @@ function App() {
   }, []);
   // Sign in/out optimistically flip the card to a busy state (the host's account refresh clears it).
   const acctSignIn = useCallback((id: EngineId) => {
-    setAccounts((prev) => ({ ...prev, [id]: { account: prev[id]?.account ?? null, usage: prev[id]?.usage ?? null, busy: true } }));
+    const prev = accountsRef.current;
+    const next = { ...prev, [id]: { account: prev[id]?.account ?? null, usage: prev[id]?.usage ?? null, busy: true } };
+    accountsRef.current = next;
+    setAccounts(next);
     post({ type: 'accountSignIn', provider: id });
   }, []);
   const acctSignOut = useCallback((id: EngineId) => {
-    setAccounts((prev) => ({ ...prev, [id]: { account: prev[id]?.account ?? null, usage: prev[id]?.usage ?? null, busy: true } }));
+    const prev = accountsRef.current;
+    const next = { ...prev, [id]: { account: prev[id]?.account ?? null, usage: prev[id]?.usage ?? null, busy: true } };
+    accountsRef.current = next;
+    setAccounts(next);
     post({ type: 'accountSignOut', provider: id });
   }, []);
   const rehomeFreshBoardsForProvider = useCallback((id: EngineId) => {
@@ -4444,9 +4621,18 @@ function App() {
           setActiveProviderState(m.activeProvider); activeProviderRef.current = m.activeProvider; setProviderCaps(m.capabilities); providerCapsRef.current = m.capabilities;
           rehomeFreshBoardsForProvider(m.activeProvider);
           break;
-        case 'account':
-          setAccounts((prev) => ({ ...prev, [m.provider]: { account: m.account, usage: m.usage, busy: m.busy } }));
+        case 'account': {
+          const prev = accountsRef.current;
+          const old = prev[m.provider];
+          const keepOldUsage = !usageHasDisplayData(m.usage) && usageHasDisplayData(old?.usage) && sameSignedInAccount(old?.account, m.account);
+          const mergedUsage = keepOldUsage ? old!.usage : m.usage;
+          const next = { ...prev, [m.provider]: { account: m.account, usage: mergedUsage, busy: m.busy } };
+          accountsRef.current = next;
+          setAccounts(next);
+          const snapshot = usageToRateLimitSnapshot(m.provider, mergedUsage);
+          if (snapshot) setRateLimits((prev) => ({ ...prev, [m.provider]: snapshot }));
           break;
+        }
         case 'apiKeyStatus':
           setApiKeyStatus((prev) => ({ ...prev, [m.provider]: { stored: m.stored, hint: m.hint, envDetected: m.envDetected, envHint: m.envHint } }));
           break;
@@ -5042,10 +5228,14 @@ function App() {
   const archiveSelected = useCallback(() => {
     const selected = new Set(selectedIds);
     const ids = nodesRef.current
-      .filter((n) => selected.has(n.id) && !n.data.archived && n.data.status !== 'streaming' && n.data.status !== 'waiting')
+      .filter((n) => selected.has(n.id) && !n.data.archived)
       .map((n) => n.id);
     if (!ids.length) return;
-    const archived = archiveBoards(nodesRef.current, ids, showArchivedRef.current);
+    const archived = archiveBoards(nodesRef.current, edgesRef.current, ids, showArchivedRef.current);
+    if (archived.blocked) {
+      showHint(`Cannot archive: ${archived.busyIds.length} related board${archived.busyIds.length === 1 ? ' is' : 's are'} still running.`);
+      return;
+    }
     if (!archived.changed) return;
     const newEdges = syncHiddenEdges(archived.nodes, edgesRef.current);
     const anchor = archived.nodes.find((n) => n.selected && !n.hidden)?.id ?? null;
@@ -5054,14 +5244,14 @@ function App() {
     edgesRef.current = newEdges;
     setEdges(newEdges);
     setNodes(laid);
-    showHint(`Archived ${archived.archivedIds.length} board${archived.archivedIds.length === 1 ? '' : 's'}.`);
+    showHint(`Archived ${archived.archivedIds.length} related board${archived.archivedIds.length === 1 ? '' : 's'}.`);
   }, [selectedIds, showHint]);
 
   const restoreSelectedArchived = useCallback(() => {
     const selected = new Set(selectedIds);
     const ids = nodesRef.current.filter((n) => selected.has(n.id) && n.data.archived).map((n) => n.id);
     if (!ids.length) return;
-    const restored = restoreArchivedBoards(nodesRef.current, ids, showArchivedRef.current);
+    const restored = restoreArchivedBoards(nodesRef.current, edgesRef.current, ids, showArchivedRef.current);
     if (!restored.changed) return;
     const newEdges = syncHiddenEdges(restored.nodes, edgesRef.current);
     const anchor = restored.restoredIds[0] ?? null;
@@ -5070,7 +5260,7 @@ function App() {
     edgesRef.current = newEdges;
     setEdges(newEdges);
     setNodes(laid);
-    showHint(`Restored ${restored.restoredIds.length} board${restored.restoredIds.length === 1 ? '' : 's'}.`);
+    showHint(`Restored ${restored.restoredIds.length} related board${restored.restoredIds.length === 1 ? '' : 's'}.`);
   }, [selectedIds, showHint]);
 
   // New conversation via canvas gestures (not just the toolbar button):
@@ -5384,6 +5574,7 @@ function App() {
           <span className="mergebar__count">
             {selectedIds.length} board{selectedIds.length === 1 ? '' : 's'} selected
             {selectedArchivedCount > 0 && ` (${selectedArchivedCount} archived)`}
+            {selectedArchiveNewCount > selectedActiveCount && ` (${selectedArchiveNewCount} related boards will archive)`}
             {selectedIds.length >= 2 && !selectionHasArchived && mLeaves.length < selectedIds.length &&
               ` (${selectedIds.length - mLeaves.length} are ancestors, folded into the context automatically)`}
           </span>
@@ -5391,8 +5582,8 @@ function App() {
             <button
               className="btn archive"
               onClick={archiveSelected}
-              disabled={selectionBusy}
-              title={selectionBusy ? 'Let selected running boards finish before archiving' : 'Archive selected boards'}
+              disabled={archiveScopeBusy}
+              title={archiveScopeBusy ? 'Let every running board in this related graph finish before archiving' : `Archive related graph (${selectedArchiveNewCount} boards)`}
             >
               Archive
             </button>
@@ -5415,7 +5606,11 @@ function App() {
           {selectedIds.length >= 2 && mLeaves.length >= 2 && !selectionBusy && !selectionHasArchived && (
             <button className="btn merge" onClick={doMerge}>Merge context - new conversation</button>
           )}
-          {selectionBusy ? (
+          {archiveScopeBusy && selectedActiveCount > 0 ? (
+            <span className="mergebar__count mergebar__warn">
+              This related graph has {selectedArchiveScopeBusyIds.length} running board{selectedArchiveScopeBusyIds.length === 1 ? '' : 's'}; archive is blocked.
+            </span>
+          ) : selectionBusy ? (
             <span className="mergebar__count mergebar__warn">
               A selected board is still working. Let it finish, or Stop its wait, before graph actions.
             </span>
@@ -5436,71 +5631,6 @@ function App() {
         </div>
       )}
 
-      {drawer && (
-        <div className="drawer nodrag nopan" onClick={(e) => e.stopPropagation()}>
-          <div className="drawer__head">
-            <h2>Merge context preview</h2>
-            <button className="btn" onClick={() => setDrawer(null)} title="Close">✕</button>
-          </div>
-          <div className="drawer__body">
-            <div className="section">
-              <div className="section__label">
-                <span className="pill shared">Shared</span>{' '}
-                {drawer.base
-                  ? <>inherited via session fork from “{firstLine(byId[drawer.base.baseId]?.data.prompt ?? '') || '(root)'}” · not re-sent as text</>
-                  : <>deduped · sent once</>}
-              </div>
-              {drawer.merge.shared.length ? drawer.merge.shared.map((id) => {
-                const d = byId[id]?.data;
-                const viaFork = !!drawer.base && drawer.base.covered.has(id);
-                return (
-                  <div className="ctx-item" key={id}>
-                    <b>{firstLine(d?.prompt ?? '') || '(empty)'}</b>{viaFork ? ' · via fork' : (drawer.base ? ' · sent as text' : '')}<br />
-                    <span>{d?.summary ? summaryHeadline(d.summary) : (d?.answer ? d.answer.slice(0, 80) : '')}</span>
-                  </div>
-                );
-              }) : <div className="ctx-item"><span>No common ancestor</span></div>}
-            </div>
-
-            {drawer.merge.branches.map((br, i) => (
-              <div className="section" key={br.leaf}>
-                <div className="section__label">
-                  <span className="pill branch">Branch {i + 1}</span> {firstLine(byId[br.leaf]?.data.prompt ?? '') || '(empty)'}
-                </div>
-                {br.nodes.map((id) => {
-                  const d = byId[id]?.data;
-                  // With a heaviest-node fork base, the base's OWN branch is inherited via the session fork (in
-                  // `covered`), not re-sent as text — annotate honestly instead of always claiming "full text".
-                  const viaFork = !!drawer.base && drawer.base.covered.has(id);
-                  return (
-                    <div className="ctx-item" key={id}>
-                      <b>{firstLine(d?.prompt ?? '') || '(empty)'}</b>{viaFork ? ' · via fork' : (id === br.leaf ? ' · full text' : '')}<br />
-                      <span>{d?.summary ? summaryHeadline(d.summary) : (d?.answer ? d.answer.slice(0, 80) : '')}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
-
-            <div className="section">
-              <div className="section__label">Sent as context</div>
-              <div className="prompt">{drawer.context}</div>
-              {(() => {
-                const uniq = new Set([...drawer.merge.shared, ...drawer.merge.branches.flatMap((b) => b.nodes)]).size;
-                const naive = drawer.ids.reduce((s, id) => s + ancestorsOf(id, edges).size + 1, 0);
-                return (
-                  <div className="stat">
-                    <span>Deduped <b>{uniq}</b></span>
-                    <span>Naive concat <b>{naive}</b></span>
-                    <span>Saved <b style={{ color: '#7cb573' }}>{naive - uniq}</b></span>
-                    <span>≈ <b>{roughTokens(drawer.context)}</b> tokens{drawer.base ? ' (injected text only — shared via fork)' : ''}</span>
-                  </div>
-                );
-              })()}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
     </AutofillCtx.Provider>
     </DraftCtx.Provider>

@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { toCapabilitiesView } from './capabilities';
 import { ClaudeAdapter } from './claude/adapter';
+import { CodexAdapter } from './codex/adapter';
 import { DeepSeekAdapter } from './deepseek/adapter';
 import { PROVIDER_CATALOG } from '../protocol';
 import { DEFAULT_PROVIDER_CONFIG } from '../sdkOptions';
@@ -9,9 +10,28 @@ import { DEFAULT_PROVIDER_CONFIG } from '../sdkOptions';
 // adapter can be built with a stub loadSdk that is never called.
 const adapter = () => new ClaudeAdapter({ loadSdk: async () => null, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
 const claudeModels = PROVIDER_CATALOG.find((p) => p.id === 'claude')!.models;
+const codexModels = PROVIDER_CATALOG.find((p) => p.id === 'codex')!.models;
 const deepSeekModels = PROVIDER_CATALOG.find((p) => p.id === 'deepseek')!.models;
 
 describe('toCapabilitiesView', () => {
+  it('maps the Codex engine with text replay fallback enabled for missing local rollouts', async () => {
+    const view = await toCapabilitiesView(new CodexAdapter({
+      resolveBinary: () => undefined,
+      readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }),
+    }));
+    expect(view).toEqual({
+      id: 'codex',
+      reasoning: true,
+      steer: true,
+      routedFollowups: false,
+      compact: true,
+      images: true,
+      midpointFork: false,
+      textReplayFallback: true,
+      models: codexModels,
+    });
+  });
+
   it('maps the Claude engine to the neutral view (compact derived from compact.mode=native)', async () => {
     const view = await toCapabilitiesView(adapter());
     expect(view).toEqual({
@@ -22,6 +42,7 @@ describe('toCapabilitiesView', () => {
       compact: true, // derived: compact.mode === 'native' !== 'none'
       images: true,  // Claude is a vision provider (M-MultiEngine)
       midpointFork: true, // Claude's forkSession isolates a mid-point branch
+      textReplayFallback: false,
       models: claudeModels,
     });
   });
@@ -55,6 +76,7 @@ describe('toCapabilitiesView', () => {
       compact: true,
       images: false,
       midpointFork: true, // DeepSeek's frozen packed per-board snapshots isolate inherently
+      textReplayFallback: false,
       models: deepSeekModels,
     });
   });
@@ -77,6 +99,7 @@ describe('toCapabilitiesView', () => {
       compact: true,          // native /compact via the bundled binary
       images: false,          // DeepSeek is text-only
       midpointFork: true,     // real forkSession (resumeSessionAt) via the binary
+      textReplayFallback: false,
       models: deepSeekModels, // sourced from the catalog by this.id
     });
   });

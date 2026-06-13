@@ -4,7 +4,7 @@ import {
   type BoardData, type BoardNodeT, type Turn, type ToolStep,
   ancestorsOf, continuationChildren, continuationMode, descendToFork, mergeLeaves, computeMerge, buildPrompt, pickForkBase, forkBaseFor, forkableSession, isFreshBoard, stripFreshNativeBase, materializeSendPlan, queuedChildDispatch, mergeBaseFor, restampActiveProvider, mergeFit, MERGE_BUDGET_PCT, formatSteps, fuseEligibility, fuseAdjacent, contractDelete, expandDeletion, serializeGraph, settleRestoredStatus, settleRestoredSteps, RESTORED_ASK_EXPIRED, roughTokens, GRAPH_VERSION, makeEdge,
   boardEngine, diffLines, unifiedDiffRows, codexFileChanges, summaryHeadline, buildEditorContextBlock, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, buildRebuildSeed, hasPendingAsk, hasPendingPermission, nextPermMode, describeAsyncPending,
-  planCollapseSelection, collapseSelection, expandCollapsedGraph, archivedBoardIds, archiveBoards, restoreArchivedBoards, syncArchiveVisibility, syncHiddenEdges,
+  planCollapseSelection, collapseSelection, expandCollapsedGraph, collapseExpandedCollapsedGraphs, uncollapseCollapsedGraph, archivedBoardIds, archiveScopeIds, archiveBoards, restoreArchivedBoards, syncArchiveVisibility, syncHiddenEdges,
   planAutoCollapseAfterDone, applyCollapsePlans,
   needsCollapseDigest, collapseDigestKey, collapseDigestText, COLLAPSE_DIGEST_VERSION,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions, formatAskUserAnswer, userInputReason,
@@ -177,6 +177,12 @@ describe('buildRebuildSeed', () => {
     );
     expect(s).toContain('DIGEST');
     expect(s).not.toMatch(/\nQ: /); // compact node has no own prompt → no raw Q/A; steps logic never reached
+  });
+  it('can include a merged board seed before its own Q/A', () => {
+    const s = buildRebuildSeed([{ mergeContext: 'MERGED-SEED', prompt: 'q-merge', answer: 'a-merge' }]);
+    expect(s).toContain('[Merged branch context]');
+    expect(s).toContain('MERGED-SEED');
+    expect(s.indexOf('MERGED-SEED')).toBeLessThan(s.indexOf('q-merge'));
   });
 });
 
@@ -608,7 +614,7 @@ describe('visual graph collapse', () => {
     expect(synced.find((e) => e.source === 'shared' && e.target === 'sibling')!.hidden).toBeUndefined();
   });
 
-  it('expands a collapsed representative, re-shows hidden nodes, and removes proxy edges', () => {
+  it('preview-expands a collapsed representative, then returns it to collapsed state', () => {
     const nodes = [
       node('a', 0),
       { ...node('b', 1), hidden: true },
@@ -618,7 +624,32 @@ describe('visual graph collapse', () => {
     const out = expandCollapsedGraph(nodes, 'c');
     expect(out.changed).toBe(true);
     expect(out.nodes.find((n) => n.id === 'b')!.hidden).toBe(false);
+    expect(out.nodes.find((n) => n.id === 'c')!.data.collapsedGraph).toEqual({ hiddenIds: ['b'] });
+    expect(out.nodes.find((n) => n.id === 'c')!.data.collapsePreviewExpanded).toBe(true);
+    expect(syncArchiveVisibility(out.nodes, false).nodes.find((n) => n.id === 'b')!.hidden).toBe(false);
+    expect(syncHiddenEdges(out.nodes, edges).some((e) => e.data?.kind === 'collapse')).toBe(false);
+
+    const closed = collapseExpandedCollapsedGraphs(out.nodes, ['c']);
+    expect(closed.changed).toBe(true);
+    expect(closed.nodes.find((n) => n.id === 'b')!.hidden).toBe(true);
+    expect(closed.nodes.find((n) => n.id === 'c')!.data.collapsedGraph).toEqual({ hiddenIds: ['b'] });
+    expect(closed.nodes.find((n) => n.id === 'c')!.data.collapsePreviewExpanded).toBeUndefined();
+    expect(syncHiddenEdges(closed.nodes, edges).some((e) => e.data?.kind === 'collapse')).toBe(true);
+  });
+
+  it('permanently uncollapses a representative and removes its proxy edge', () => {
+    const nodes = [
+      node('a', 0),
+      { ...node('b', 1), hidden: true },
+      node('c', 2, { collapsedGraph: { hiddenIds: ['b'] }, collapsePreviewExpanded: true }),
+    ];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), makeEdge('a', 'c', 'collapse')];
+    const out = uncollapseCollapsedGraph(nodes, 'c');
+    expect(out.changed).toBe(true);
+    expect(out.nodes.find((n) => n.id === 'b')!.hidden).toBe(false);
     expect(out.nodes.find((n) => n.id === 'c')!.data.collapsedGraph).toBeUndefined();
+    expect(out.nodes.find((n) => n.id === 'c')!.data.collapsePreviewExpanded).toBeUndefined();
+    expect(syncArchiveVisibility(out.nodes, false).nodes.find((n) => n.id === 'b')!.hidden).toBe(false);
     expect(syncHiddenEdges(out.nodes, edges).some((e) => e.data?.kind === 'collapse')).toBe(false);
   });
 
@@ -639,21 +670,45 @@ describe('visual graph collapse', () => {
 });
 
 describe('board archive visibility', () => {
-  it('archives selected boards by hiding them and persisting the flag', () => {
-    const nodes = [node('a', 0), node('b', 1)];
-    const edges = [forkEdge('a', 'b')];
-    const out = archiveBoards(nodes, ['a']);
+  it('archives the whole related graph from a selected middle board', () => {
+    const nodes = [node('a', 0), node('b', 1), node('c', 2)];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c')];
+    const out = archiveBoards(nodes, edges, ['b']);
 
-    expect(out.archivedIds).toEqual(['a']);
-    expect(out.nodes.find((n) => n.id === 'a')!.data.archived).toBe(true);
-    expect(out.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
-    expect(archivedBoardIds(out.nodes)).toEqual(['a']);
+    expect(out.blocked).toBe(false);
+    expect(out.scopeIds).toEqual(['a', 'b', 'c']);
+    expect(out.archivedIds).toEqual(['a', 'b', 'c']);
+    expect(archivedBoardIds(out.nodes)).toEqual(['a', 'b', 'c']);
+    expect(out.nodes.every((n) => n.data.archived && n.hidden)).toBe(true);
 
     const syncedEdges = syncHiddenEdges(out.nodes, edges);
-    expect(syncedEdges[0].hidden).toBe(true);
-    const g = serializeGraph(out.nodes, syncedEdges, 2, 2);
-    expect(g.nodes.find((n) => n.id === 'a')!.data.archived).toBe(true);
-    expect(g.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
+    expect(syncedEdges.every((e) => e.hidden)).toBe(true);
+    const g = serializeGraph(out.nodes, syncedEdges, 3, 3);
+    expect(g.nodes.every((n) => n.data.archived && n.hidden)).toBe(true);
+  });
+
+  it('keeps unrelated graphs out of the archive scope', () => {
+    const nodes = [node('a', 0), node('b', 1), node('x', 2), node('y', 3, { status: 'streaming' })];
+    const edges = [forkEdge('a', 'b'), forkEdge('x', 'y')];
+    expect(archiveScopeIds(nodes, edges, ['b'])).toEqual(['a', 'b']);
+
+    const out = archiveBoards(nodes, edges, ['b']);
+    expect(out.blocked).toBe(false);
+    expect(out.archivedIds).toEqual(['a', 'b']);
+    expect(out.nodes.find((n) => n.id === 'x')!.data.archived).toBeUndefined();
+    expect(out.nodes.find((n) => n.id === 'y')!.data.archived).toBeUndefined();
+  });
+
+  it('blocks archiving when the related graph contains a running board', () => {
+    const nodes = [node('a', 0), node('b', 1, { status: 'streaming' }), node('c', 2)];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c')];
+    const out = archiveBoards(nodes, edges, ['a']);
+
+    expect(out.blocked).toBe(true);
+    expect(out.busyIds).toEqual(['b']);
+    expect(out.changed).toBe(false);
+    expect(out.nodes).toBe(nodes);
+    expect(archivedBoardIds(out.nodes)).toEqual([]);
   });
 
   it('reveals archived boards without expanding collapsed-history internals', () => {
@@ -677,36 +732,53 @@ describe('board archive visibility', () => {
   it('restores archived boards and keeps their ancestry usable for descendants', () => {
     const nodes = [node('a', 0), node('b', 1), node('c', 2)];
     const edges = [forkEdge('a', 'b'), forkEdge('b', 'c')];
-    const archived = archiveBoards(nodes, ['b']).nodes;
+    const archived = archiveBoards(nodes, edges, ['b']).nodes;
 
     expect(ancestorsOf('c', edges)).toEqual(new Set(['a', 'b']));
-    const restored = restoreArchivedBoards(archived, ['b']).nodes;
-    const b = restored.find((n) => n.id === 'b')!;
-    expect(b.data.archived).toBeUndefined();
-    expect(b.hidden).toBeUndefined();
+    const restored = restoreArchivedBoards(archived, edges, ['b']).nodes;
+    expect(restored.every((n) => !n.data.archived && !n.hidden)).toBe(true);
   });
 });
 
 describe('auto visual graph collapse', () => {
-  const policy = { enabled: true, linearThreshold: 4, branchThreshold: 7 };
+  const policy = { enabled: true, threshold: 3, leeway: 0 };
 
   it('does nothing when disabled or when the completed lineage is still short', () => {
-    const nodes = [node('a', 0), node('b', 1), node('c', 2), node('d', 3)];
+    const nodes = [node('a', 0), node('b', 1), node('c', 2)];
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c')];
+    expect(planAutoCollapseAfterDone(nodes, edges, 'c', { ...policy, enabled: false })).toEqual([]);
+    expect(planAutoCollapseAfterDone(nodes, edges, 'c', policy)).toEqual([]);
+  });
+
+  it('counts the collapsed representative inside the visible threshold', () => {
+    const nodes = ['a', 'b', 'c', 'd'].map((id, i) => node(id, i));
     const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd')];
-    expect(planAutoCollapseAfterDone(nodes, edges, 'd', { ...policy, enabled: false })).toEqual([]);
-    expect(planAutoCollapseAfterDone(nodes, edges, 'd', policy)).toEqual([]);
+    expect(planAutoCollapseAfterDone(nodes, edges, 'd', policy))
+      .toEqual([{ targetId: 'b', hiddenIds: ['a'] }]);
+  });
+
+  it('uses leeway before folding, then folds back to the visible threshold', () => {
+    const leewayPolicy = { enabled: true, threshold: 3, leeway: 2 };
+    const under = ['a', 'b', 'c', 'd', 'e'].map((id, i) => node(id, i));
+    const underEdges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e')];
+    expect(planAutoCollapseAfterDone(under, underEdges, 'e', leewayPolicy)).toEqual([]);
+
+    const over = ['a', 'b', 'c', 'd', 'e', 'f'].map((id, i) => node(id, i));
+    const overEdges = [...underEdges, forkEdge('e', 'f')];
+    expect(planAutoCollapseAfterDone(over, overEdges, 'f', leewayPolicy))
+      .toEqual([{ targetId: 'd', hiddenIds: ['a', 'b', 'c'] }]);
   });
 
   it('folds the front of an over-long linear lineage and keeps the recent window visible', () => {
     const nodes = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((id, i) => node(id, i));
     const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'), forkEdge('e', 'f'), forkEdge('f', 'g')];
     const plans = planAutoCollapseAfterDone(nodes, edges, 'g', policy);
-    expect(plans).toEqual([{ targetId: 'd', hiddenIds: ['a', 'b', 'c'] }]);
+    expect(plans).toEqual([{ targetId: 'e', hiddenIds: ['a', 'b', 'c', 'd'] }]);
 
     const out = applyCollapsePlans(nodes, plans);
     expect(out.changed).toBe(true);
     expect(out.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
-    expect(out.nodes.find((n) => n.id === 'd')!.data.collapsedGraph).toEqual({ hiddenIds: ['a', 'b', 'c'] });
+    expect(out.nodes.find((n) => n.id === 'e')!.data.collapsedGraph).toEqual({ hiddenIds: ['a', 'b', 'c', 'd'] });
   });
 
   it('folds a long post-branch segment without hiding the branch point or its sibling', () => {
@@ -716,27 +788,27 @@ describe('auto visual graph collapse', () => {
       forkEdge('branch', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'), forkEdge('e', 'f'), forkEdge('f', 'g'),
       forkEdge('branch', 'sibling'),
     ];
-    expect(planAutoCollapseAfterDone(nodes, edges, 'g', { ...policy, branchThreshold: 20 }))
-      .toEqual([{ targetId: 'd', hiddenIds: ['c'] }]);
+    expect(planAutoCollapseAfterDone(nodes, edges, 'g', policy))
+      .toEqual([{ targetId: 'e', hiddenIds: ['c', 'd'] }]);
   });
 
-  it('waits longer, then folds the common prefix into the first branch point', () => {
-    const shortNodes = ['a', 'b', 'branch', 'c', 'd', 'e', 'sibling'].map((id, i) => node(id, i));
+  it('folds a long common-prefix segment while keeping the branch point visible', () => {
+    const shortNodes = ['a', 'b', 'branch', 'leaf', 'sibling'].map((id, i) => node(id, i));
     const shortEdges = [
       forkEdge('a', 'b'), forkEdge('b', 'branch'),
-      forkEdge('branch', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'),
+      forkEdge('branch', 'leaf'),
       forkEdge('branch', 'sibling'),
     ];
-    expect(planAutoCollapseAfterDone(shortNodes, shortEdges, 'e', policy)).toEqual([]);
+    expect(planAutoCollapseAfterDone(shortNodes, shortEdges, 'leaf', policy)).toEqual([]);
 
-    const longNodes = ['a', 'b', 'branch', 'c', 'd', 'e', 'f', 'sibling'].map((id, i) => node(id, i));
+    const longNodes = ['a', 'b', 'c', 'branch', 'leaf', 'sibling'].map((id, i) => node(id, i));
     const longEdges = [
-      forkEdge('a', 'b'), forkEdge('b', 'branch'),
-      forkEdge('branch', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'), forkEdge('e', 'f'),
+      forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'branch'),
+      forkEdge('branch', 'leaf'),
       forkEdge('branch', 'sibling'),
     ];
-    expect(planAutoCollapseAfterDone(longNodes, longEdges, 'f', policy))
-      .toEqual([{ targetId: 'branch', hiddenIds: ['a', 'b'] }]);
+    expect(planAutoCollapseAfterDone(longNodes, longEdges, 'leaf', policy))
+      .toEqual([{ targetId: 'b', hiddenIds: ['a'] }]);
   });
 
   it('scans the whole graph on completion, not only the completed branch', () => {
@@ -752,8 +824,8 @@ describe('auto visual graph collapse', () => {
       forkEdge('root', 'short'),
     ];
     expect(planAutoCollapseAfterDone(nodes, edges, 'short', policy)).toEqual([
-      { targetId: 'l3', hiddenIds: ['l1', 'l2'] },
-      { targetId: 'r3', hiddenIds: ['r1', 'r2'] },
+      { targetId: 'l4', hiddenIds: ['l1', 'l2', 'l3'] },
+      { targetId: 'r4', hiddenIds: ['r1', 'r2', 'r3'] },
     ]);
   });
 
@@ -1175,6 +1247,18 @@ describe('serializeGraph', () => {
     // The permission overlay is gone (exact toEqual = no leftover `permission` key), but the rest survives.
     expect(g.nodes[0].data.steps).toEqual([{ id: 'tu1', name: 'Bash', input: { command: 'ls' } }]);
     expect(g.nodes[0].data.turns).toEqual([{ prompt: 'q', answer: 'a', steps: [{ id: 'tu2', name: 'Write', input: { file_path: 'a.ts' } }] }]);
+  });
+
+  it('strips temporary collapse preview and persists folded children hidden', () => {
+    const nodes = [
+      node('a', 0),
+      node('b', 1, { collapsedGraph: { hiddenIds: ['a'] }, collapsePreviewExpanded: true }),
+    ];
+    const g = serializeGraph(nodes, [forkEdge('a', 'b')], 1, 1);
+    expect(g.nodes.find((n) => n.id === 'a')!.hidden).toBe(true);
+    const rep = g.nodes.find((n) => n.id === 'b')!;
+    expect(rep.data.collapsedGraph).toEqual({ hiddenIds: ['a'] });
+    expect(rep.data).not.toHaveProperty('collapsePreviewExpanded');
   });
 
   it("degrades a 'waiting' board to done + asyncAbandoned, dropping the transient asyncPending (AD6)", () => {
@@ -1704,6 +1788,19 @@ describe('buildPrompt withSteps (Merge-LCA-Fork)', () => {
     expect(prompt).toContain('SUM');
     expect(prompt).not.toContain('[Tool steps]');
   });
+
+  it('marks excerpts as cross-branch material when appended to a fork base', () => {
+    const prompt = buildPrompt(
+      { shared: [], branches: [{ leaf: '5', nodes: ['4', '5'] }] },
+      byId,
+      { withSteps: true, forkBase: { label: 'q-3' } },
+    );
+    expect(prompt).toContain('[Braid merge note]');
+    expect(prompt).toContain('appended to a fork of the existing Braid branch "q-3"');
+    expect(prompt).toContain('additional context from other selected Braid branches');
+    expect(prompt).toContain('[Branch 1');
+    expect(prompt).toContain('q-5');
+  });
 });
 
 describe('normalizeTags (digest tag validation)', () => {
@@ -1875,6 +1972,37 @@ describe('materializeSendPlan (STM send-time base)', () => {
     expect(r.resume).toBe('sa');
     expect(r.fork).toBe(true);
     expect(r.promptPrefix).toContain('q-B'); // the lighter branch replayed as text
+    expect(r.promptPrefix).toContain('[Braid merge note]');
+    expect(r.promptPrefix).toContain('fork of the existing Braid branch "q-A"');
+  });
+
+  it('textReplayFallback=true adds a recovered lineage seed for native attach recovery', () => {
+    const A = node('A', 1, { engine: 'codex', sessionId: 'ta', prompt: 'q-A', answer: 'a-A' });
+    const P = node('P', 2, {
+      engine: 'codex',
+      sessionId: 'tp',
+      prompt: 'q-P',
+      answer: 'a-P',
+      steps: [{ name: 'Bash', input: { command: 'npm test' }, result: 'ok' } as any],
+    });
+    const C = node('C', 3, { engine: 'codex', prompt: '', answer: '', status: 'idle' });
+    const r = materializeSendPlan(C, [A, P, C], [forkEdge('A', 'P'), forkEdge('P', 'C')], 'codex', false, true);
+    expect(r.resume).toBe('tp');
+    expect(r.fork).toBe(true);
+    expect(r.nativeFallbackPromptPrefix).toContain('q-A');
+    expect(r.nativeFallbackPromptPrefix).toContain('q-P');
+    expect(r.nativeFallbackPromptPrefix).toContain('command=npm test');
+  });
+
+  it('textReplayFallback=true makes a merge fallback include the whole merge, not only injected branches', () => {
+    const A = cn('A', 1, { sessionId: 'sa', prompt: 'q-A', answer: 'a-A', contextTokens: 100 });
+    const B = cn('B', 2, { sessionId: 'sb', prompt: 'q-B', answer: 'a-B', contextTokens: 50 });
+    const M = cn('M', 3, { merged: true, prompt: '', answer: '', status: 'idle' });
+    const r = materializeSendPlan(M, [A, B, M], [mergeEdge('A', 'M'), mergeEdge('B', 'M')], 'claude', true, true);
+    expect(r.resume).toBe('sa');
+    expect(r.promptPrefix).toContain('q-B');
+    expect(r.nativeFallbackPromptPrefix).toContain('q-A');
+    expect(r.nativeFallbackPromptPrefix).toContain('q-B');
   });
 });
 
@@ -2037,6 +2165,9 @@ describe('mergeBaseFor — SSOT for the merge fork base', () => {
     expect(r.base?.baseId).toBe('A');
     expect(r.parentSessionId).toBe('sa');
     expect(r.mergeContext).toContain('q-B'); // lighter branch injected as text; A is native-covered
+    expect(r.mergeContext).toContain('[Braid merge note]');
+    expect(r.mergeContext).toContain('fork of the existing Braid branch "q-A"');
+    expect(r.mergeContext).toContain('additional context from other selected Braid branches');
   });
 
   it('no same-engine forkable node → null base + all-text seed', () => {
@@ -2048,5 +2179,6 @@ describe('mergeBaseFor — SSOT for the merge fork base', () => {
     expect(r.parentSessionId).toBeUndefined();
     expect(r.mergeContext).toContain('q-A');
     expect(r.mergeContext).toContain('q-B');
+    expect(r.mergeContext).not.toContain('[Braid merge note]');
   });
 });
