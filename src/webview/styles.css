@@ -134,6 +134,7 @@ body {
 .async-chip--cron { border-color: rgba(180,140,220,.45); color: #cdb4e6; background: rgba(180,140,220,.12); }
 .async-chip--done { opacity: .6; text-decoration: line-through; }
 .composer__hint--waiting { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: #aacdec; }
+.composer--archived { color: var(--muted); border-style: dashed; }
 
 .board.needs-ask { border-color: var(--fork); box-shadow: 0 0 0 3px rgba(210,153,34,.45); animation: needs-ask-pulse 1.4s ease-in-out infinite; }
 @keyframes needs-ask-pulse {
@@ -194,6 +195,25 @@ body {
 .board.compact { border-style: dashed; border-color: var(--compact); }
 .board.compact .board__head { background: linear-gradient(180deg,#283129,var(--panel)); }
 .board.compact .board__turn { color: var(--compact); background: #25302a; }
+.board.archived {
+  border-style: dashed;
+  border-color: #68625a;
+  opacity: .72;
+}
+.board.archived .board__head { background: linear-gradient(180deg,#2d2c2a,var(--panel)); }
+.board.archived .board__turn { color: var(--muted); background: #252423; }
+.board__archived {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 5px;
+  background: var(--bg-deep);
+}
 .board__compact {
   font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
   color: var(--compact); background: #25302a; border: 1px solid var(--compact); border-radius: 5px; padding: 3px 6px;
@@ -518,6 +538,8 @@ body {
 .btn:disabled:hover { background: var(--bg-deep); }
 .btn.collapse { color: #b7b4ff; border-color: #5b58a6; background: #25243a; }
 .btn.collapse:hover:not(:disabled) { background: #302f4a; color: var(--text); }
+.btn.archive { color: var(--muted); border-color: #58534d; background: #252423; }
+.btn.archive:hover:not(:disabled) { background: var(--bg-deep); border-color: var(--border); color: var(--text); }
 /* Graphical "+" pinned on a board's output handle to spawn a child conversation. Sibling of
    .board (outside its overflow:hidden), positioned against the React Flow node wrapper. */
 .board__add {
@@ -612,6 +634,7 @@ body {
   font-size: 10px; font-weight: 700; line-height: 1; color: #fff;
   background: var(--unread, #ff4d4f); border: 1px solid var(--panel); border-radius: 8px;
 }
+.btn__badge--archive { background: #6f6a62; }
 .toolbar__sep { width: 1px; height: 18px; align-self: center; margin: 0 3px; background: var(--border-sub); }
 .toolbar .settings__model { background: transparent; border-color: transparent; color: var(--muted); padding: 5px 6px; }
 .toolbar .settings__model:hover { background: var(--bg-deep); border-color: transparent; color: var(--text); }

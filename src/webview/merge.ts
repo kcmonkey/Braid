@@ -390,6 +390,9 @@ export interface BoardData {
   // The hidden boards stay in the React Flow graph (node.hidden=true) so merge/fork/focus ancestry remains
   // exact; expanding this board simply unhides hiddenIds and clears this marker. Not engine compaction.
   collapsedGraph?: CollapsedGraph;
+  // Reversible visual archive. Archived boards are hidden from the canvas by default but stay in the
+  // graph/persistence so descendants still have exact ancestry and merge/fork context.
+  archived?: boolean;
   // M-MultiEngine (AD1): the engine that ran this board, stamped = the active provider at creation, IMMUTABLE.
   // A board's `sessionId` belongs to THIS engine, so it is the SSOT for "which engine owns this session" — the
   // turn router (host) and the engine-aware fork base read it via boardEngine(). Absent ⇒ 'claude' (legacy /
@@ -567,10 +570,8 @@ export interface CollapsePlan {
 
 export interface AutoCollapsePolicy {
   enabled: boolean;
-  /** Keep at most this many visible boards in a plain linear segment before folding its front. */
-  linearThreshold: number;
-  /** When a branch point blocks the front, wait for the active lineage to get this long before folding into it. */
-  branchThreshold: number;
+  /** Visible-board budget per branch segment; the collapsed representative counts as one visible board. */
+  threshold: number;
 }
 
 function edgeKind(e: Edge): EdgeKind {
@@ -742,73 +743,116 @@ function collapsePlanFromPathSpan(
     : [];
 }
 
+function collapsePlanForMaterializedLine(
+  path: string[], edges: Edge[], byId: Map<string, BoardNodeT>,
+): CollapsePlan[] {
+  for (let targetIndex = path.length - 1; targetIndex >= 1; targetIndex -= 1) {
+    const plan = collapsePlanFromPathSpan(path, 0, targetIndex, edges, byId);
+    if (plan.length) return plan;
+  }
+  return [];
+}
+
+function autoCollapsePlanFromPathSpan(
+  path: string[], startIndex: number, targetIndex: number,
+  edges: Edge[], byId: Map<string, BoardNodeT>,
+): CollapsePlan[] {
+  const target = byId.get(path[targetIndex]);
+  if (target?.data.status !== 'done') return [];
+  for (const id of path.slice(startIndex, targetIndex)) {
+    if (byId.get(id)?.data.status !== 'done') return [];
+  }
+  return collapsePlanFromPathSpan(path, startIndex, targetIndex, edges, byId);
+}
+
 export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): CollapsePlan[] {
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
   const ordered = materializedSelectedLine(edges, selectedIds, byId);
   if (!ordered) return [];
+  return collapsePlanForMaterializedLine(ordered, edges, byId);
+}
 
-  const targetId = ordered[ordered.length - 1];
-  const target = byId.get(targetId);
-  if (!target || target.hidden) return [];
-  const hiddenIds = ordered.slice(0, -1);
-  if (!hiddenIds.length) return [];
-  if (collapseWouldDetachVisibleBranch(edges, byId, targetId, hiddenIds)) return [];
+function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCollapsePolicy): CollapsePlan[] {
+  const threshold = Math.max(2, Math.floor(policy.threshold || 0));
+  const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  const children = visibleLineageChildren(edges, byId);
+  const parents = visibleLineageParents(edges, byId);
+  const candidates: CollapsePlan[] = [];
+  const seen = new Set<string>();
+  const add = (plan: CollapsePlan[]) => {
+    if (!plan.length) return;
+    const p = plan[0];
+    const key = `${p.targetId}|${p.hiddenIds.join(',')}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    candidates.push(p);
+  };
 
-  const existing = target.data.collapsedGraph?.hiddenIds ?? [];
-  return hiddenIds.some((id) => !existing.includes(id))
-    ? [{ targetId, hiddenIds }]
-    : [];
+  const visibleDone = nodes.filter((n) => !n.hidden && n.data.status === 'done');
+  const leaves = visibleDone.filter((n) => (children.get(n.id) ?? []).length === 0);
+  for (const leaf of leaves) {
+    const path = uniqueVisibleLineageTo(leaf.id, byId, parents);
+    if (!path || path.length <= threshold) continue;
+    const isBranchPoint = (idx: number) => idx < path.length - 1 && (children.get(path[idx])?.length ?? 0) > 1;
+
+    // Fold over-long visible runs anywhere in the graph, not just on the branch that just completed.
+    // A branch point ends the incoming segment and counts against its visible budget; child limbs start
+    // after it so sibling branch heads stay visible and edge routing remains unambiguous.
+    let segmentStart = 0;
+    for (let i = 0; i <= path.length; i += 1) {
+      const atEnd = i === path.length;
+      const barrier = !atEnd && isBranchPoint(i);
+      if (!atEnd && !barrier) continue;
+
+      const segmentEnd = barrier ? i : path.length - 1;
+      if (segmentEnd >= segmentStart) {
+        const segmentLength = segmentEnd - segmentStart + 1;
+        if (segmentLength > threshold) {
+          const targetIndex = segmentEnd - threshold + 1;
+          add(autoCollapsePlanFromPathSpan(path, segmentStart, targetIndex, edges, byId));
+        }
+      }
+      if (barrier) segmentStart = i + 1;
+    }
+  }
+
+  const seqOf = (id: string) => byId.get(id)?.data.seq ?? Number.MAX_SAFE_INTEGER;
+  candidates.sort((a, b) =>
+    (b.hiddenIds.length - a.hiddenIds.length)
+    || (seqOf(a.targetId) - seqOf(b.targetId))
+    || a.targetId.localeCompare(b.targetId)
+    || a.hiddenIds.join('|').localeCompare(b.hiddenIds.join('|')));
+  return candidates.length ? [candidates[0]] : [];
 }
 
 export function planAutoCollapseAfterDone(
   nodes: BoardNodeT[], edges: Edge[], completedId: string, policy: AutoCollapsePolicy,
 ): CollapsePlan[] {
   if (!policy.enabled) return [];
-  const linearThreshold = Math.max(2, Math.floor(policy.linearThreshold || 0));
-  const branchThreshold = Math.max(linearThreshold + 1, Math.floor(policy.branchThreshold || 0));
-  const byId = new Map(nodes.map((n) => [n.id, n] as const));
-  const completed = byId.get(completedId);
+  const completed = nodes.find((n) => n.id === completedId);
   if (!completed || completed.hidden || completed.data.status !== 'done') return [];
 
-  const children = visibleLineageChildren(edges, byId);
-  const parents = visibleLineageParents(edges, byId);
-  const path = uniqueVisibleLineageTo(completedId, byId, parents);
-  if (!path || path.length <= linearThreshold) return [];
-
-  const isBranchPoint = (idx: number) => idx < path.length - 1 && (children.get(path[idx])?.length ?? 0) > 1;
-
-  // First fold the front of any long linear segment without hiding a branch point.
-  let segmentStart = 0;
-  for (let i = 0; i <= path.length; i += 1) {
-    const atEnd = i === path.length;
-    const barrier = !atEnd && isBranchPoint(i);
-    if (!atEnd && !barrier) continue;
-
-    const segmentEnd = (barrier ? i : path.length) - 1;
-    if (segmentEnd >= segmentStart) {
-      const segmentLength = segmentEnd - segmentStart + 1;
-      if (segmentLength > linearThreshold) {
-        const targetIndex = segmentStart + (segmentLength - linearThreshold);
-        const plan = collapsePlanFromPathSpan(path, segmentStart, targetIndex, edges, byId);
-        if (plan.length) return plan;
-      }
-    }
-    if (barrier) segmentStart = i + 1;
+  const plans: CollapsePlan[] = [];
+  let workingNodes = nodes;
+  let workingEdges = edges;
+  const maxPasses = Math.max(1, nodes.length);
+  for (let i = 0; i < maxPasses; i += 1) {
+    const plan = bestAutoCollapsePlan(workingNodes, workingEdges, policy);
+    if (!plan.length) break;
+    const applied = applyCollapsePlans(workingNodes, plan);
+    if (!applied.changed) break;
+    plans.push(...plan);
+    workingNodes = applied.nodes;
+    workingEdges = syncHiddenEdges(workingNodes, workingEdges);
   }
-
-  // If a branch point near the front prevents further linear folding, wait longer, then fold the common
-  // prefix into the branch point itself. This keeps all branch children visible while decluttering history.
-  const firstBranchIndex = path.findIndex((_, idx) => isBranchPoint(idx));
-  if (firstBranchIndex > 0 && path.length >= branchThreshold) {
-    return collapsePlanFromPathSpan(path, 0, firstBranchIndex, edges, byId);
-  }
-  return [];
+  return plans;
 }
 
 export function applyCollapsePlans(nodes: BoardNodeT[], plans: CollapsePlan[]): { nodes: BoardNodeT[]; plans: CollapsePlan[]; changed: boolean } {
   if (!plans.length) return { nodes, plans, changed: false };
   const hide = new Set(plans.flatMap((p) => p.hiddenIds));
-  const byTarget = new Map(plans.map((p) => [p.targetId, p.hiddenIds] as const));
+  const byTarget = new Map<string, string[]>();
+  for (const p of plans) byTarget.set(p.targetId, [...new Set([...(byTarget.get(p.targetId) ?? []), ...p.hiddenIds])]);
   const out = nodes.map((n) => {
     if (hide.has(n.id)) return { ...n, hidden: true, selected: false };
     const add = byTarget.get(n.id);
@@ -843,6 +887,66 @@ export function expandCollapsedGraph(nodes: BoardNodeT[], targetId: string): { n
       return reveal.has(n.id) ? { ...n, hidden: false } : n;
     }),
   };
+}
+
+export function archivedBoardIds(nodes: BoardNodeT[]): string[] {
+  return nodes.filter((n) => n.data.archived).map((n) => n.id);
+}
+
+function collapsedHiddenIds(nodes: BoardNodeT[]): Set<string> {
+  const hidden = new Set<string>();
+  for (const n of nodes) {
+    for (const id of n.data.collapsedGraph?.hiddenIds ?? []) hidden.add(id);
+  }
+  return hidden;
+}
+
+/** Re-derive React Flow visibility from folded-history membership and the archived flag.
+ * Collapse wins over showArchived, so revealing the archive never expands collapsed-history stacks. */
+export function syncArchiveVisibility(nodes: BoardNodeT[], showArchived: boolean): { nodes: BoardNodeT[]; changed: boolean } {
+  const folded = collapsedHiddenIds(nodes);
+  let changed = false;
+  const out = nodes.map((n) => {
+    const shouldHide = folded.has(n.id) || (!!n.data.archived && !showArchived);
+    const selected = shouldHide ? false : n.selected;
+    if (!!n.hidden === shouldHide && n.selected === selected) return n;
+    changed = true;
+    return { ...n, hidden: shouldHide || undefined, selected };
+  });
+  return { nodes: changed ? out : nodes, changed };
+}
+
+export function archiveBoards(
+  nodes: BoardNodeT[], selectedIds: Iterable<string>, showArchived = false,
+): { nodes: BoardNodeT[]; archivedIds: string[]; changed: boolean } {
+  const ids = new Set(selectedIds);
+  const archivedIds: string[] = [];
+  let changed = false;
+  const marked = nodes.map((n) => {
+    if (!ids.has(n.id) || n.data.archived) return n;
+    archivedIds.push(n.id);
+    changed = true;
+    return { ...n, selected: false, data: { ...n.data, archived: true } };
+  });
+  const synced = syncArchiveVisibility(changed ? marked : nodes, showArchived);
+  return { nodes: synced.nodes, archivedIds, changed: changed || synced.changed };
+}
+
+export function restoreArchivedBoards(
+  nodes: BoardNodeT[], selectedIds: Iterable<string>, showArchived = false,
+): { nodes: BoardNodeT[]; restoredIds: string[]; changed: boolean } {
+  const ids = new Set(selectedIds);
+  const restoredIds: string[] = [];
+  let changed = false;
+  const marked = nodes.map((n) => {
+    if (!ids.has(n.id) || !n.data.archived) return n;
+    restoredIds.push(n.id);
+    changed = true;
+    const { archived, ...data } = n.data;
+    return { ...n, data };
+  });
+  const synced = syncArchiveVisibility(changed ? marked : nodes, showArchived);
+  return { nodes: synced.nodes, restoredIds, changed: changed || synced.changed };
 }
 
 export function syncHiddenEdges(nodes: BoardNodeT[], edges: Edge[]): Edge[] {

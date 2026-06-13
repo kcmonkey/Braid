@@ -15,7 +15,7 @@ import {
   reduceCodexNotification, buildCodexTurnDone, initCodexParseState, codexView, type CodexParseState,
 } from './reduce';
 import { CodexMcpControl, CodexAccountControl, codexSkillsToSlashCommands } from './control';
-import { userInputReason } from '../../webview/merge';
+import { parseAskUserQuestions, userInputReason } from '../../webview/merge';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -28,6 +28,8 @@ export interface CodexAdapterDeps {
 }
 
 const CLIENT_INFO = { name: 'braid', title: 'Braid', version: '0.1' };
+const BRAID_ASK_TOOL_NAMESPACE = 'braid';
+const BRAID_ASK_TOOL_NAME = 'AskUserQuestion';
 
 /** Map our (Claude-flavored) permissionMode → Codex {approvalPolicy, sandbox}. Codex app-server exposes the
  * same effect as `--dangerously-bypass-approvals-and-sandbox` per thread via approvalPolicy=never +
@@ -93,6 +95,60 @@ function buildUserInput(prompt: string, images?: ImageInput[]): { input: any[]; 
     }
   }
   return { input, temps };
+}
+
+function braidAskUserDynamicTool(): Record<string, unknown> {
+  return {
+    namespace: BRAID_ASK_TOOL_NAMESPACE,
+    name: BRAID_ASK_TOOL_NAME,
+    description: 'Ask the user a short structured question and wait for their answer before continuing.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['questions'],
+      properties: {
+        questions: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 3,
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['question'],
+            properties: {
+              id: { type: 'string', description: 'Optional stable id for the question.' },
+              header: { type: 'string', description: 'Short label shown above the question.' },
+              question: { type: 'string', description: 'The question to ask the user.' },
+              multiSelect: { type: 'boolean', description: 'Whether the user may select multiple options.' },
+              isOther: { type: 'boolean', description: 'Whether to include a freeform Other input.' },
+              isSecret: { type: 'boolean', description: 'Whether freeform input should be treated as sensitive.' },
+              options: {
+                type: 'array',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  required: ['label'],
+                  properties: {
+                    label: { type: 'string' },
+                    description: { type: 'string' },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function asQuestions(v: unknown): UserInputQuestion[] {
+  return parseAskUserQuestions(v && typeof v === 'object' ? v as Record<string, unknown> : {});
+}
+
+function isDynamicToolsUnsupported(e: any): boolean {
+  const msg = String(e?.message ?? e ?? '').toLowerCase();
+  return msg.includes('dynamictools') || msg.includes('dynamic_tools') || msg.includes('experimental');
 }
 
 export class CodexAdapter implements Engine {
@@ -224,19 +280,8 @@ export class CodexAdapter implements Engine {
         // existing AskUserCard via a synthesized toolUse, block on the user's STRUCTURED answer, then reply in
         // Codex's `{answers:{[id]:{answers:[]}}}` shape. (capability-layer P1 / D6①)
         const itemId: string = params?.itemId ?? '';
-        const questions: UserInputQuestion[] = (Array.isArray(params?.questions) ? params.questions : [])
-          .map((q: any): UserInputQuestion => ({
-            id: typeof q?.id === 'string' ? q.id : undefined,
-            header: typeof q?.header === 'string' ? q.header : '',
-            question: typeof q?.question === 'string' ? q.question : '',
-            multiSelect: false, // Codex requestUserInput is single-select per question (schema has no multiSelect)
-            options: (Array.isArray(q?.options) ? q.options : [])
-              .map((o: any) => ({ label: typeof o?.label === 'string' ? o.label : '', description: typeof o?.description === 'string' ? o.description : '' }))
-              .filter((o: { label: string }) => o.label),
-            isSecret: !!q?.isSecret,
-            isOther: !!q?.isOther,
-          }))
-          .filter((q: UserInputQuestion) => q.question);
+        const questions = asQuestions({ questions: params?.questions });
+        if (!questions.length) return { answers: {} };
         // Render the card in the turn flow (same model the webview already renders for Claude AskUserQuestion).
         sink.toolUse(req.boardId, state.turnIndex, { id: itemId, name: 'AskUserQuestion', input: { questions }, textOffset: state.answer.length, seq: state.evSeq++ });
         const answer = await pre.onUserInput(req.boardId, state.turnIndex, { toolUseId: itemId, questions }, ctl.abort.signal);
@@ -248,7 +293,21 @@ export class CodexAdapter implements Engine {
         }
         return { answers: out };
       }
-      // Other server requests (PTY interactive, dynamic-tool execution, form-mode elicitation, …): not wired
+      if (method === 'item/tool/call') {
+        if (params?.namespace === BRAID_ASK_TOOL_NAMESPACE && params?.tool === BRAID_ASK_TOOL_NAME) {
+          // This is Codex's model-invoked analogue of Claude AskUserQuestion. We register it as a dynamic
+          // tool on fresh threads; app-server emits the dynamicToolCall item first, so the reducer has already
+          // rendered the AskUserQuestion card from params.arguments. Here we only block on the neutral answer
+          // and return it as dynamic-tool output for Codex to continue the turn.
+          const questions = asQuestions(params?.arguments);
+          const toolUseId = typeof params?.callId === 'string' && params.callId ? params.callId : 'braid-ask';
+          if (!questions.length) return { contentItems: [{ type: 'inputText', text: 'AskUserQuestion failed: no valid questions were provided.' }], success: false };
+          const answer = await pre.onUserInput(req.boardId, state.turnIndex, { toolUseId, questions }, ctl.abort.signal);
+          return { contentItems: [{ type: 'inputText', text: userInputReason(questions, answer) }], success: true };
+        }
+        return { contentItems: [{ type: 'inputText', text: `Unsupported dynamic tool: ${params?.namespace ?? ''}/${params?.tool ?? ''}` }], success: false };
+      }
+      // Other server requests (PTY interactive, unsupported dynamic-tool execution, form-mode elicitation, …): not wired
       // → safe default (D5: no Braid carrier surface). Adding one = a new neutral channel, not a silent
       // special-case. (url-mode elicitation, approvals, requestUserInput ARE wired above.)
       return {};
@@ -293,7 +352,16 @@ export class CodexAdapter implements Engine {
         // relies on per-board threads (midpointFork=false) keeping the source = the parent's own ancestry.
         thread = await this.forkThread(rpc, attach.session.raw, startOpts);
       } else {
-        thread = (await rpc.request('thread/start', startOpts))?.thread;
+        const optsWithDynamicTools = { ...startOpts, dynamicTools: [braidAskUserDynamicTool()] };
+        try {
+          thread = (await rpc.request('thread/start', optsWithDynamicTools))?.thread;
+        } catch (e: any) {
+          if (!isDynamicToolsUnsupported(e)) throw e;
+          // Older app-server builds do not accept the experimental dynamicTools field. Fall back to a normal
+          // thread so Codex still works; it just won't have the model-invoked AskUserQuestion dynamic tool.
+          console.warn('[Braid] codex dynamicTools unavailable; continuing without active AskUserQuestion:', e?.message ?? e);
+          thread = (await rpc.request('thread/start', startOpts))?.thread;
+        }
       }
       const threadId = thread?.id;
       if (!threadId) { sink.error(req.boardId, req.turnIndex, 'Codex: thread/start returned no thread id'); return; }

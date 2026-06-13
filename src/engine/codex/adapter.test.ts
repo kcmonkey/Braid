@@ -230,6 +230,113 @@ describe('CodexAdapter requestUserInput (native AskUserQuestion)', () => {
   });
 });
 
+describe('CodexAdapter dynamic AskUserQuestion tool', () => {
+  function baseSink(toolUses: any[] = [], toolResults: any[] = []) {
+    return {
+      session: () => {}, model: () => {}, update: () => {}, thinking: () => {},
+      toolUse: (_b: string, _ti: number, ev: any) => toolUses.push(ev),
+      toolResult: (_b: string, _ti: number, ev: any) => toolResults.push(ev),
+      rateLimit: () => {}, commands: () => {}, waiting: () => {}, task: () => {},
+      error: (_b: string, _ti: number | undefined, m: string) => { throw new Error(m); },
+      done: () => {},
+    };
+  }
+
+  function basePre(overrides: Partial<any> = {}) {
+    return {
+      onPreToolUse: async () => ({ proceed: true }),
+      onPermissionRequest: async () => ({ allow: true }),
+      onUserInput: async () => ({ answers: {}, canceled: true }),
+      onElicit: async () => ({ action: 'decline' }),
+      ...overrides,
+    };
+  }
+
+  it('registers the Braid AskUserQuestion dynamic tool on fresh thread/start', async () => {
+    const calls: { method: string; params: any }[] = [];
+    const a = new CodexAdapter({ resolveBinary: () => undefined, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {}, dispose: () => {},
+      request: async (method: string, params: any) => {
+        calls.push({ method, params });
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') return { thread: { id: 'T' } };
+        if (method === 'turn/start') {
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+    await a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'hi', cwd: 'D:\\work' }, baseSink() as any, basePre() as any, { abort: new AbortController(), onLive: () => {} } as any);
+    const start = calls.find((c) => c.method === 'thread/start');
+    expect(start?.params.dynamicTools?.[0]).toMatchObject({ namespace: 'braid', name: 'AskUserQuestion' });
+    expect(start?.params.dynamicTools?.[0]?.inputSchema?.properties?.questions?.maxItems).toBe(3);
+  });
+
+  it('falls back to normal thread/start if the installed app-server does not support dynamicTools', async () => {
+    const starts: any[] = [];
+    const a = new CodexAdapter({ resolveBinary: () => undefined, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {}, dispose: () => {},
+      request: async (method: string, params: any) => {
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') {
+          starts.push(params);
+          if (params.dynamicTools) throw new Error('unknown field dynamicTools');
+          return { thread: { id: 'T' } };
+        }
+        if (method === 'turn/start') {
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+    await a.runTurn({ boardId: 'b', attach: { kind: 'fresh' }, prompt: 'hi', cwd: 'D:\\work' }, baseSink() as any, basePre() as any, { abort: new AbortController(), onLive: () => {} } as any);
+    expect(starts).toHaveLength(2);
+    expect(starts[0].dynamicTools?.[0]).toMatchObject({ namespace: 'braid', name: 'AskUserQuestion' });
+    expect(starts[1].dynamicTools).toBeUndefined();
+  });
+
+  it('handles item/tool/call for Braid AskUserQuestion through the neutral onUserInput channel', async () => {
+    let response: any;
+    let seenAsk: any;
+    const toolUses: any[] = [];
+    const toolResults: any[] = [];
+    const args = { questions: [{ id: 'q1', header: 'Native ask test', question: 'Pick one', options: [{ label: 'Alpha', description: '' }, { label: 'Beta', description: '' }] }] };
+    const a = new CodexAdapter({ resolveBinary: () => undefined, readProviderConfig: () => ({ ...DEFAULT_PROVIDER_CONFIG }) });
+    (a as any).open = async (_cwd: string, handlers: any) => ({
+      notify: () => {}, dispose: () => {},
+      request: async (method: string, _params: any) => {
+        if (method === 'account/read') return { account: { type: 'chatgpt' } };
+        if (method === 'thread/start') return { thread: { id: 'T' } };
+        if (method === 'turn/start') {
+          handlers.onNotification?.('turn/started', { turn: { id: 'turn-1' } });
+          handlers.onNotification?.('item/started', { item: { type: 'dynamicToolCall', id: 'call-1', namespace: 'braid', tool: 'AskUserQuestion', arguments: args, status: 'inProgress' } });
+          response = await handlers.onServerRequest('item/tool/call', 17, { callId: 'call-1', namespace: 'braid', tool: 'AskUserQuestion', arguments: args });
+          handlers.onNotification?.('item/completed', { item: { type: 'dynamicToolCall', id: 'call-1', namespace: 'braid', tool: 'AskUserQuestion', arguments: args, status: 'completed', contentItems: response.contentItems, success: response.success } });
+          handlers.onNotification?.('turn/completed', { turn: { status: 'completed' } });
+          return { turn: { id: 'turn-1' } };
+        }
+        return {};
+      },
+    });
+    await a.runTurn(
+      { boardId: 'b', attach: { kind: 'fresh' }, prompt: 'hi', cwd: 'D:\\work' },
+      baseSink(toolUses, toolResults) as any,
+      basePre({ onUserInput: async (_b: string, _ti: number, ask: any) => { seenAsk = ask; return { answers: { q1: ['Beta'] }, canceled: false }; } }) as any,
+      { abort: new AbortController(), onLive: () => {} } as any,
+    );
+    expect(seenAsk).toMatchObject({ toolUseId: 'call-1', questions: [{ id: 'q1', question: 'Pick one' }] });
+    expect(toolUses.find((e) => e.id === 'call-1')).toMatchObject({ name: 'AskUserQuestion' });
+    expect(response).toEqual({ contentItems: [{ type: 'inputText', text: '[The user answered via the UI]\nQ: Pick one → Beta' }], success: true });
+    expect(toolResults.find((e) => e.toolUseId === 'call-1')?.content).toContain('Beta');
+  });
+});
+
 // Permission-PROFILE elevation (capability-layer P3): item/permissions/requestApproval no longer returns an
 // invalid {} — it reuses the neutral approval card and replies with a GrantedPermissionProfile + scope.
 describe('CodexAdapter permissions/requestApproval (profile grant)', () => {

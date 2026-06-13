@@ -20,6 +20,7 @@ import {
   contractDelete, expandDeletion, flattenTurns, boardTurns, turnViewStatus, dropQueuedTurns, boxSelectedIds, hasPendingAsk, hasPendingPermission, nextPermMode,
   serializeGraph, makeEdge, roughTokens, settleRestoredStatus, settleRestoredSteps, diffLines, codexFileChanges, type CodexFileChange, buildEditorContextBlock, describeAsyncPending,
   planCollapseSelection, collapseSelection, planAutoCollapseAfterDone, applyCollapsePlans, expandCollapsedGraph, syncHiddenEdges,
+  archivedBoardIds, archiveBoards, restoreArchivedBoards, syncArchiveVisibility,
   needsCollapseDigest, collapseDigestKey, collapseDigestText,
   listToText, textToList, envToText, textToEnv, parseMcpToolName, mcpServerActions, parseAskUserQuestions,
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
@@ -1216,7 +1217,6 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const [showRawCompact, setShowRawCompact] = useState(false);
   const imgCtx = React.useContext(ImageCtx);
   const provider = React.useContext(ProviderCtx);
-  const providerCaps = React.useContext(CapabilitiesCtx);
   const collapseCtx = React.useContext(CollapseCtx);
   const dir = React.useContext(DirCtx);
   const detailSet = React.useContext(DetailIdsCtx);
@@ -1237,6 +1237,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // This board has a tool awaiting permission approval (canUseTool) → 🔐 badge/ring + a compact approve
   // control in the body, so the user can allow/deny without opening the conversation.
   const needsPerm = hasPendingPermission(data);
+  const isArchived = !!data.archived;
   const isCollapsedGraph = !!data.collapsedGraph;
   const collapsedCount = (data.collapsedGraph?.hiddenIds.length ?? 0) + 1;
   // What the COLLAPSED card shows instead of a bare count: the folded-history gist (digest miniSummary →
@@ -1248,7 +1249,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   const sourcePos = dir === 'LR' ? Position.Right : Position.Bottom;
   // A compact node is a boundary CHECKPOINT, not an input board (it takes no prompt of its own — you fork
   // to continue), so it is NOT "fresh": it collapses to a far gist like any normal node when unselected.
-  const isFresh = !data.prompt && data.status === 'idle' && !data.compact && !isCollapsedGraph;
+  const isFresh = !data.prompt && data.status === 'idle' && !data.compact && !isCollapsedGraph && !isArchived;
   // Per-node LOD (fisheye): this board renders DETAIL when it's the selected board / an ancestor of it,
   // OR it's an idle compose board (always usable so you can type even when nothing is selected).
   // Otherwise it's a compact FAR gist. The graph reflows to these mixed heights (see App.autoLayout).
@@ -1297,12 +1298,12 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   // TB → bottom dot). Lives outside the overflow-hidden .board so it isn't clipped at the edge.
   // Fork "+" on done boards (their real session) AND on compacted-boundary nodes (idle, carrying the
   // compacted session as parentSessionId): a compact node takes no input of its own — you fork to continue.
-  const canQueueChild = (data.status === 'streaming' || data.status === 'waiting')
-    && !compacting
-    && providerCaps[boardEngine(data)]?.routedFollowups === true;
-  const canFork = (data.status === 'done' && !!data.sessionId)
+  const canQueueChild = !isArchived
+    && (data.status === 'streaming' || data.status === 'waiting')
+    && !compacting;
+  const canFork = !isArchived && ((data.status === 'done' && !!data.sessionId)
     || canQueueChild
-    || (!!data.compact && data.status === 'idle' && !!data.compactSession);
+    || (!!data.compact && data.status === 'idle' && !!data.compactSession));
   const forkBtn = canFork ? (
     <button
       className={`board__add nodrag nopan ${dir === 'LR' ? 'board__add--r' : 'board__add--b'}`}
@@ -1313,7 +1314,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
 
   // No stop during compaction: it's a discrete /compact op, not a stoppable generation, and aborting it
   // mid-flight would strand the node in 'streaming' (runCompact doesn't settle on abort). Cancel = delete.
-  const stopBtn = (data.status === 'streaming' || data.status === 'waiting') && !compacting && !queuedWaiting ? (
+  const stopBtn = !isArchived && (data.status === 'streaming' || data.status === 'waiting') && !compacting && !queuedWaiting ? (
     <button
       className="board__stop nodrag nopan"
       title={data.status === 'waiting' ? 'Stop waiting — end background work and finalize this board' : 'Stop generating'}
@@ -1322,7 +1323,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
   ) : null;
 
   // M9: compact this board's lineage into a compressed-context node (done boards only). Icon-only.
-  const compactBtn = data.status === 'done' && data.sessionId ? (
+  const compactBtn = !isArchived && data.status === 'done' && data.sessionId ? (
     <button
       className="board__compact nodrag nopan"
       title="Compact here: compress this lineage into a compacted-context node"
@@ -1351,7 +1352,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
       </>
     )}
     <div
-      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${revealed ? 'revealed' : ''} ${dimmed ? 'dimmed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''} ${isCollapsedGraph ? 'collapsed-graph' : ''}`}
+      className={`board lod-${lod} ${selected ? 'selected' : ''} ${inMergeCtx ? 'ctx-hl' : ''} ${revealed ? 'revealed' : ''} ${dimmed ? 'dimmed' : ''} ${needsAsk ? 'needs-ask' : ''} ${needsPerm ? 'needs-perm' : ''} ${data.unread ? 'unread' : ''} ${data.status} ${data.merged ? 'merged' : ''} ${data.compact ? 'compact' : ''} ${isCollapsedGraph ? 'collapsed-graph' : ''} ${isArchived ? 'archived' : ''}`}
     >
       <Handle type="target" position={targetPos} />
       {/* Zoom-LOD content wrapper: keyed on `lod` so it remounts (and re-runs the dissolve) on a
@@ -1398,6 +1399,7 @@ function BoardNode({ id, data, selected }: { id: string; data: BoardData; select
         {needsAsk && <span className="board__needask" title="Needs your answer (open the conversation to respond)">❓</span>}
         {needsPerm && <span className="board__needperm" title="Needs your approval to run a tool — allow or deny below">🔐</span>}
         {data.unread && <span className="board__unread" title="Unread · finished — clears once you open it" />}
+        {isArchived && <span className="board__archived" title="Archived board">Archived</span>}
         {/* Working spinner only when actually generating — a pending AskUserQuestion / permission prompt is
             WAITING on you, not working, so show the ❓ / 🔐 badge instead (keeps the states unambiguous). */}
         {queuedWaiting
@@ -1718,6 +1720,7 @@ function ChatView({
   const leafCompacting = !!last?.data.compact && last.data.status === 'streaming' && !last.data.prompt;
   const leafCompactIdle = !!last?.data.compact && last.data.status === 'idle' && !last.data.prompt;
   const leafQueued = !!last?.data.queueParentId && last.data.status === 'streaming' && !last.data.queueStarted;
+  const leafArchived = !!last?.data.archived;
   // The view leaf is a fork node (≥2 branches, none followed yet) → show the branch picker instead of
   // the composer (decision 2026-06-09: hide the prompt box at fork nodes). Descending into a true leaf restores it.
   const leafIsBranch = !!branches[leafId];
@@ -1855,7 +1858,9 @@ function ChatView({
       )}
       </div>
       <div className="chatview__compose">
-        {leafIsBranch ? (
+        {leafArchived ? (
+          <div className="composer composer--archived">Archived board - restore it on the canvas to continue</div>
+        ) : leafIsBranch ? (
           <div className="composer composer--branch">⑂ This is a branch point — pick a branch above to continue downward</div>
         ) : leafCompacting ? (
           <div className="composer composer--compacting">
@@ -3020,6 +3025,7 @@ function App() {
   const [collapseRetryTick, setCollapseRetryTick] = useState(0);
   const [nodes, setNodes] = useState<BoardNodeT[]>([]);
   const [edges, setEdges] = useState<Edge[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
   const [drawer, setDrawer] = useState<{ merge: MergeResult; context: string; ids: string[]; base: { baseId: string; covered: Set<string> } | null } | null>(null);
   const [focusedId, setFocusedId] = useState<string | null>(null); // non-null → focus chat overlay; = the VIEW LEAF (deepest shown board, may have auto-descended below the entered node)
   const [focusEntryId, setFocusEntryId] = useState<string | null>(null); // the board the user actually entered/branched to → ChatView initial-scroll anchor (distinct from focusedId)
@@ -3101,6 +3107,7 @@ function App() {
   // Latest nodes/edges, so fork/merge can read the current graph, re-layout, and set both atomically.
   const nodesRef = useRef<BoardNodeT[]>([]);
   const edgesRef = useRef<Edge[]>([]);
+  const showArchivedRef = useRef(false);
   // Ctrl+Z undo stack: each entry is the boards + incident edges removed by one delete op, captured
   // before removal so a restore can re-insert them. A ref (no UI depends on it) — see undoDelete.
   // Node-Delete: each entry reverses one delete — re-insert removedNodes, restore removedEdges (original
@@ -3155,6 +3162,7 @@ function App() {
     for (const n of nodesRef.current) updateNodeInternals(n.id);
   }, [dir, updateNodeInternals]);
   useEffect(() => { nodesRef.current = nodes; edgesRef.current = edges; }, [nodes, edges]);
+  useEffect(() => { showArchivedRef.current = showArchived; }, [showArchived]);
   useEffect(() => { focusedIdRef.current = focusedId; }, [focusedId]);
   useEffect(() => { attachByBoardRef.current = attachByBoard; }, [attachByBoard]);
   useEffect(() => { imagesByBoardRef.current = imagesByBoard; }, [imagesByBoard]);
@@ -3232,6 +3240,7 @@ function App() {
     // inherited context. (focusSend keeps nodesRef.current in sync synchronously so the just-created
     // child is findable here.)
     let node = nodesRef.current.find((n) => n.id === boardId);
+    if (node?.data.archived) return;
     if (node?.data.queueParentId) {
       const queueParent = nodesRef.current.find((n) => n.id === node!.data.queueParentId);
       const queueParentLive = !!queueParent && (queueParent.data.status === 'streaming' || queueParent.data.status === 'waiting');
@@ -3359,7 +3368,7 @@ function App() {
   // into the SAME board (same session, no fork). turnIndex = the new round's slot, echoed back on done.
   const sendFollowup = useCallback((leafId: string, text: string, interrupt: boolean) => {
     const leaf = nodesRef.current.find((n) => n.id === leafId);
-    if (!leaf) return;
+    if (!leaf || leaf.data.archived) return;
     const wasStreaming = leaf.data.status === 'streaming';
     // Async continuation (异步续接): a 'waiting' board's session is also still OPEN — route the follow-up
     // into it (push) like streaming, not send+resume. But it has NO live round to keep unsettled (all rounds
@@ -3414,7 +3423,7 @@ function App() {
   // adding it to deps. (principle 4/15)
   const onFork = useCallback((parentId: string) => {
     const parent = nodesRef.current.find((n) => n.id === parentId);
-    if (!parent) return;
+    if (!parent || parent.data.archived) return;
     const childId = `b${idRef.current++}`;
     if (parent.data.status === 'streaming' || parent.data.status === 'waiting') {
       const child: BoardNodeT = {
@@ -3456,7 +3465,7 @@ function App() {
   // session as its parent — fork/continue from it inherits the compressed context automatically.
   const onCompact = useCallback((boardId: string) => {
     const board = nodesRef.current.find((n) => n.id === boardId);
-    if (!board || board.data.status !== 'done' || !board.data.sessionId) return;
+    if (!board || board.data.archived || board.data.status !== 'done' || !board.data.sessionId) return;
     const cid = `b${idRef.current++}`;
     const compactNode: BoardNodeT = {
       id: cid, type: 'board', selected: true, // select the new node → it + its lineage render detail
@@ -3498,6 +3507,13 @@ function App() {
     () => Object.fromEntries(nodes.map((n) => [n.id, n])) as Record<string, BoardNodeT>,
     [nodes],
   );
+  const archiveCount = useMemo(() => archivedBoardIds(nodes).length, [nodes]);
+  const selectedArchivedCount = useMemo(
+    () => selectedIds.filter((id) => !!byId[id]?.data.archived).length,
+    [selectedIds, byId],
+  );
+  const selectedActiveCount = selectedIds.length - selectedArchivedCount;
+  const selectionHasArchived = selectedArchivedCount > 0;
   // Ancestors of every selected board — their context is folded into a merge, so highlight them too.
   // Boundary-aware (M9) so the highlight matches what doMerge/computeMerge actually collect: a compact
   // node stops the walk (its summary replaces everything above), so those ancestors aren't highlighted.
@@ -3548,7 +3564,7 @@ function App() {
     const s = new Set<string>();
     if (zoomCompressed) return s; // every board is a far gist → none is detail-wide
     for (const n of nodes) {
-      const fresh = !n.data.prompt && n.data.status === 'idle' && !n.data.compact && !n.data.collapsedGraph;
+      const fresh = !n.data.prompt && n.data.status === 'idle' && !n.data.compact && !n.data.collapsedGraph && !n.data.archived;
       if (!n.data.collapsedGraph && (detailIds.has(n.id) || fresh)) s.add(n.id);
     }
     return s;
@@ -3675,8 +3691,9 @@ function App() {
     const collapsed = collapseSelection(curNodes, curEdges, selectedIds);
     if (!collapsed.changed) return;
     const targetId = collapsed.plans[0]?.targetId ?? null;
-    const newEdges = syncHiddenEdges(collapsed.nodes, curEdges);
-    const laid = relayoutAnchored(collapsed.nodes, newEdges, dirRef.current, targetId);
+    const visible = syncArchiveVisibility(collapsed.nodes, showArchivedRef.current).nodes;
+    const newEdges = syncHiddenEdges(visible, curEdges);
+    const laid = relayoutAnchored(visible, newEdges, dirRef.current, targetId);
     nodesRef.current = laid;
     edgesRef.current = newEdges;
     setEdges(newEdges);
@@ -3686,14 +3703,15 @@ function App() {
   const expandCollapsed = useCallback((id: string) => {
     const expanded = expandCollapsedGraph(nodesRef.current, id);
     if (!expanded.changed) return;
-    const newEdges = syncHiddenEdges(expanded.nodes, edgesRef.current);
+    const visible = syncArchiveVisibility(expanded.nodes, showArchivedRef.current).nodes;
+    const newEdges = syncHiddenEdges(visible, edgesRef.current);
     // Anchor on the collapsed representative (the clicked node), NOT autoLayout's selection-derived anchor.
     // expandCollapsedGraph un-hides the folded ancestors with their STALE positions (frozen when collapsed +
     // accumulated relayout translations). With no board selected, autoLayout would fall back to the bbox
     // top-left over all VISIBLE nodes — which now includes those stale-positioned un-hidden nodes — computing
     // an anchor nowhere near the rep on screen and flinging the whole graph off-canvas. Pinning the rep id
     // keeps it exactly where it sits while the revealed history reflows around it.
-    const laid = relayoutAnchored(expanded.nodes, newEdges, dirRef.current, id);
+    const laid = relayoutAnchored(visible, newEdges, dirRef.current, id);
     nodesRef.current = laid;
     edgesRef.current = newEdges;
     setEdges(newEdges);
@@ -3704,6 +3722,20 @@ function App() {
     () => ({ expand: expandCollapsed }),
     [expandCollapsed],
   );
+
+  const setArchiveVisibility = useCallback((show: boolean, anchorId?: string | null) => {
+    showArchivedRef.current = show;
+    setShowArchived(show);
+    const synced = syncArchiveVisibility(nodesRef.current, show);
+    if (!synced.changed) return;
+    const newEdges = syncHiddenEdges(synced.nodes, edgesRef.current);
+    const anchor = anchorId ?? synced.nodes.find((n) => n.selected && !n.hidden)?.id ?? null;
+    const laid = relayoutAnchored(synced.nodes, newEdges, dirRef.current, anchor);
+    nodesRef.current = laid;
+    edgesRef.current = newEdges;
+    setEdges(newEdges);
+    setNodes(laid);
+  }, []);
 
   // Start a brand-new conversation: drop a fresh parent-less root board onto the canvas.
   // No edges → dagre lays it out as its own tree; sending it (no parentSessionId) opens a new session.
@@ -3734,7 +3766,7 @@ function App() {
     const leafId = focusedIdRef.current;
     if (!leafId) return;
     const leaf = nodesRef.current.find((n) => n.id === leafId);
-    if (!leaf) return;
+    if (!leaf || leaf.data.archived) return;
     // A compacted-boundary leaf takes no input of its own — fall through to the fork path so continuing it
     // opens a NEW board on the compacted context (forkBaseFor carries the compacted session). (M9 boundary)
     if (leaf.data.status === 'idle' && !leaf.data.prompt && !leaf.data.compact) {
@@ -3990,6 +4022,8 @@ function App() {
   // the conversation" — decision 2026-06-10.)
   const openNotice = useCallback((id: string) => {
     setNoticePanelOpen(false);
+    const target = nodesRef.current.find((n) => n.id === id);
+    if (target?.data.archived && target.hidden) setArchiveVisibility(true, id);
     setNodes((ns) => ns.map((n) => {
       const sel = n.id === id;
       const data = sel && n.data.unread ? { ...n.data, unread: false } : n.data;
@@ -3997,7 +4031,7 @@ function App() {
     }));
     revealReqRef.current = { id, focus: false };
     tryReveal();
-  }, [tryReveal]);
+  }, [tryReveal, setArchiveVisibility]);
 
   // ===== Canvas content search (Canvas-Search plan) — pure webview, no host/engine/protocol. =====
   // Ranked hits for the current query over the LIVE node set (streaming / waiting / multi-turn boards
@@ -4053,13 +4087,19 @@ function App() {
     }
     const rep = nodesRef.current.find((n) => (n.data.collapsedGraph?.hiddenIds ?? []).includes(targetId));
     if (rep) {
+      if (node?.data.archived) setArchiveVisibility(true, rep.id);
       expandCollapsed(rep.id);                       // un-hides into nodesRef + setNodes
       revealReqRef.current = { id: targetId, focus }; // retry-on-[nodes] effect fires tryReveal post-commit
       return;
     }
+    if (node?.data.archived && node.hidden) {
+      setArchiveVisibility(true, targetId);
+      revealReqRef.current = { id: targetId, focus };
+      return;
+    }
     revealReqRef.current = { id: targetId, focus };
     tryReveal();
-  }, [tryReveal, expandCollapsed]);
+  }, [tryReveal, expandCollapsed, setArchiveVisibility]);
 
   // Locate = pan/zoom + pulse (focus:false). Remembers the located id so a SECOND Enter on the same hit opens it.
   const locateHit = useCallback((i: number) => {
@@ -4147,9 +4187,9 @@ function App() {
     onCompact(id);
   }, [nodes, onCompact]);
 
-  // Visual auto-collapse is deliberately completion-triggered: the `done` message queues the completed board,
-  // then this effect runs once after the done patch commits. Ordinary selection/expand/layout changes never
-  // queue it, so reading or expanding a collapsed node is not disturbed by a render loop.
+  // Visual auto-collapse is deliberately completion-triggered: the `done` message queues one scan, then this
+  // effect runs once after the done patch commits. The scan may compress ANY long visible branch in the graph,
+  // but ordinary selection/expand/layout changes never queue it, so reading a collapsed node is undisturbed.
   useEffect(() => {
     const id = autoCollapsePendingRef.current;
     if (!id) return;
@@ -4170,9 +4210,10 @@ function App() {
     if (!plans.length) return;
     const collapsed = applyCollapsePlans(curNodes, plans);
     if (!collapsed.changed) return;
-    const targetId = plans[0]?.targetId ?? id;
-    const newEdges = syncHiddenEdges(collapsed.nodes, curEdges);
-    const laid = relayoutAnchored(collapsed.nodes, newEdges, dirRef.current, targetId);
+    const targetId = collapsed.nodes.some((n) => n.id === id && !n.hidden) ? id : (plans[0]?.targetId ?? id);
+    const visible = syncArchiveVisibility(collapsed.nodes, showArchivedRef.current).nodes;
+    const newEdges = syncHiddenEdges(visible, curEdges);
+    const laid = relayoutAnchored(visible, newEdges, dirRef.current, targetId);
     nodesRef.current = laid;
     edgesRef.current = newEdges;
     setEdges(newEdges);
@@ -4185,7 +4226,7 @@ function App() {
     if (suppressEnterRef.current || focusedIdRef.current) return;
     if (vp.zoom < ENTER_ZOOM) return;
     const inst = rfRef.current;
-    const ns = nodesRef.current;
+    const ns = nodesRef.current.filter((n) => !n.hidden);
     if (!inst || !ns.length) return;
     const c = inst.screenToFlowPosition(pointerRef.current);
     const sizeOf = (n: BoardNodeT) => ({ w: n.measured?.width ?? 320, h: n.measured?.height ?? 200 });
@@ -4271,10 +4312,12 @@ function App() {
       if (data.turns) data.turns = data.turns.map((t) => ({ ...t, steps: settleRestoredSteps(t.steps) }));
       return { id: sn.id, type: 'board' as const, position: sn.position, data, hidden: sn.hidden };
     });
-    const restoredEdges = syncHiddenEdges(restoredNodes, g.edges.map((se) => makeEdge(se.source, se.target, se.kind)));
-    const nodes = configRef.current
-      ? restampActiveProvider(restoredNodes, restoredEdges, activeProviderRef.current)
+    const baseEdges = g.edges.map((se) => makeEdge(se.source, se.target, se.kind));
+    const stampedNodes = configRef.current
+      ? restampActiveProvider(restoredNodes, baseEdges, activeProviderRef.current)
       : restoredNodes;
+    const nodes = syncArchiveVisibility(stampedNodes, showArchivedRef.current).nodes;
+    const restoredEdges = syncHiddenEdges(nodes, baseEdges);
     idRef.current = g.idCounter;
     seqRef.current = g.seqCounter;
     nodesRef.current = nodes;
@@ -4990,6 +5033,46 @@ function App() {
   const [hintNote, setHintNote] = useState('');
   const hintNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const showHint = useCallback((text: string) => {
+    setHintNote(text);
+    if (hintNoteTimerRef.current) clearTimeout(hintNoteTimerRef.current);
+    hintNoteTimerRef.current = setTimeout(() => setHintNote(''), 3000);
+  }, []);
+
+  const archiveSelected = useCallback(() => {
+    const selected = new Set(selectedIds);
+    const ids = nodesRef.current
+      .filter((n) => selected.has(n.id) && !n.data.archived && n.data.status !== 'streaming' && n.data.status !== 'waiting')
+      .map((n) => n.id);
+    if (!ids.length) return;
+    const archived = archiveBoards(nodesRef.current, ids, showArchivedRef.current);
+    if (!archived.changed) return;
+    const newEdges = syncHiddenEdges(archived.nodes, edgesRef.current);
+    const anchor = archived.nodes.find((n) => n.selected && !n.hidden)?.id ?? null;
+    const laid = relayoutAnchored(archived.nodes, newEdges, dirRef.current, anchor);
+    nodesRef.current = laid;
+    edgesRef.current = newEdges;
+    setEdges(newEdges);
+    setNodes(laid);
+    showHint(`Archived ${archived.archivedIds.length} board${archived.archivedIds.length === 1 ? '' : 's'}.`);
+  }, [selectedIds, showHint]);
+
+  const restoreSelectedArchived = useCallback(() => {
+    const selected = new Set(selectedIds);
+    const ids = nodesRef.current.filter((n) => selected.has(n.id) && n.data.archived).map((n) => n.id);
+    if (!ids.length) return;
+    const restored = restoreArchivedBoards(nodesRef.current, ids, showArchivedRef.current);
+    if (!restored.changed) return;
+    const newEdges = syncHiddenEdges(restored.nodes, edgesRef.current);
+    const anchor = restored.restoredIds[0] ?? null;
+    const laid = relayoutAnchored(restored.nodes, newEdges, dirRef.current, anchor);
+    nodesRef.current = laid;
+    edgesRef.current = newEdges;
+    setEdges(newEdges);
+    setNodes(laid);
+    showHint(`Restored ${restored.restoredIds.length} board${restored.restoredIds.length === 1 ? '' : 's'}.`);
+  }, [selectedIds, showHint]);
+
   // New conversation via canvas gestures (not just the toolbar button):
   //  - double-click empty canvas → create immediately
   //  - right-click empty canvas → a context menu offering "+ New conversation"
@@ -5182,6 +5265,15 @@ function App() {
         >
           <span className="tb-ico">🔔</span>{noticeBadge > 0 && <span className="btn__badge">{noticeBadge}</span>}
         </button>
+        {archiveCount > 0 && (
+          <button
+            className={`btn ${showArchived ? 'active' : ''}`}
+            onClick={() => setArchiveVisibility(!showArchivedRef.current)}
+            title={showArchived ? 'Hide archived boards' : `Show archived boards (${archiveCount})`}
+          >
+            <span className="tb-ico">🗄</span><span className="btn__badge btn__badge--archive">{archiveCount}</span>
+          </button>
+        )}
         {config && (
           <select
             className="settings__model nodrag nopan" title="Model" value={config.model}
@@ -5287,34 +5379,56 @@ function App() {
         />
       )}
 
-      {selectedIds.length >= 2 && (
+      {selectedIds.length >= 1 && (
         <div className="mergebar">
           <span className="mergebar__count">
-            {selectedIds.length} boards selected
-            {mLeaves.length < selectedIds.length &&
+            {selectedIds.length} board{selectedIds.length === 1 ? '' : 's'} selected
+            {selectedArchivedCount > 0 && ` (${selectedArchivedCount} archived)`}
+            {selectedIds.length >= 2 && !selectionHasArchived && mLeaves.length < selectedIds.length &&
               ` (${selectedIds.length - mLeaves.length} are ancestors, folded into the context automatically)`}
           </span>
-          <button
-            className="btn collapse"
-            onClick={collapseSelected}
-            disabled={selectionBusy || !collapsePlans.length}
-            title={collapsePlans.length ? 'Collapse this ancestor span; boards between selections are included' : 'Collapse requires one ancestor line with a single last board'}
-          >
-            Collapse span
-          </button>
-          {mLeaves.length >= 2 && !selectionBusy && (
+          {selectedActiveCount > 0 && (
+            <button
+              className="btn archive"
+              onClick={archiveSelected}
+              disabled={selectionBusy}
+              title={selectionBusy ? 'Let selected running boards finish before archiving' : 'Archive selected boards'}
+            >
+              Archive
+            </button>
+          )}
+          {selectedArchivedCount > 0 && (
+            <button className="btn archive" onClick={restoreSelectedArchived} title="Restore selected archived boards">
+              Restore
+            </button>
+          )}
+          {selectedIds.length >= 2 && (
+            <button
+              className="btn collapse"
+              onClick={collapseSelected}
+              disabled={selectionBusy || selectionHasArchived || !collapsePlans.length}
+              title={collapsePlans.length && !selectionHasArchived ? 'Collapse this ancestor span; boards between selections are included' : 'Collapse requires one visible ancestor line with a single last board'}
+            >
+              Collapse span
+            </button>
+          )}
+          {selectedIds.length >= 2 && mLeaves.length >= 2 && !selectionBusy && !selectionHasArchived && (
             <button className="btn merge" onClick={doMerge}>Merge context - new conversation</button>
           )}
           {selectionBusy ? (
             <span className="mergebar__count mergebar__warn">
               A selected board is still working. Let it finish, or Stop its wait, before graph actions.
             </span>
-          ) : mLeaves.length < 2 ? (
+          ) : selectionHasArchived && selectedIds.length >= 2 ? (
+            <span className="mergebar__count mergebar__warn">
+              Restore archived boards before merge or collapse.
+            </span>
+          ) : selectedIds.length >= 2 && mLeaves.length < 2 ? (
             <span className="mergebar__count mergebar__warn">
               Merge needs boards from different branches.
             </span>
           ) : null}
-          {!collapsePlans.length && !selectionBusy && (
+          {selectedIds.length >= 2 && !collapsePlans.length && !selectionBusy && !selectionHasArchived && (
             <span className="mergebar__count mergebar__warn">
               Collapse needs one ancestor line with a single last board.
             </span>
