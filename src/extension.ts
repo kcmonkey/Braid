@@ -1451,8 +1451,14 @@ async function accountAuth(canvasId: string, action: 'in' | 'out', provider: Eng
   const abort = new AbortController();
   accountAuthAborts.set(key, abort);
   try {
-    if (action === 'in') await ctrl.signIn((url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); }, abort.signal);
-    else await ctrl.signOut();
+    if (action === 'in') {
+      const outcome = await ctrl.signIn((url) => { void vscode.env.openExternal(vscode.Uri.parse(url)); }, abort.signal);
+      if (!outcome.ok && !outcome.canceled) {
+        const providerName = PROVIDER_CATALOG.find((p) => p.id === provider)?.name ?? provider;
+        console.error(`[Braid] ${provider} account sign-in failed:`, outcome.error);
+        void vscode.window.showWarningMessage(`Braid: ${providerName} sign-in failed: ${outcome.error}`);
+      }
+    } else await ctrl.signOut();
   } catch (e: any) {
     console.error('[Braid] account auth failed:', e?.message ?? e);
   } finally {

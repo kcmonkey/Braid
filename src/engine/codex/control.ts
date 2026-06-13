@@ -106,7 +106,8 @@ export class CodexAccountControl implements AccountController {
   private rpc!: CodexRpc;
   private disposed = false;
   // Set while a browser sign-in is pending; the `account/login/completed` notification resolves it.
-  private loginResolve: ((n: { success: boolean; error?: string }) => void) | null = null;
+  private loginResolve: ((n: { loginId?: string | null; success: boolean; error?: string }) => void) | null = null;
+  private pendingLoginId: string | null = null;
 
   constructor(private readonly auth: {
     authMethod(): 'subscription' | 'apiKey';
@@ -119,8 +120,10 @@ export class CodexAccountControl implements AccountController {
   /** Routed here by the adapter's onNotification wiring. */
   onNotification(method: string, params: any) {
     if (method === 'account/login/completed' && this.loginResolve) {
+      const loginId = typeof params?.loginId === 'string' ? params.loginId : null;
+      if (this.pendingLoginId && loginId && loginId !== this.pendingLoginId) return;
       const r = this.loginResolve; this.loginResolve = null;
-      r({ success: !!params?.success, error: typeof params?.error === 'string' ? params.error : undefined });
+      r({ loginId, success: !!params?.success, error: typeof params?.error === 'string' ? params.error : undefined });
     }
   }
 
@@ -151,11 +154,16 @@ export class CodexAccountControl implements AccountController {
       }
 
       const cur = await this.info();
-      if (cur?.signedIn) return { ok: true }; // already signed in → no dangling flow
+      if (cur?.signedIn && cur.backend === 'chatgpt') return { ok: true }; // already signed in → no dangling flow
       const res = await this.rpc.request<any>('account/login/start', { type: 'chatgpt' }, 30_000);
-      const url = res?.authUrl;
-      const loginId = res?.loginId;
-      if (!url) return { ok: false, error: 'Codex sign-in returned no authorization URL' };
+      const loginType = typeof res?.type === 'string' ? res.type : 'unknown';
+      const url = typeof res?.authUrl === 'string' && res.authUrl
+        ? res.authUrl
+        : typeof res?.verificationUrl === 'string' && res.verificationUrl
+          ? res.verificationUrl
+          : undefined;
+      const loginId = typeof res?.loginId === 'string' && res.loginId ? res.loginId : undefined;
+      if (!url) return { ok: false, error: `Codex sign-in returned no browser URL (type: ${loginType})` };
 
       let timer: ReturnType<typeof setTimeout> | undefined;
       let resolveDone!: (o: AuthOutcome) => void;
@@ -166,10 +174,12 @@ export class CodexAccountControl implements AccountController {
       };
       const finish = (o: AuthOutcome) => {
         this.loginResolve = null;
+        this.pendingLoginId = null;
         if (timer) clearTimeout(timer);
         signal.removeEventListener('abort', onAbort);
         resolveDone(o);
       };
+      this.pendingLoginId = loginId ?? null;
       this.loginResolve = (n) => finish(n.success ? { ok: true } : { ok: false, error: n.error ?? 'Codex sign-in failed' });
       timer = setTimeout(() => finish({ ok: false, error: 'Codex sign-in timed out' }), 180_000);
       if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true });

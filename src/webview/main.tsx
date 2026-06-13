@@ -26,7 +26,7 @@ import {
   contextPct, contextBucket, CONTEXT_MIN_DISPLAY_PCT, shouldAutoCompact, parseTodos, todoSummary, type Todo,
 } from './merge';
 import { migrateGraph } from '../persistence/migrateGraph';
-import { rankResults, parseQuery, type SearchHit } from './search';
+import { rankResults, parseQuery, withCollapsedRepMatches, type SearchHit } from './search';
 import { relayoutAnchored, type LayoutDir } from './layout';
 import { markdownUrlTransform, parseLocalPathLink } from './localLinks';
 import type {
@@ -2639,7 +2639,7 @@ function AccountCard({ p, snap, active, onSignIn, onSignOut, onSetActive, showAp
   const busy = !!snap?.busy;
   const apiOnly = API_ONLY_PROVIDERS.has(p.id);
   const apiMode = !!showApiKey && (authMethod === 'apiKey' || apiOnly);
-  const signedIn = !!acct?.signedIn;
+  const signedIn = !!acct?.signedIn && (apiMode || acct.backend !== 'apiKey');
   const connected = apiMode ? !!keyStatus?.stored : signedIn; // "connected" = usable via the chosen method
   const isActive = active && connected;
   // Distinguish "still checking the subscription" (panel just opened, first fetch in flight) from
@@ -3194,7 +3194,7 @@ function App() {
   // Pending jump-to-board request from a notification. Held in a ref so it survives until the target
   // node actually exists (a freshly re-opened panel restores its graph async — see the retry effect).
   // `focus` true (ask jump) → open the full-screen ChatView; false (done/error jump) → locate + pulse.
-  const revealReqRef = useRef<{ id: string; focus: boolean; composer?: boolean } | null>(null);
+  const revealReqRef = useRef<{ id: string; focus: boolean; composer?: boolean; select?: boolean } | null>(null);
   const revealedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // clears the pulse ring
   const rfRef = useRef<ReactFlowInstance<BoardNodeT, Edge> | null>(null);
   const suppressEnterRef = useRef(false); // true briefly after exit so the zoom-down doesn't re-trigger enter
@@ -4094,6 +4094,20 @@ function App() {
     focusClosingRef.current = false;
     setFocusClosing(false);
     setFocusedId(null);
+    // Select the located board (search reveal into a temporary collapsed preview) so the preview idle
+    // timer keeps it revealed instead of folding it back after 5s. One selection → no selection bar.
+    if (req.select) {
+      setNodes((ns) => {
+        let changed = false;
+        const out = ns.map((x) => {
+          const sel = x.id === req.id;
+          if (!!x.selected === sel) return x;
+          changed = true;
+          return { ...x, selected: sel };
+        });
+        return changed ? out : ns;
+      });
+    }
     suppressEnterRef.current = true; // the fitView zoom shouldn't re-trigger enter-focus
     requestAnimationFrame(() => {
       const i = rfRef.current;
@@ -4207,16 +4221,22 @@ function App() {
   const searchTerms = useMemo(() => parseQuery(searchQuery).terms, [searchQuery]);
   const searchActiveOn = searchOpen && searchQuery.trim().length > 0;
   const matchedIds = useMemo(() => new Set(searchHits.map((h) => h.id)), [searchHits]);
+  // Canvas-visible match set: a match hidden INSIDE a collapsed group (a folded board) renders nothing
+  // on the canvas, and its representative would otherwise be dimmed — so the user can't tell the collapse
+  // contains their term. Surface it: a collapsed representative counts as matched when any of its folded
+  // boards (`collapsedGraph.hiddenIds`) is a real hit. Drives canvas dimming + minimap tint only; the
+  // results list still lists the individual folded boards (matchedIds) so navigation reveals the exact one.
+  const canvasMatchedIds = useMemo(() => withCollapsedRepMatches(nodes, matchedIds), [matchedIds, nodes]);
   const searchCtxValue = useMemo(
-    () => ({ active: searchActiveOn, matched: matchedIds }),
-    [searchActiveOn, matchedIds],
+    () => ({ active: searchActiveOn, matched: canvasMatchedIds }),
+    [searchActiveOn, canvasMatchedIds],
   );
   // MiniMap tint: a fresh closure whenever the matched set / active flag changes → the <MiniMap> nodeColor
   // prop ref changes, so it recomputes colors. Search hits win over the normal type colors. No module
   // state, no node-data mutation (nothing extra to strip from serializeGraph). (Phase 2)
   const minimapColor = useCallback(
-    (n: Node) => (searchActiveOn && matchedIds.has(n.id) ? '#d97757' : minimapNodeColor(n)),
-    [searchActiveOn, matchedIds],
+    (n: Node) => (searchActiveOn && canvasMatchedIds.has(n.id) ? '#d97757' : minimapNodeColor(n)),
+    [searchActiveOn, canvasMatchedIds],
   );
   // Clamp the active row when the hit list shrinks (e.g. query narrowed).
   useEffect(() => { setSearchActive((i) => (i >= searchHits.length ? 0 : i)); }, [searchHits.length]);
@@ -4250,8 +4270,12 @@ function App() {
     const rep = nodesRef.current.find((n) => (n.data.collapsedGraph?.hiddenIds ?? []).includes(targetId));
     if (rep) {
       if (node?.data.archived) setArchiveVisibility(true, rep.id);
-      expandCollapsed(rep.id);                       // un-hides into nodesRef + setNodes
-      revealReqRef.current = { id: targetId, focus }; // retry-on-[nodes] effect fires tryReveal post-commit
+      expandCollapsed(rep.id);                       // un-hides into nodesRef + setNodes (temporary preview)
+      // `select`: a locate (focus:false) expands the representative as a TEMPORARY preview that the 5s idle
+      // timer would otherwise re-fold, making the located board vanish. Selecting the target keeps it in the
+      // preview-keep-alive set (selectedIds) so it stays revealed. focus:true opens ChatView (tryReveal
+      // returns early before the select), and that focus already keeps the preview alive.
+      revealReqRef.current = { id: targetId, focus, select: true }; // retry-on-[nodes] effect fires tryReveal post-commit
       return;
     }
     if (node?.data.archived && node.hidden) {

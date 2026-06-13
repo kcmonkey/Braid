@@ -266,6 +266,25 @@ export function rankResults(nodes: BoardNodeT[], raw: string): SearchHit[] {
   return hits;
 }
 
+// Surface matches that live INSIDE a collapsed group on the canvas. A matching folded board is hidden
+// (renders nothing) and its representative would otherwise be dimmed, so the user can't tell the collapse
+// contains their term. A collapsed representative (a board carrying a `collapsedGraph`) is therefore added
+// to the match set when any of its folded boards (`collapsedGraph.hiddenIds`) is itself a hit. The result
+// drives canvas dimming + minimap tint ONLY — the results list keeps listing the individual folded boards
+// (the input set) so navigation reveals the exact one. Returns the SAME Set when nothing is added (cheap
+// identity for memoization). Pure & deterministic. (Canvas-Search)
+export function withCollapsedRepMatches(nodes: BoardNodeT[], matched: Set<string>): Set<string> {
+  if (!matched.size) return matched;
+  let out: Set<string> | null = null;
+  for (const n of nodes) {
+    const folded = n.data.collapsedGraph?.hiddenIds;
+    if (folded && !matched.has(n.id) && folded.some((id) => matched.has(id))) {
+      (out ??= new Set(matched)).add(n.id);
+    }
+  }
+  return out ?? matched;
+}
+
 // A windowed excerpt around the first term hit, plus merged term ranges (offsets within the returned
 // `text`, INCLUDING any leading …). terms=[] → head of the text, no ranges. Pure & deterministic.
 export function extractSnippet(text: string, terms: string[], window = 90): Snippet {

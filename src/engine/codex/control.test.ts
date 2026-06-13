@@ -121,3 +121,88 @@ describe('CodexAccountControl API-key sign-in', () => {
     expect(calls).toEqual([]);
   });
 });
+
+describe('CodexAccountControl subscription sign-in', () => {
+  const flush = async () => {
+    await Promise.resolve();
+    await Promise.resolve();
+  };
+
+  function ctrlWith(handler: (method: string, params: any) => Promise<any> | any) {
+    const calls: { method: string; params: any }[] = [];
+    const ctrl = new CodexAccountControl({
+      authMethod: () => 'subscription',
+      getApiKey: () => undefined,
+    });
+    ctrl.attach({
+      request: async (method: string, params: any) => {
+        calls.push({ method, params });
+        return handler(method, params);
+      },
+      dispose: () => {},
+    } as any);
+    return { ctrl, calls };
+  }
+
+  it('starts ChatGPT browser login when the existing Codex account is an API key', async () => {
+    const { ctrl, calls } = ctrlWith((method) => {
+      if (method === 'account/read') return { account: { type: 'apiKey' } };
+      if (method === 'account/login/start') return { type: 'chatgpt', loginId: 'login-1', authUrl: 'https://auth.example/start' };
+      return {};
+    });
+    let opened: string | null = null;
+    const out = ctrl.signIn((url) => { opened = url; }, new AbortController().signal);
+    await flush();
+    expect(opened).toBe('https://auth.example/start');
+    ctrl.onNotification('account/login/completed', { loginId: 'login-1', success: true, error: null });
+    await expect(out).resolves.toEqual({ ok: true });
+    expect(calls).toEqual([
+      { method: 'account/read', params: { refreshToken: false } },
+      { method: 'account/login/start', params: { type: 'chatgpt' } },
+    ]);
+  });
+
+  it('does not start a browser login when already signed in with ChatGPT', async () => {
+    const { ctrl, calls } = ctrlWith((method) => {
+      if (method === 'account/read') return { account: { type: 'chatgpt', email: 'a@b.com' } };
+      throw new Error(`unexpected ${method}`);
+    });
+    let opened = false;
+    const out = await ctrl.signIn(() => { opened = true; }, new AbortController().signal);
+    expect(out).toEqual({ ok: true });
+    expect(opened).toBe(false);
+    expect(calls).toEqual([{ method: 'account/read', params: { refreshToken: false } }]);
+  });
+
+  it('opens the device-code verification URL when that login shape is returned', async () => {
+    const { ctrl } = ctrlWith((method) => {
+      if (method === 'account/read') return { account: null };
+      if (method === 'account/login/start') {
+        return { type: 'chatgptDeviceCode', loginId: 'device-1', verificationUrl: 'https://auth.example/device', userCode: 'ABCD-EFGH' };
+      }
+      return {};
+    });
+    let opened: string | null = null;
+    const out = ctrl.signIn((url) => { opened = url; }, new AbortController().signal);
+    await flush();
+    expect(opened).toBe('https://auth.example/device');
+    ctrl.onNotification('account/login/completed', { loginId: 'device-1', success: true, error: null });
+    await expect(out).resolves.toEqual({ ok: true });
+  });
+
+  it('ignores completion notifications for a different pending login id', async () => {
+    const { ctrl } = ctrlWith((method) => {
+      if (method === 'account/read') return { account: null };
+      if (method === 'account/login/start') return { type: 'chatgpt', loginId: 'login-2', authUrl: 'https://auth.example/start' };
+      return {};
+    });
+    let settled = false;
+    const out = ctrl.signIn(() => {}, new AbortController().signal).then((r) => { settled = true; return r; });
+    await flush();
+    ctrl.onNotification('account/login/completed', { loginId: 'other-login', success: true, error: null });
+    await flush();
+    expect(settled).toBe(false);
+    ctrl.onNotification('account/login/completed', { loginId: 'login-2', success: true, error: null });
+    await expect(out).resolves.toEqual({ ok: true });
+  });
+});

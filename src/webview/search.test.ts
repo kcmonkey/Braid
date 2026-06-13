@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseQuery, boardSearchText, matchBoard, rankResults, extractSnippet } from './search';
+import { parseQuery, boardSearchText, matchBoard, rankResults, extractSnippet, withCollapsedRepMatches } from './search';
 import type { BoardData, BoardNodeT } from './merge';
 
 const noop = () => {};
@@ -185,5 +185,34 @@ describe('boardSearchText', () => {
     const p = segs.find((s) => s.field === 'prompt')!;
     const a = segs.find((s) => s.field === 'answer')!;
     expect(p.weight).toBeGreaterThan(a.weight);
+  });
+});
+
+describe('withCollapsedRepMatches — surface matches hidden inside collapsed groups', () => {
+  it('adds the collapsed representative when a folded board matches', () => {
+    const nodes = [
+      bn('rep', { prompt: 'rep', collapsedGraph: { hiddenIds: ['f1', 'f2'] } }),
+      bn('f1', { prompt: 'folded one' }),
+      bn('f2', { prompt: 'folded two' }),
+    ];
+    const out = withCollapsedRepMatches(nodes, new Set(['f2']));
+    expect(out.has('rep')).toBe(true);   // representative lit up because a folded board matched
+    expect(out.has('f2')).toBe(true);    // original hits preserved
+  });
+  it('does not add a representative whose folded boards do not match', () => {
+    const nodes = [
+      bn('rep', { collapsedGraph: { hiddenIds: ['f1'] } }),
+      bn('f1', {}),
+      bn('other', {}),
+    ];
+    const out = withCollapsedRepMatches(nodes, new Set(['other']));
+    expect(out.has('rep')).toBe(false);
+  });
+  it('returns the SAME set (identity) when nothing is added', () => {
+    const nodes = [bn('a', {}), bn('b', {})];
+    const matched = new Set(['a']);
+    expect(withCollapsedRepMatches(nodes, matched)).toBe(matched);   // no collapse → cheap identity for memo
+    const empty = new Set<string>();
+    expect(withCollapsedRepMatches(nodes, empty)).toBe(empty);
   });
 });
