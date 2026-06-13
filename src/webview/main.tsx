@@ -3897,10 +3897,20 @@ function App() {
   const setArchiveVisibility = useCallback((show: boolean, anchorId?: string | null) => {
     showArchivedRef.current = show;
     setShowArchived(show);
-    const synced = syncArchiveVisibility(nodesRef.current, show);
+    const before = nodesRef.current;
+    const synced = syncArchiveVisibility(before, show);
     if (!synced.changed) return;
     const newEdges = syncHiddenEdges(synced.nodes, edgesRef.current);
-    const anchor = anchorId ?? synced.nodes.find((n) => n.selected && !n.hidden)?.id ?? null;
+    // Anchor on a board that is on-screen BOTH before and after the toggle so the repack keeps it put.
+    // Showing archived un-hides boards carrying STALE positions; with a null anchor relayoutAnchored pins
+    // the bounding-box top-left over those stale positions and flings the whole graph off-canvas (same
+    // failure mode as the collapse-expand fix). Prefer the caller's anchor (reveal path → fitView follows),
+    // then the selected visible board, then any board that was visible before AND stays visible after.
+    const wasVisible = new Set(before.filter((n) => !n.hidden).map((n) => n.id));
+    const anchor = anchorId
+      ?? synced.nodes.find((n) => n.selected && !n.hidden)?.id
+      ?? synced.nodes.find((n) => !n.hidden && wasVisible.has(n.id))?.id
+      ?? null;
     const laid = relayoutAnchored(synced.nodes, newEdges, dirRef.current, anchor);
     nodesRef.current = laid;
     edgesRef.current = newEdges;
