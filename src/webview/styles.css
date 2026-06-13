@@ -263,6 +263,32 @@ body {
 .board__foldmeta { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .board__foldactions { flex: none; display: flex; align-items: center; gap: 6px; }
 
+/* Collapse PREVIEW frame (CollapseFrames overlay): a translucent box wrapping a preview-expanded collapse
+   group + a header chip. Rendered in the React Flow viewport portal (flow coords; scales/pans with the canvas).
+   The box sits BEHIND the nodes (z-index:-1) and is non-interactive; the header is a separate sibling that
+   paints on top in the empty band above the group. */
+.collapse-frame__box {
+  position: absolute; top: 0; left: 0; z-index: -1; pointer-events: none;
+  border: 1.5px dashed #6f6bd6; border-radius: 18px;
+  background: rgba(91,88,166,.07);
+  box-shadow: 0 0 0 1px rgba(91,88,166,.16) inset;
+}
+.collapse-frame__header {
+  position: absolute; top: 0; left: 0;
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 9px; pointer-events: auto; cursor: default;
+  background: rgba(31,30,48,.94); border: 1px solid #5b58a6; border-radius: 9px;
+  color: #cfccff; font-size: 12px; white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(0,0,0,.34);
+}
+.collapse-frame__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.collapse-frame__count { flex: none; color: var(--muted); }
+.collapse-frame__btn {
+  flex: none; font: inherit; font-size: 11px; line-height: 1; cursor: pointer;
+  color: #b7b4ff; background: #25243a; border: 1px solid #5b58a6; border-radius: 5px; padding: 3px 7px;
+}
+.collapse-frame__btn:hover { background: #302f4a; color: var(--text); }
+
 .board__head {
   display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px; cursor: pointer;
   background: linear-gradient(180deg,#37352f,var(--panel)); border-bottom: 1px solid var(--border-sub);
