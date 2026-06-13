@@ -555,13 +555,15 @@ describe('visual graph collapse', () => {
     expect(planCollapseSelection(nodes, edges, ['left2', 'right2'])).toEqual([]);
   });
 
-  it('rejects ambiguous endpoint selections with more than one lineage path', () => {
+  it('collapses a fork diamond (two paths to one terminal) into the terminal', () => {
+    // Not a unique line, but a single enclosed terminal → region collapse folds the whole diamond into it.
     const nodes = [node('root', 0), node('left', 1), node('right', 2), node('leaf', 3)];
     const edges = [
       forkEdge('root', 'left'), forkEdge('left', 'leaf'),
       forkEdge('root', 'right'), forkEdge('right', 'leaf'),
     ];
-    expect(planCollapseSelection(nodes, edges, ['root', 'leaf'])).toEqual([]);
+    expect(planCollapseSelection(nodes, edges, ['root', 'leaf']))
+      .toEqual([{ targetId: 'leaf', hiddenIds: ['root', 'left', 'right'] }]);
   });
 
   it('collapses only the common prefix when the selected span crosses a branch point', () => {
@@ -662,10 +664,38 @@ describe('visual graph collapse', () => {
     expect(g.nodes.find((n) => n.id === 'b')!.hidden).toBeUndefined();
   });
 
-  it('rejects collapse across a merge edge', () => {
+  it('collapses a fully-selected merge diamond into the merge node', () => {
+    // a→m and b→m are merge edges (m merges two branches). The whole diamond folds into m, which stays
+    // visible as the representative. (user request: collapse may span merge edges / merge termini.)
     const nodes = [node('a', 0), node('b', 1), node('m', 2, { merged: true })];
     const edges = [mergeEdge('a', 'm'), mergeEdge('b', 'm')];
-    expect(planCollapseSelection(nodes, edges, ['a', 'm'])).toEqual([]);
+    expect(planCollapseSelection(nodes, edges, ['a', 'b', 'm']))
+      .toEqual([{ targetId: 'm', hiddenIds: ['a', 'b'] }]);
+  });
+
+  it('collapses a merge diamond with branch chains into the merge node (auto-fills interior)', () => {
+    // root → d1 → d2 (one branch); root → r1 → r2 (other branch); d2 & r2 merge into m; m → tail.
+    const nodes = ['root', 'd1', 'd2', 'r1', 'r2', 'm', 'tail'].map((id, i) => node(id, i, id === 'm' ? { merged: true } : {}));
+    const edges = [
+      forkEdge('root', 'd1'), forkEdge('d1', 'd2'),
+      forkEdge('root', 'r1'), forkEdge('r1', 'r2'),
+      mergeEdge('d2', 'm'), mergeEdge('r2', 'm'),
+      forkEdge('m', 'tail'),
+    ];
+    // Selecting just the endpoints (root + m) auto-fills the whole enclosed diamond, terminal m stays visible.
+    expect(planCollapseSelection(nodes, edges, ['root', 'm']))
+      .toEqual([{ targetId: 'm', hiddenIds: ['root', 'd1', 'd2', 'r1', 'r2'] }]);
+  });
+
+  it('rejects a region collapse that would orphan a visible side branch off an interior board', () => {
+    const nodes = ['root', 'd1', 'd2', 'r1', 'r2', 'm', 'side'].map((id, i) => node(id, i, id === 'm' ? { merged: true } : {}));
+    const edges = [
+      forkEdge('root', 'd1'), forkEdge('d1', 'd2'),
+      forkEdge('root', 'r1'), forkEdge('r1', 'r2'),
+      mergeEdge('d2', 'm'), mergeEdge('r2', 'm'),
+      forkEdge('d2', 'side'), // visible side branch off d2, not in the region → folding d2 would orphan it
+    ];
+    expect(planCollapseSelection(nodes, edges, ['root', 'd1', 'd2', 'r1', 'r2', 'm'])).toEqual([]);
   });
 });
 

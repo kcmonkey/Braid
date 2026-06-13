@@ -226,9 +226,13 @@ function toolNameInput(item: any): { name: string; input: Record<string, unknown
     case 'plan':
       return { name: 'Plan', input: { text: item.text ?? '' } };
     // P2 display mappings (capability-layer): no contract change; these flow through existing cards.
-    case 'dynamicToolCall':
+    case 'dynamicToolCall': {
+      if (item.namespace === 'braid' && (item.tool === 'AskUserQuestion' || item.tool === 'request_user_input')) {
+        return { name: 'AskUserQuestion', input: (item.arguments && typeof item.arguments === 'object' ? item.arguments : {}) as Record<string, unknown> };
+      }
       return { name: typeof item.tool === 'string' && item.tool ? item.tool : 'DynamicTool',
         input: (item.arguments && typeof item.arguments === 'object' ? item.arguments : {}) as Record<string, unknown> };
+    }
     case 'collabAgentToolCall':
       // Codex subagent ops run in receiver threads. We cannot synthesize Claude-style child parentId steps
       // from this parent stream, but the parent card should still read as an Agent rather than a raw tool.

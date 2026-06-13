@@ -151,6 +151,15 @@ describe('reduceCodexNotification — P2 display item mappings (capability-layer
     expect(tr.ev).toEqual({ toolUseId: 'd1', content: 'done', isError: false });
   });
 
+  it('Braid request_user_input dynamicToolCall renders as the AskUserQuestion card', () => {
+    const { events } = run([
+      turnStarted(),
+      ['item/started', { item: { type: 'dynamicToolCall', id: 'ask1', namespace: 'braid', tool: 'request_user_input', arguments: { questions: [{ id: 'q1', question: 'Pick?', options: [{ label: 'A' }] }] }, status: 'inProgress' } }],
+    ]);
+    const tu = events.find((e) => e.t === 'toolUse') as Extract<CodexEvent, { t: 'toolUse' }>;
+    expect(tu.ev).toMatchObject({ id: 'ask1', name: 'AskUserQuestion', input: { questions: [{ id: 'q1', question: 'Pick?', options: [{ label: 'A' }] }] } });
+  });
+
   it('dynamicToolCall failure (success=false) → isError', () => {
     const { events } = run([
       turnStarted(),

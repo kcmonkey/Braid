@@ -33,6 +33,8 @@ const APP_SERVER_ARGS = ['app-server'];
 const APP_SERVER_ARGS_WITH_HOOK_TRUST = ['--dangerously-bypass-hook-trust', 'app-server'];
 const BRAID_ASK_TOOL_NAMESPACE = 'braid';
 const BRAID_ASK_TOOL_NAME = 'AskUserQuestion';
+const BRAID_REQUEST_USER_INPUT_TOOL_NAME = 'request_user_input';
+const BRAID_ASK_TOOL_NAMES = new Set([BRAID_ASK_TOOL_NAME, BRAID_REQUEST_USER_INPUT_TOOL_NAME]);
 
 /** Map our (Claude-flavored) permissionMode → Codex {approvalPolicy, sandbox}. Codex app-server exposes the
  * same effect as `--dangerously-bypass-approvals-and-sandbox` per thread via approvalPolicy=never +
@@ -115,11 +117,11 @@ function buildUserInput(prompt: string, images?: ImageInput[]): { input: any[]; 
   return { input, temps };
 }
 
-function braidAskUserDynamicTool(): Record<string, unknown> {
+function braidAskUserDynamicTool(name = BRAID_ASK_TOOL_NAME): Record<string, unknown> {
   return {
     namespace: BRAID_ASK_TOOL_NAMESPACE,
-    name: BRAID_ASK_TOOL_NAME,
-    description: 'Ask the user a short structured question and wait for their answer before continuing.',
+    name,
+    description: 'Ask the user a short structured question and wait for their answer before continuing. Use this when you need clarification, a choice, or missing information from the user in any permission mode.',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -160,6 +162,15 @@ function braidAskUserDynamicTool(): Record<string, unknown> {
   };
 }
 
+function braidAskUserDynamicTools(): Record<string, unknown>[] {
+  return [
+    // Match Codex's public/official wording so prompts that ask for request_user_input can discover it.
+    braidAskUserDynamicTool(BRAID_REQUEST_USER_INPUT_TOOL_NAME),
+    // Keep the Claude-compatible name as an alias; both names route to the same neutral onUserInput channel.
+    braidAskUserDynamicTool(BRAID_ASK_TOOL_NAME),
+  ];
+}
+
 function asQuestions(v: unknown): UserInputQuestion[] {
   return parseAskUserQuestions(v && typeof v === 'object' ? v as Record<string, unknown> : {});
 }
@@ -167,6 +178,19 @@ function asQuestions(v: unknown): UserInputQuestion[] {
 function isDynamicToolsUnsupported(e: any): boolean {
   const msg = String(e?.message ?? e ?? '').toLowerCase();
   return msg.includes('dynamictools') || msg.includes('dynamic_tools') || msg.includes('experimental');
+}
+
+async function requestThreadWithBraidAskTool(rpc: CodexRpc, method: string, params: Record<string, unknown>): Promise<any> {
+  const withTool = { ...params, dynamicTools: braidAskUserDynamicTools() };
+  try {
+    return await rpc.request(method, withTool);
+  } catch (e: any) {
+    if (!isDynamicToolsUnsupported(e)) throw e;
+    // Older app-server builds or some attach methods may reject dynamicTools. Fall back so Codex still works;
+    // those threads just won't have the Braid model-invoked AskUserQuestion tool.
+    console.warn(`[Braid] codex dynamicTools unavailable for ${method}; continuing without active AskUserQuestion:`, e?.message ?? e);
+    return rpc.request(method, params);
+  }
 }
 
 function isCollaborationModeUnsupported(e: any): boolean {
@@ -280,7 +304,7 @@ export class CodexAdapter implements Engine {
    * and no truncation is needed. (Earlier fork+rollback was a no-op for context and is removed.) (Codex
    * branching bug, 2026-06-12) */
   private async forkThread(rpc: CodexRpc, threadId: string, startOpts: Record<string, unknown>): Promise<any> {
-    return (await rpc.request('thread/fork', { threadId, ...startOpts }))?.thread;
+    return (await requestThreadWithBraidAskTool(rpc, 'thread/fork', { threadId, ...startOpts }))?.thread;
   }
 
   // ---- main turn ----
@@ -373,7 +397,7 @@ export class CodexAdapter implements Engine {
         return { answers: out };
       }
       if (method === 'item/tool/call') {
-        if (params?.namespace === BRAID_ASK_TOOL_NAMESPACE && params?.tool === BRAID_ASK_TOOL_NAME) {
+        if (params?.namespace === BRAID_ASK_TOOL_NAMESPACE && BRAID_ASK_TOOL_NAMES.has(params?.tool)) {
           // This is Codex's model-invoked analogue of Claude AskUserQuestion. We register it as a dynamic
           // tool on fresh threads; app-server emits the dynamicToolCall item first, so the reducer has already
           // rendered the AskUserQuestion card from params.arguments. Here we only block on the neutral answer
@@ -437,23 +461,12 @@ export class CodexAdapter implements Engine {
       const { approvalPolicy, sandbox } = approvalAndSandbox(initialCfg.permissionMode);
       const startOpts: Record<string, unknown> = { cwd: req.cwd, approvalPolicy, sandbox };
       if (initialCfg.model) startOpts.model = initialCfg.model;
-      const startFreshThread = async (): Promise<any> => {
-        const optsWithDynamicTools = { ...startOpts, dynamicTools: [braidAskUserDynamicTool()] };
-        try {
-          return (await liveRpc.request('thread/start', optsWithDynamicTools))?.thread;
-        } catch (e: any) {
-          if (!isDynamicToolsUnsupported(e)) throw e;
-          // Older app-server builds do not accept the experimental dynamicTools field. Fall back to a normal
-          // thread so Codex still works; it just won't have the model-invoked AskUserQuestion dynamic tool.
-          console.warn('[Braid] codex dynamicTools unavailable; continuing without active AskUserQuestion:', e?.message ?? e);
-          return (await liveRpc.request('thread/start', startOpts))?.thread;
-        }
-      };
+      const startFreshThread = async (): Promise<any> => (await requestThreadWithBraidAskTool(liveRpc, 'thread/start', startOpts))?.thread;
       let thread: any;
       let turnPrompt = req.prompt;
       try {
         if (attach.kind === 'resume') {
-          thread = (await liveRpc.request('thread/resume', { threadId: attach.session.raw, ...startOpts }))?.thread;
+          thread = (await requestThreadWithBraidAskTool(liveRpc, 'thread/resume', { threadId: attach.session.raw, ...startOpts }))?.thread;
         } else if (attach.kind === 'fork') {
         // Whole-thread fork only — Codex has no working mid-point fork (attach.at is ignored). Correctness
         // relies on per-board threads (midpointFork=false) keeping the source = the parent's own ancestry.

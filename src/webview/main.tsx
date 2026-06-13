@@ -5725,7 +5725,7 @@ function App() {
             className="btn collapse"
             onClick={collapseSelected}
             disabled={selectionBusy || selectionHasArchived || !collapsePlans.length}
-            title={collapsePlans.length && !selectionHasArchived ? 'Collapse this ancestor span; boards between selections are included' : 'Collapse requires one visible ancestor line with a single last board'}
+            title={collapsePlans.length && !selectionHasArchived ? 'Collapse the selected span into its last board; boards between selections (and parallel branches) are included' : 'Collapse needs the selection to share one last board (single terminal); branches that rejoin are OK'}
           >
             Collapse span
           </button>
@@ -5747,7 +5747,7 @@ function App() {
           ) : null}
           {!collapsePlans.length && !selectionBusy && !selectionHasArchived && (
             <span className="mergebar__count mergebar__warn">
-              Collapse needs one ancestor line with a single last board.
+              Collapse needs the selection to share one last board (single terminal).
             </span>
           )}
         </div>

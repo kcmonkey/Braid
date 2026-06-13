@@ -632,6 +632,48 @@ function visibleLineageParents(edges: Edge[], byId: Map<string, BoardNodeT>): Ma
   return out;
 }
 
+// Real-edge adjacency: fork + compact + MERGE (collapse proxies and hidden edges excluded; both endpoints
+// visible). The lineage maps above intentionally skip merge edges; REGION collapse needs merge so a merged
+// diamond's parents count as reaching the merge node (which becomes the collapsed representative).
+function visibleRealChildren(edges: Edge[], byId: Map<string, BoardNodeT>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const e of edges) {
+    if (e.hidden || isCollapseEdge(e)) continue;
+    const source = byId.get(e.source);
+    const target = byId.get(e.target);
+    if (!source || !target || source.hidden || target.hidden) continue;
+    const kids = out.get(e.source) ?? [];
+    kids.push(e.target);
+    out.set(e.source, kids);
+  }
+  return out;
+}
+
+function visibleRealParents(edges: Edge[], byId: Map<string, BoardNodeT>): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const e of edges) {
+    if (e.hidden || isCollapseEdge(e)) continue;
+    const source = byId.get(e.source);
+    const target = byId.get(e.target);
+    if (!source || !target || source.hidden || target.hidden) continue;
+    const ps = out.get(e.target) ?? [];
+    ps.push(e.source);
+    out.set(e.target, ps);
+  }
+  return out;
+}
+
+/** All nodes reachable from any of `starts` over `adj` (the starts themselves included). */
+function reachSet(adj: Map<string, string[]>, starts: string[]): Set<string> {
+  const seen = new Set<string>(starts);
+  const stack = [...starts];
+  while (stack.length) {
+    const cur = stack.pop()!;
+    for (const n of adj.get(cur) ?? []) if (!seen.has(n)) { seen.add(n); stack.push(n); }
+  }
+  return seen;
+}
+
 function reachableFrom(children: Map<string, string[]>, from: string, to: string): boolean {
   const seen = new Set<string>();
   const stack = [...(children.get(from) ?? [])];
@@ -774,11 +816,50 @@ function autoCollapsePlanFromPathSpan(
   return collapsePlanFromPathSpan(path, startIndex, targetIndex, edges, byId);
 }
 
+/**
+ * Region collapse (fork diamonds + merge termini): when the selection is NOT one unique ancestor line but
+ * still encloses a sub-DAG with a SINGLE terminal — every selected board reaches it over real fork/compact/
+ * MERGE edges — fold the whole enclosed interior into that terminal. The interior is auto-filled (boards on
+ * any real path between a selected board and the terminal), so selecting the endpoints is enough. The terminal
+ * stays visible as the representative; `collapseWouldDetachVisibleBranch` still guarantees no visible board
+ * outside the region is orphaned (a side branch off an interior board, or external merge provenance, rejects
+ * the fold). Collapse is visual-only, so folding into a merge node never touches its session/lineage. Pure.
+ */
+function planCollapseRegion(edges: Edge[], selectedIds: string[], byId: Map<string, BoardNodeT>): CollapsePlan[] {
+  const selected = visibleSelectedIds(selectedIds, byId);
+  if (selected.length < 2) return [];
+  const realChildren = visibleRealChildren(edges, byId);
+  const realParents = visibleRealParents(edges, byId);
+  const reaches = (a: string, b: string) => a !== b && reachableFrom(realChildren, a, b);
+
+  // Exactly one terminal: a selected board that reaches no OTHER selected board, and everyone reaches it.
+  const terminals = selected.filter((id) => !selected.some((o) => reaches(id, o)));
+  if (terminals.length !== 1) return [];
+  const targetId = terminals[0];
+  if (!selected.every((id) => id === targetId || reaches(id, targetId))) return [];
+  const target = byId.get(targetId);
+  if (!target || target.hidden) return [];
+
+  // Enclosed interior = boards reachable from a selected board AND ancestors-or-self of the terminal.
+  const downFromSelected = reachSet(realChildren, selected);
+  const upFromTerm = reachSet(realParents, [targetId]);
+  const hiddenIds = [...downFromSelected]
+    .filter((id) => id !== targetId && upFromTerm.has(id) && !byId.get(id)?.hidden)
+    .sort((a, b) => (byId.get(a)?.data.seq ?? 0) - (byId.get(b)?.data.seq ?? 0));
+  if (!hiddenIds.length) return [];
+  if (collapseWouldDetachVisibleBranch(edges, byId, targetId, hiddenIds)) return [];
+  const existing = target.data.collapsedGraph?.hiddenIds ?? [];
+  return hiddenIds.some((id) => !existing.includes(id)) ? [{ targetId, hiddenIds }] : [];
+}
+
 export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], selectedIds: string[]): CollapsePlan[] {
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
+  // A clean single ancestor line → the existing span logic (with branch-point back-off). A selection that is
+  // NOT a unique line — a fork diamond or a merge terminus — falls through to region collapse (user request:
+  // fold a fully-enclosed selection that has one terminal, even across branches / into a merge node).
   const ordered = materializedSelectedLine(edges, selectedIds, byId);
-  if (!ordered) return [];
-  return collapsePlanForMaterializedLine(ordered, edges, byId);
+  if (ordered) return collapsePlanForMaterializedLine(ordered, edges, byId);
+  return planCollapseRegion(edges, selectedIds, byId);
 }
 
 function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCollapsePolicy): CollapsePlan[] {
