@@ -879,6 +879,19 @@ describe('auto visual graph collapse', () => {
     ]);
   });
 
+  it('folds a long run that begins at a merge node, keeping the merge node visible', () => {
+    // p1→m and p2→m (merge); m→a→b→c→d→e (long run after the merge). The run's top is the merge node m,
+    // which can't be hidden (its parents p1/p2 would be orphaned). Auto-collapse must back off the fold
+    // start and still compact the run, leaving m visible. (user-reported: long post-merge chain never folded)
+    const nodes = ['p1', 'p2', 'm', 'a', 'b', 'c', 'd', 'e'].map((id, i) => node(id, i, id === 'm' ? { merged: true } : {}));
+    const edges = [
+      mergeEdge('p1', 'm'), mergeEdge('p2', 'm'),
+      forkEdge('m', 'a'), forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'),
+    ];
+    expect(planAutoCollapseAfterDone(nodes, edges, 'e', policy))
+      .toEqual([{ targetId: 'c', hiddenIds: ['a', 'b'] }]);
+  });
+
   it('does not auto-collapse through merge-only ancestry or unfinished boards', () => {
     const nodes = [node('a', 0), node('b', 1), node('m', 2, { merged: true }), node('live', 3, { status: 'streaming' })];
     const edges = [mergeEdge('a', 'm'), mergeEdge('b', 'm'), forkEdge('m', 'live')];

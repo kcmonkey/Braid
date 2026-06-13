@@ -910,7 +910,15 @@ function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCo
         const segTrigger = threshold + (alreadyCollapsed ? leeway : 0);
         if (segmentLength > segTrigger) {
           const targetIndex = segmentEnd - threshold + 1;
-          add(autoCollapsePlanFromPathSpan(path, segmentStart, targetIndex, edges, byId));
+          // Fold [start, targetIndex), keeping `threshold` boards at the end. If the front of the span can't
+          // be hidden — e.g. the segment BEGINS at a merge node, whose external parent branches would be
+          // orphaned (collapseWouldDetachVisibleBranch) — advance the start until the span is safe, so the
+          // unhideable node stays visible while the rest of the over-long run still compacts. Without this
+          // back-off a run that starts at a merge node never auto-collapses at all. (user-reported)
+          for (let start = segmentStart; start < targetIndex; start += 1) {
+            const plan = autoCollapsePlanFromPathSpan(path, start, targetIndex, edges, byId);
+            if (plan.length) { add(plan); break; }
+          }
         }
       }
       if (barrier) segmentStart = i + 1;
