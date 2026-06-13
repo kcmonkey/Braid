@@ -5181,7 +5181,13 @@ function App() {
     const removedNodes = before.filter((n) => gone.has(n.id));
     const removedEdges = beforeEdges.filter((e) => gone.has(e.source) || gone.has(e.target));
     // Edge contraction: reconnect survivors to grandparents, repoint direct children's session pointers.
-    const { nodes: contracted, edges: newEdges, affected } = contractDelete(before, beforeEdges, gone);
+    const { nodes: contracted, edges: contractedEdges, affected } = contractDelete(before, beforeEdges, gone);
+    // contractDelete rebuilds the edge list from the real fork/merge/compact edges only — it drops the
+    // visual `collapse` proxy edges and the per-edge hidden flags (makeEdge yields fresh, unhidden edges).
+    // Re-derive both via syncHiddenEdges, exactly like every other graph mutation, so a SURVIVING collapsed
+    // representative keeps its proxy edge: without it the rep has no visible incoming edge and layout floats
+    // it to the graph root (the "deleting a leaf makes a collapsed node show as root" bug).
+    const newEdges = syncHiddenEdges(contracted, contractedEdges);
     const beforeEdgeIds = new Set(beforeEdges.map((e) => e.id));
     const addedEdgeIds = newEdges.filter((e) => !beforeEdgeIds.has(e.id)).map((e) => e.id);
     if (removedNodes.length) {
@@ -5255,7 +5261,9 @@ function App() {
     const restoredEdges = snap.removedEdges.filter(
       (e) => validIds.has(e.source) && validIds.has(e.target) && !keptIds.has(e.id),
     );
-    const newEdges = kept.concat(restoredEdges);
+    // Re-derive hidden flags + collapse proxy edges for the restored graph (same SSOT as every mutation),
+    // so undoing a delete that touched a collapsed span doesn't leave a stale or stranded representative.
+    const newEdges = syncHiddenEdges(allNodes, kept.concat(restoredEdges));
     const laid = autoLayout(allNodes, newEdges);
     nodesRef.current = laid;
     edgesRef.current = newEdges;

@@ -616,6 +616,35 @@ describe('visual graph collapse', () => {
     expect(synced.find((e) => e.source === 'shared' && e.target === 'sibling')!.hidden).toBeUndefined();
   });
 
+  it('keeps a collapsed representative anchored after deleting an unrelated descendant', () => {
+    // Repro for "deleting a leaf makes a collapsed node show as root": contractDelete rebuilds the edge
+    // list from real fork/merge/compact edges only (it drops the visual collapse proxy), so the delete
+    // path MUST re-run syncHiddenEdges or the representative loses its only visible incoming edge.
+    const base = [node('root', 0), node('shared', 1), node('spine', 2), node('leaf', 3), node('tail', 4), node('sibling', 5)];
+    const baseEdges = [
+      forkEdge('root', 'shared'),
+      forkEdge('shared', 'spine'),
+      forkEdge('spine', 'leaf'),
+      forkEdge('leaf', 'tail'),
+      forkEdge('shared', 'sibling'),
+    ];
+    // Collapse spine→leaf: spine hides, leaf is the representative, proxy shared→leaf appears.
+    const collapsed = collapseSelection(base, baseEdges, ['spine', 'leaf']);
+    const edges0 = syncHiddenEdges(collapsed.nodes, baseEdges);
+    expect(edges0.find((e) => e.source === 'shared' && e.target === 'leaf')?.data?.kind).toBe('collapse');
+
+    // Delete an unrelated descendant leaf → contraction drops the proxy edge entirely.
+    const del = contractDelete(collapsed.nodes, edges0, new Set(['tail']));
+    expect(del.edges.some((e) => e.data?.kind === 'collapse')).toBe(false);
+
+    // syncHiddenEdges regenerates the proxy + re-hides the folded span → the rep stays anchored.
+    const synced = syncHiddenEdges(del.nodes, del.edges);
+    const proxy = synced.find((e) => e.source === 'shared' && e.target === 'leaf');
+    expect(proxy?.data?.kind).toBe('collapse');
+    expect(proxy?.hidden).toBeUndefined();
+    expect(synced.find((e) => e.source === 'shared' && e.target === 'spine')!.hidden).toBe(true);
+  });
+
   it('preview-expands a collapsed representative, then returns it to collapsed state', () => {
     const nodes = [
       node('a', 0),
