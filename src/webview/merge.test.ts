@@ -757,16 +757,36 @@ describe('auto visual graph collapse', () => {
       .toEqual([{ targetId: 'b', hiddenIds: ['a'] }]);
   });
 
-  it('uses leeway before folding, then folds back to the visible threshold', () => {
+  it('folds a never-collapsed segment at the threshold, ignoring leeway', () => {
+    // User-reported bug: leeway must NOT delay the FIRST collapse. A 4-board never-collapsed chain with
+    // leeway 2 still folds at the threshold (keep 3, including the new representative).
     const leewayPolicy = { enabled: true, threshold: 3, leeway: 2 };
-    const under = ['a', 'b', 'c', 'd', 'e'].map((id, i) => node(id, i));
-    const underEdges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e')];
-    expect(planAutoCollapseAfterDone(under, underEdges, 'e', leewayPolicy)).toEqual([]);
+    const nodes = ['a', 'b', 'c', 'd'].map((id, i) => node(id, i));
+    const edges = [forkEdge('a', 'b'), forkEdge('b', 'c'), forkEdge('c', 'd')];
+    expect(planAutoCollapseAfterDone(nodes, edges, 'd', leewayPolicy))
+      .toEqual([{ targetId: 'b', hiddenIds: ['a'] }]);
+  });
 
-    const over = ['a', 'b', 'c', 'd', 'e', 'f'].map((id, i) => node(id, i));
-    const overEdges = [...underEdges, forkEdge('e', 'f')];
-    expect(planAutoCollapseAfterDone(over, overEdges, 'f', leewayPolicy))
-      .toEqual([{ targetId: 'd', hiddenIds: ['a', 'b', 'c'] }]);
+  it('applies leeway only to a segment that already has a collapsed representative', () => {
+    const leewayPolicy = { enabled: true, threshold: 3, leeway: 2 };
+    // `rep` already carries a collapsed node (hidden `x`). Visible run rep,c,d,e,f = threshold+leeway (5) →
+    // within the hysteresis band, so it does NOT re-fold (the representative stays put).
+    const within = [
+      { ...node('x', 0), hidden: true },
+      node('rep', 1, { collapsedGraph: { hiddenIds: ['x'] } }),
+      node('c', 2), node('d', 3), node('e', 4), node('f', 5),
+    ];
+    const withinEdges = [
+      { ...forkEdge('x', 'rep'), hidden: true },
+      forkEdge('rep', 'c'), forkEdge('c', 'd'), forkEdge('d', 'e'), forkEdge('e', 'f'),
+    ];
+    expect(planAutoCollapseAfterDone(within, withinEdges, 'f', leewayPolicy)).toEqual([]);
+
+    // One more board → 6 > threshold+leeway (5) → re-fold back to the threshold; the rep moves deeper.
+    const over = [...within, node('g', 6)];
+    const overEdges = [...withinEdges, forkEdge('f', 'g')];
+    expect(planAutoCollapseAfterDone(over, overEdges, 'g', leewayPolicy))
+      .toEqual([{ targetId: 'e', hiddenIds: ['rep', 'c', 'd'] }]);
   });
 
   it('folds the front of an over-long linear lineage and keeps the recent window visible', () => {

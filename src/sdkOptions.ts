@@ -40,7 +40,8 @@ export interface CanvasConfig {
   autoCollapseEnabled: boolean;
   // Visible board budget per branch segment; the collapsed representative counts as one visible board.
   autoCollapseThreshold: number;
-  // Extra visible boards tolerated beyond the target before auto-collapse folds back to the target.
+  // Extra visible boards tolerated before auto-collapse RE-folds a segment that already has a collapsed
+  // representative (hysteresis). A never-collapsed segment ignores leeway and folds once it passes the target.
   autoCollapseLeeway: number;
   // Fisheye LOD (decisions.md 2026-06-09): when true, selecting a board expands it AND its whole
   // ancestor lineage to detail; when false, only the selected board itself. Webview-only display behavior.

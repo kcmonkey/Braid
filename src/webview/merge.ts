@@ -577,7 +577,9 @@ export interface AutoCollapsePolicy {
   enabled: boolean;
   /** Visible-board budget per branch segment; the collapsed representative counts as one visible board. */
   threshold: number;
-  /** Extra visible boards tolerated before folding back to the threshold. */
+  /** Extra visible boards tolerated before RE-folding a segment that ALREADY has a collapsed
+   * representative (hysteresis so the rep doesn't move every turn). A never-collapsed segment ignores
+   * leeway and folds as soon as it exceeds `threshold`. */
   leeway: number;
 }
 
@@ -782,7 +784,6 @@ export function planCollapseSelection(nodes: BoardNodeT[], edges: Edge[], select
 function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCollapsePolicy): CollapsePlan[] {
   const threshold = Math.max(2, Math.floor(policy.threshold || 0));
   const leeway = Math.max(0, Math.floor(policy.leeway || 0));
-  const triggerLength = threshold + leeway;
   const byId = new Map(nodes.map((n) => [n.id, n] as const));
   const children = visibleLineageChildren(edges, byId);
   const parents = visibleLineageParents(edges, byId);
@@ -801,14 +802,17 @@ function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCo
   const leaves = visibleDone.filter((n) => (children.get(n.id) ?? []).length === 0);
   for (const leaf of leaves) {
     const path = uniqueVisibleLineageTo(leaf.id, byId, parents);
-    if (!path || path.length <= triggerLength) continue;
+    if (!path || path.length <= threshold) continue;
     const isBranchPoint = (idx: number) => idx < path.length - 1 && (children.get(path[idx])?.length ?? 0) > 1;
 
     // Fold over-long visible runs anywhere in the graph, not just on the branch that just completed.
-    // The leeway creates hysteresis: a segment may drift above the target length for a few turns, then
-    // collapse once back to the target window instead of moving the representative on every completion.
-    // A branch point ends the incoming segment and counts against its visible budget; child limbs start
-    // after it so sibling branch heads stay visible and edge routing remains unambiguous.
+    // `leeway` is hysteresis that applies ONLY to a segment that ALREADY holds a collapsed representative:
+    // such a segment tolerates `leeway` extra visible boards before re-folding, so the representative does
+    // not move on every completed turn. A segment that has NEVER been collapsed folds as soon as it exceeds
+    // `threshold` (the visible "keep N" budget, which counts the collapsed representative) — so previously
+    // un-collapsed history in a long conversation gets folded promptly. (user-reported: leeway must not
+    // block the FIRST collapse). A branch point ends the incoming segment and counts against its visible
+    // budget; child limbs start after it so sibling branch heads stay visible and edge routing stays clear.
     let segmentStart = 0;
     for (let i = 0; i <= path.length; i += 1) {
       const atEnd = i === path.length;
@@ -818,7 +822,12 @@ function bestAutoCollapsePlan(nodes: BoardNodeT[], edges: Edge[], policy: AutoCo
       const segmentEnd = barrier ? i : path.length - 1;
       if (segmentEnd >= segmentStart) {
         const segmentLength = segmentEnd - segmentStart + 1;
-        if (segmentLength > triggerLength) {
+        let alreadyCollapsed = false;
+        for (let k = segmentStart; k <= segmentEnd; k += 1) {
+          if (byId.get(path[k])?.data.collapsedGraph) { alreadyCollapsed = true; break; }
+        }
+        const segTrigger = threshold + (alreadyCollapsed ? leeway : 0);
+        if (segmentLength > segTrigger) {
           const targetIndex = segmentEnd - threshold + 1;
           add(autoCollapsePlanFromPathSpan(path, segmentStart, targetIndex, edges, byId));
         }

@@ -2198,7 +2198,7 @@ function SettingsPanel({ config, onChange, resolvedModel, onClose, onOpenMcp, ac
             onChange={(e) => onChange({ autoCollapseThreshold: Math.max(2, Math.min(64, Math.floor(Number(e.target.value) || 3))) })}
           />
         </label>
-        <label className={`settings__row ${config.autoCollapseEnabled ? '' : 'settings__gated'}`} title="Extra visible boards allowed before auto-collapse folds the segment back to the target length.">
+        <label className={`settings__row ${config.autoCollapseEnabled ? '' : 'settings__gated'}`} title="Extra visible boards tolerated before RE-folding a segment that already has a collapsed node. Never-collapsed history folds as soon as it passes the threshold, regardless of leeway.">
           <span className="settings__lbl">Auto-collapse leeway</span>
           <input
             type="number" min={0} max={32} value={config.autoCollapseLeeway} disabled={!config.autoCollapseEnabled}

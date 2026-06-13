@@ -89,7 +89,7 @@
           "default": 2,
           "minimum": 0,
           "maximum": 32,
-          "markdownDescription": "Extra visible boards allowed beyond `autoCollapseThreshold` before auto-collapse runs. When it runs, it folds back to the threshold, so leeway prevents moving the collapsed node on every completed turn. Default `2`."
+          "markdownDescription": "Extra visible boards tolerated before auto-collapse RE-folds a segment that **already has a collapsed node** (hysteresis so the collapsed representative doesn't move on every completed turn). A segment that has **never** been collapsed folds as soon as it passes `autoCollapseThreshold`, regardless of leeway. Default `2`."
         },
         "braid.expandAncestorsOnSelect": {
           "type": "boolean",
