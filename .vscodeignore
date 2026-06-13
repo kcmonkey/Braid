@@ -8,6 +8,7 @@ tsconfig.json
 
 # Repo / agent infra — not part of the runtime
 .claude/**
+.codex/**
 scripts/**
 media/demo/**
 mockups/**
